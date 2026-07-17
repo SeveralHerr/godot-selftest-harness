@@ -49,6 +49,18 @@ of it from scripts — and Claude Code can do the same to check its own changes.
 > reopen it so the editor picks up (and doesn't clobber) the edited
 > `project.godot`.
 
+### Project `CLAUDE.md`
+
+Scaffolding also creates or updates the project's `CLAUDE.md` with a delimited
+harness section — bounded by `<!-- BEGIN godot-selftest-harness -->` and
+`<!-- END godot-selftest-harness -->` — so Claude Code in that project knows the
+harness exists and how to drive it. Re-scaffolding refreshes the section in place
+(matched by those markers), so it's idempotent and never duplicated; content
+outside the markers is left untouched, and an existing `CLAUDE.md` without them
+just gets the section appended. The section is intentionally lean and
+reference-style because `CLAUDE.md` is always-on context — it points at `/verify`,
+`/scaffold-godot-harness`, and this README rather than restating them.
+
 ## The file-based DevTools bridge
 
 The `DevTools` autoload globalizes the `user://` paths, then polls a command

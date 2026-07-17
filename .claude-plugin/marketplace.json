@@ -1,0 +1,14 @@
+{
+  "name": "godot-selftest-harness",
+  "owner": {
+    "name": "jherr"
+  },
+  "plugins": [
+    {
+      "name": "godot-selftest-harness",
+      "source": "./",
+      "description": "Game-agnostic self-testing harness for Godot 4.x: a file-based DevTools automation bridge, headless lint/test runners, and a diff-aware /verify workflow.",
+      "keywords": ["godot", "gdscript", "testing", "automation", "devtools", "headless", "ci", "verify"]
+    }
+  ]
+}

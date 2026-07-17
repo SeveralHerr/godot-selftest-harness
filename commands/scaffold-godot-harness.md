@@ -51,7 +51,7 @@ Read these keys from `project.godot` (do **not** write them into any file):
 - `run/main_scene` — used in step 7.
 
 Use these to compute and later report the exact `user://` directory the Python
-client polls (see step 11). The default per-platform Godot userdata dir is:
+client polls (see step 12). The default per-platform Godot userdata dir is:
 
 - macOS: `~/Library/Application Support/Godot/app_userdata/<name>/`
 - Linux: `~/.local/share/godot/app_userdata/<name>/`
@@ -165,7 +165,65 @@ Detect:
 Set `main_scene` and `hud_layer_name` from detection; leave the rest at defaults
 unless the project already customized them.
 
-## Step 8 — Wire the DevTools autoload (idempotent)
+## Step 8 — Install/refresh the CLAUDE.md guidance section
+
+Create or update `<ROOT>/CLAUDE.md` so future Claude sessions know the harness
+exists and how to drive it. The full section body — including its delimiter
+markers — lives in `${CLAUDE_PLUGIN_ROOT}/templates/CLAUDE.harness.md`. Its first
+and last lines are exactly:
+
+```
+<!-- BEGIN godot-selftest-harness -->
+<!-- END godot-selftest-harness -->
+```
+
+Apply this **merge strategy** (fully idempotent — re-running never duplicates the
+section and never clobbers the user's own `CLAUDE.md` content):
+
+1. **No `CLAUDE.md`** → create it containing exactly the template contents.
+2. **Exists with the BEGIN marker** → replace everything between the BEGIN and
+   END markers (inclusive) with the current template contents.
+3. **Exists without the marker** → append a blank line plus the template
+   contents to the end; leave all existing content untouched.
+
+```bash
+SECTION="${CLAUDE_PLUGIN_ROOT}/templates/CLAUDE.harness.md"
+CLAUDE_MD="$ROOT/CLAUDE.md"
+BEGIN='<!-- BEGIN godot-selftest-harness -->'
+END='<!-- END godot-selftest-harness -->'
+
+if [ ! -f "$CLAUDE_MD" ]; then
+  # Case 1 — absent: create from template (includes its own markers)
+  cp "$SECTION" "$CLAUDE_MD"
+  echo "Created CLAUDE.md with harness guidance section."
+elif grep -qF "$BEGIN" "$CLAUDE_MD"; then
+  # Case 2 — marker present: replace the marked block (inclusive) in place
+  tmp="$(mktemp)"
+  awk -v begin="$BEGIN" -v end="$END" -v repl="$SECTION" '
+    $0 == begin {
+      skipping = 1
+      while ((getline line < repl) > 0) print line
+      close(repl)
+      next
+    }
+    skipping && $0 == end { skipping = 0; next }
+    skipping { next }
+    { print }
+  ' "$CLAUDE_MD" > "$tmp" && mv "$tmp" "$CLAUDE_MD"
+  echo "Refreshed harness guidance section in CLAUDE.md."
+else
+  # Case 3 — exists, no marker: append (never rewrite existing content)
+  printf '\n' >> "$CLAUDE_MD"
+  cat "$SECTION" >> "$CLAUDE_MD"
+  echo "Appended harness guidance section to CLAUDE.md."
+fi
+```
+
+The template section is deliberately **lean and reference-style** (a pointer /
+cheat-sheet, not a manual) because `CLAUDE.md` is always-on, per-session context.
+Keep the full procedures in `/verify`, this command, and the README.
+
+## Step 9 — Wire the DevTools autoload (idempotent)
 
 Add the DevTools autoload to `project.godot` **only if it is not already
 present**. Find the `[autoload]` section; if there is no `DevTools=` line,
@@ -196,7 +254,7 @@ else
 fi
 ```
 
-## Step 9 — Detect the Godot binary
+## Step 10 — Detect the Godot binary
 
 Resolve the Godot binary in this priority order and record it for `/verify`:
 
@@ -216,7 +274,7 @@ else GODOT=""; fi
 [ -n "$GODOT" ] && echo "Godot binary: $GODOT" || echo "WARN: no Godot binary found. Set GODOT_BIN."
 ```
 
-## Step 10 — Smoke check
+## Step 11 — Smoke check
 
 If a Godot binary was found, run the headless linter to confirm the project
 loads and the core parses:
@@ -229,7 +287,7 @@ Surface any parser errors or load failures verbatim. A clean exit (code 0) plus
 per-scene `OK` / `UIDs: OK` output means the install parses. If it fails, report
 the error and stop before claiming success.
 
-## Step 11 — Print next steps
+## Step 12 — Print next steps
 
 Report a summary that includes:
 
@@ -263,6 +321,10 @@ Report a summary that includes:
    client polls for command/result files (computed in step 2), e.g. on macOS:
    `~/Library/Application Support/Godot/app_userdata/<name>/`.
 
+4. **Project CLAUDE.md.** The project's `CLAUDE.md` now documents the harness
+   (between the `godot-selftest-harness` markers) so future sessions know it
+   exists and how to drive it — re-running scaffold refreshes that section.
+
 Also mention: run **`/verify`** (from this plugin) to execute the full runtime
 validation workflow (lint → headless tests → launch → ping → validate-all →
 sequence → performance → quit).
@@ -280,3 +342,7 @@ sequence → performance → quit).
 - `res://test/unit/` and `res://test/sequences/` — a seed unit test and a smoke
   sequence example.
 - A `DevTools` autoload line in `project.godot`.
+- `<ROOT>/CLAUDE.md` — a lean, reference-style harness guidance section wrapped in
+  `<!-- BEGIN godot-selftest-harness -->` / `<!-- END godot-selftest-harness -->`
+  markers. Created if absent, refreshed in place if the markers exist, or appended
+  if a `CLAUDE.md` already exists without them (never clobbering existing content).
