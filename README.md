@@ -2,7 +2,11 @@
 
 A game-agnostic **self-testing harness for Godot 4.x**. It lets you (and Claude
 Code) drive, inspect, and validate a running Godot game entirely from the
-command line — no manual clicking in the editor. It combines three things:
+command line — no manual clicking in the editor. 
+
+This project was inspired by
+https://github.com/cleak/tea-leaves and adapts the same runtime-driven testing
+concepts for Godot. It combines three things:
 
 1. A **file-based DevTools bridge** — an autoload that reads command files from
    `user://` and writes back results, so any process (a Python CLI, a shell
