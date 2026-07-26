@@ -51,6 +51,22 @@ func register_commands(dev: Node) -> void:
 Reach them from the CLI via `cmd spawn_enemy --args '{"count":3}'`; discover them via
 `list-commands`. Use these for setup/trigger steps the generic primitives can't express.
 
+**Attach liveness to every reply.** Register one status provider and its Dictionary is
+merged into *every* response as `status` — the fact you need on every read and never
+remember to ask for separately. Without it, a session that has silently died or frozen
+keeps answering with well-formed zeros, which looks exactly like a clean pass.
+
+```gdscript
+    dev.register_status_provider(func(_args):
+        var p = dev.get_tree().get_first_node_in_group("player")
+        return {"player": "absent"} if p == null else {"player": "dead" if p.is_dead else "alive"})
+```
+
+Pair it with verbs that can *undo* the dead state (a `revive_player` that clears the
+flag and leaves the death state, or a `god_mode` toggle). Restoring a health value is
+usually not enough on its own — the death flag and state machine outlive it, so the
+run stays frozen and unrescuable short of a relaunch.
+
 ### Config
 `res://addons/godot_selftest/devtools_config.json` holds thresholds and hooks:
 `fps_min`, `orphan_max`, `mute`, `main_scene`, `entry_hook {node_path, method}` (advances

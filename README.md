@@ -91,6 +91,15 @@ func register_commands(dev: Node) -> void:
     dev.register_command("spawn_enemy", _spawn_enemy)
     dev.register_command("get_score", _get_score)
 
+    # dev.register_status_provider(provider: Callable) -> void
+    # The returned Dictionary is merged into EVERY response as "status".
+    dev.register_status_provider(_status)
+
+func _status(_args: Dictionary) -> Dictionary:
+    # Keep this tiny — it rides on every single reply.
+    var p := dev.get_tree().get_first_node_in_group("player")
+    return { "player": "absent" if p == null else ("dead" if p.is_dead else "alive") }
+
 func _spawn_enemy(args: Dictionary) -> Dictionary:
     var count := int(args.get("count", 1))
     # ...operate on the running scene tree...
@@ -217,6 +226,16 @@ Run it after any script/scene/gameplay change, before committing.
 
 ## Sharp edges / risks
 
+- **A frozen session answers every query with well-formed zeros.** Once the thing
+  under test is dead or paused, nothing moves and nothing changes — which reads
+  identically to a genuine clean result, so a broken run gets mistaken for a
+  passing one. Register a status provider (above) so liveness rides on every
+  response, and give yourself a verb that can *undo* the dead state. Restoring a
+  health value is rarely enough: the death flag and state machine outlive it.
+- **One in-flight command at a time.** The bridge is a single command/result file
+  pair with no request IDs, so concurrent callers overwrite each other and replies
+  come back for the wrong request (usually surfacing as a missing key). Never poll
+  from a second thread while sampling from the first.
 - **Registry-extension lifetime.** The core must keep a live reference to the
   instantiated extension (`var _extension`). If it lets the `RefCounted` go out
   of scope, the bound `Callable`s are freed and every project verb silently
