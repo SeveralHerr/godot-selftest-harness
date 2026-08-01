@@ -56,7 +56,13 @@ def plugin_version():
 
 
 def sha256(path):
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+    """Hash with line endings normalized to LF - see tools/scaffold_install.py.
+
+    Must stay identical to the one there: they read and write the same hashes in
+    harness_history.json, and on Windows (core.autocrlf) a raw byte hash would
+    silently match nothing.
+    """
+    return hashlib.sha256(path.read_bytes().replace(b"\r\n", b"\n")).hexdigest()
 
 
 def check():

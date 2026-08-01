@@ -8,7 +8,7 @@
     "tools/check_devtools_log.py": "26acad38a2c8a602ea98caa4bc9578b563a4fec0dc7cedeec0f670c4f604333c"
   },
   "0.5.0": {
-    "addons/godot_selftest/dev_tools.gd": "b0b7746a59f18a65d068e0c8e0f1accf0faa760c259c773411e46db1368c95a9",
+    "addons/godot_selftest/dev_tools.gd": "0f33e73c85d1bf64a13c84de060fceb219ed0c190a20e7917b1d823684e04fd6",
     "addons/godot_selftest/scene_validator.gd": "1c9ae37ac9939ee30662a2cf4a9b5b1687dcba3568376607d89e740aed973c07",
     "tools/lint_project.gd": "7f7967031e8b33a53134fc8c6108143db8b8bc939ed54b6408957d5ec122e812",
     "tools/run_tests.gd": "0276fafd3e35dda60a0b277d88e7e78b128069357d0893901ccf75d6e5430e5c",

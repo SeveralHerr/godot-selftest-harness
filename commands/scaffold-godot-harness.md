@@ -41,6 +41,24 @@ test -f "$ROOT/project.godot" || { echo "No project.godot at $ROOT"; exit 1; }
 grep -n 'config/features' "$ROOT/project.godot" || echo "WARN: no config/features line; verify this is Godot 4.x"
 ```
 
+4. **Resolve a Python interpreter now** — steps 3, 4, 7 and 9 all need it.
+   **Probe by executing, never with `command -v`.** On Windows, `command -v python3`
+   succeeds against the Microsoft Store *App execution alias* stub, which then refuses
+   to run (`Python was not found; run without arguments to install…`). Existence is not
+   executability:
+
+   ```bash
+   PY=""
+   for c in python3 python py; do
+     if "$c" -c "import sys" >/dev/null 2>&1; then PY="$c"; break; fi
+   done
+   [ -z "$PY" ] && echo "WARN: no working Python. Falling back to plain copies: files will be backed up on any difference and devtools_config.json must be merged by hand. devtools.py needs Python too, so fix this before using the bridge."
+   echo "Python: ${PY:-none}"
+   ```
+
+   If no Python is found, use the `cp`-based fallbacks noted in steps 3, 4 and 7 and
+   say clearly in the summary which safeguards were skipped.
+
 ## Step 2 — Parse project identity (for reporting only)
 
 Read these keys from `project.godot` (do **not** write them into any file):
@@ -64,37 +82,53 @@ stores the name.
 
 ## Step 3 — Install the addon core
 
-Copy the addon templates into `res://addons/godot_selftest/`:
+Install the addon files into `res://addons/godot_selftest/`:
 
 ```bash
-mkdir -p "$ROOT/addons/godot_selftest"
-cp "${CLAUDE_PLUGIN_ROOT}/templates/addons/godot_selftest/dev_tools.gd"        "$ROOT/addons/godot_selftest/dev_tools.gd"
-cp "${CLAUDE_PLUGIN_ROOT}/templates/addons/godot_selftest/scene_validator.gd"  "$ROOT/addons/godot_selftest/scene_validator.gd"
-# devtools_config.json is written/patched in step 7, not blindly copied.
+"$PY" "${CLAUDE_PLUGIN_ROOT}/tools/scaffold_install.py" files --project "$ROOT" \
+  --plugin-root "${CLAUDE_PLUGIN_ROOT}" \
+  addons/godot_selftest/dev_tools.gd \
+  addons/godot_selftest/scene_validator.gd
+# devtools_config.json is merged in step 7, not copied.
 ```
 
-These are addon-owned files and are safe to overwrite on every run (they carry
-no project-specific state). The validator is namespaced
-(`GodotSelftestSceneValidator`) to avoid `class_name` collisions.
+Without Python: `mkdir -p "$ROOT/addons/godot_selftest"` and `cp` the two files
+from `${CLAUDE_PLUGIN_ROOT}/templates/addons/godot_selftest/`.
 
-## Step 4 — Install the tool scripts (back up on conflict)
+The validator is namespaced (`GodotSelftestSceneValidator`) to avoid `class_name`
+collisions. See step 4 for what the installer does about existing files.
 
-Copy `tools/*` into `res://tools/`. If a target file already exists, back it up
-to `<file>.bak` first so a project's own tool of the same name is never lost.
+## Step 4 — Install the tool scripts
+
+Same installer, for `res://tools/`:
 
 ```bash
-mkdir -p "$ROOT/tools"
-for f in lint_project.gd run_tests.gd devtools.py check_devtools_log.py upstream_gaps.py; do
-  src="${CLAUDE_PLUGIN_ROOT}/templates/tools/$f"
-  dst="$ROOT/tools/$f"
-  if [ -f "$dst" ] && ! cmp -s "$src" "$dst"; then
-    cp "$dst" "$dst.bak"
-    echo "Backed up existing tools/$f -> tools/$f.bak"
-  fi
-  cp "$src" "$dst"
-done
+"$PY" "${CLAUDE_PLUGIN_ROOT}/tools/scaffold_install.py" files --project "$ROOT" \
+  --plugin-root "${CLAUDE_PLUGIN_ROOT}" \
+  tools/lint_project.gd tools/run_tests.gd tools/devtools.py \
+  tools/check_devtools_log.py tools/upstream_gaps.py
 chmod +x "$ROOT/tools/devtools.py" 2>/dev/null || true
 ```
+
+**Back up only what the project actually edited.** The installer records the sha256
+of everything it writes in `addons/godot_selftest/.harness_manifest.json`, and the
+plugin ships `harness_history.json` with the hashes of every previously released
+version. A file that matches either is a copy this harness put there and nobody
+touched, so it is overwritten silently. Only a file that matches neither is backed up
+to `<file>.bak`, and the installer says so loudly.
+
+This matters because the old rule — back up on any byte difference — meant a plain
+version bump left `lint_project.gd.bak`, `run_tests.gd.bak` and `devtools.py.bak`
+sitting in a real project as untracked noise, protecting edits that did not exist.
+Scaffold could never clean those up either, because it had no way to tell its own
+leftovers from a file the user made. Hashes are compared with line endings normalized,
+so a CRLF checkout is not mistaken for an edit.
+
+Report every `.bak` it does create: those are real local edits about to be replaced,
+and they usually belong in `devtools_ext/commands.gd` or upstream in the plugin.
+
+Without Python: `cp` each file, backing up on any difference (the old behavior), and
+say in the summary that pristine-file detection was skipped.
 
 ## Step 5 — Create the registry extension (never overwrite)
 
@@ -133,10 +167,37 @@ cp "${CLAUDE_PLUGIN_ROOT}/templates/test/sequences/smoke.json" "$ROOT/test/seque
 
 ## Step 7 — Write `devtools_config.json` with detected values
 
-Write `res://addons/godot_selftest/devtools_config.json` using the schema below,
-filling in values detected from the target project. If the file already exists,
-**patch** it (preserve any keys the project has customized, such as `fps_min`,
-`orphan_max`, `mute`, or `entry_hook`) rather than replacing it wholesale.
+Write `res://addons/godot_selftest/devtools_config.json` from the shipped schema plus
+the values detected below, preserving anything the project customized:
+
+```bash
+"$PY" "${CLAUDE_PLUGIN_ROOT}/tools/scaffold_install.py" config --project "$ROOT" \
+  --plugin-root "${CLAUDE_PLUGIN_ROOT}" \
+  --set main_scene=res://<detected>.tscn \
+  --set hud_layer_name=<detected>
+```
+
+`--set` takes `key=value`, JSON-parsed when it parses (so `--set fps_min=60` is a
+number). Pass only the keys you actually detected; everything else comes from the
+shipped schema below.
+
+**How it decides what to overwrite.** It records what it left behind in a
+`_scaffold_defaults` block inside the config — the values plus the list of keys
+scaffold still owns. A key that still holds what scaffold last wrote gets updated to
+the new default; a key the project has edited is kept and becomes **project-owned
+permanently**, even if its value later happens to equal the default again. That last
+part is the whole point: judging by "is this still the default value?" cannot tell a
+key nobody touched from one deliberately set back to the default, so a project that
+set `hud_layer_name` to `"HUD"` on purpose would have it silently re-detected away on
+the next refresh. New keys are always added; keys the project invented are never
+removed. Re-running changes nothing.
+
+On the very first run against a pre-0.5.0 install there is no record yet, so it falls
+back to "matches the shipped default → mine, otherwise yours" for that one run, and
+records the outcome. Report which keys it kept and which it updated.
+
+Without Python: write the schema below by hand if the file is absent; if it exists,
+add only missing keys and change nothing else.
 
 Detect:
 
@@ -184,6 +245,11 @@ Notes on the newer keys, so a patch of an existing config doesn't get them wrong
 
 Set `main_scene` and `hud_layer_name` from detection; leave the rest at defaults
 unless the project already customized them.
+
+The `_scaffold_defaults` block the installer writes alongside these keys is
+bookkeeping, not configuration — every consumer ignores unknown keys. It is worth
+committing (it is what makes the next refresh non-destructive); deleting it just
+resets the tracking to the first-run heuristic.
 
 ## Step 8 — Install/refresh the CLAUDE.md guidance section
 
@@ -272,18 +338,15 @@ It is written in Python (not shell) because the harness already requires Python 
 It always exits 0 — a reminder must never break a session.
 
 **9c. Wire the `Stop` hook into `<ROOT>/.claude/settings.json`.** Merge, never
-overwrite: a project may already have hooks. Detect the Python interpreter first
-(`python3` on macOS/Linux, usually `python` on Windows).
+overwrite: a project may already have hooks. Reuse the `$PY` resolved in step 1 (the
+shell does not persist between tool calls, so re-run that probe if it is empty).
 
-**Probe each candidate by actually running it — do not use `command -v`.** On Windows,
-`command -v python3` succeeds against the Microsoft Store *App execution alias* stub,
-which then refuses to run (`Python was not found; run without arguments to install from
-the Microsoft Store…`). Existence is not executability, and a hook wired to that stub
-fails silently on every turn:
+Remember why that probe executes each candidate rather than using `command -v`: on
+Windows the Microsoft Store *App execution alias* stub satisfies `command -v python3`
+and then refuses to run, and a hook wired to it fails silently on every turn.
 
 ```bash
-PY=""
-for c in python3 python py; do
+[ -z "$PY" ] && for c in python3 python py; do
   if "$c" -c "import sys" >/dev/null 2>&1; then PY="$c"; break; fi
 done
 [ -z "$PY" ] && echo "WARN: no working Python found — skipping the Stop hook (devtools.py also needs it)."
@@ -469,7 +532,9 @@ sequence → performance → quit).
 ## What this installs
 
 - `res://addons/godot_selftest/` — the DevTools core (`dev_tools.gd`), the
-  namespaced scene validator (`scene_validator.gd`), and `devtools_config.json`.
+  namespaced scene validator (`scene_validator.gd`), `devtools_config.json`, and
+  `.harness_manifest.json` (what this scaffold wrote, and its hashes — how the next
+  refresh tells a stale copy from a file you edited; commit it).
 - `res://tools/` — `lint_project.gd` (headless UID + scene lint),
   `run_tests.gd` (headless unit test runner), `devtools.py` (Python CLI client),
   `check_devtools_log.py` (the `Stop`-hook logging reminder), `upstream_gaps.py`
