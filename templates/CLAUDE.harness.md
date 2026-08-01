@@ -41,8 +41,15 @@ from a forgotten log.
 ## YYYY-MM-DD — <what this response did>
 
 - Gap: **<what was missing>** — <the command run, the output it gave, the workaround used>
+  - [G-001] status: open | seen: 1 | harness: 0.5.0
   - Improvement: <the smallest change that would have closed it>
 ```
+
+The `[G-NNN]` line is required and is what makes the log answerable: ids are stable and
+never reused, `status:` is `open`/`fixed`/`wontfix` (`fixed` adds `fixed-in: X.Y.Z`),
+`harness:` comes from `python3 tools/devtools.py harness-version`. **Hitting a known gap
+again bumps its `seen:` count** — don't file a second entry for it. `tools/upstream_gaps.py`
+reads exactly these fields to pool open gaps into the harness repo.
 
 Quote real output; a gap without evidence can't be acted on later. This log is the
 harness's feedback channel — entries here are what get upstreamed into

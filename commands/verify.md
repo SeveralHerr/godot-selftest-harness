@@ -287,10 +287,28 @@ Append an entry to `log-devtools.md` at the project root (create it if missing) 
 ## YYYY-MM-DD — <what this run verified>
 
 - Gap: **<what was missing>** — <the command run, the output it gave, the workaround used>
+  - [G-001] status: open | seen: 1 | harness: 0.5.0
   - Improvement: <the smallest change that would have closed it>
 ```
 
-This is not bookkeeping. Every capability the harness has beyond its first version — the status provider, the node-path normalization, the property filter, the touch verbs, the orphan baseline — exists because a run like this one wrote down what it couldn't do. Quote real output; a gap without evidence can't be acted on later. Note recurrences explicitly (a gap that bites twice is a stronger signal than a new one), and record closures too, including whether the fix actually paid off.
+The `[G-NNN]` status line is required — it is what lets a later reader tell an open gap from one fixed two versions ago:
+
+| Field | Rule |
+|---|---|
+| `[G-NNN]` | Next unused id in this file. **Stable, never reused.** |
+| `status:` | `open`, `fixed` (add `fixed-in: X.Y.Z`), or `wontfix` (say why on the Improvement line). |
+| `seen:` | Bump the **existing** entry when a known gap bites again; do not file a second one. |
+| `harness:` | The installed version, from `python3 tools/devtools.py harness-version`. Read it once at the start of the run — a gap that can't be tied to a version can't be told from a regression later. |
+
+Before writing a new gap, scan the file for one that already describes it. A `seen: 3` is the strongest signal this log can produce; three separately-worded entries are the weakest. When a gap you find here is already closed by the installed version, mark it `status: fixed | fixed-in: <version>` instead of leaving it to be re-upstreamed.
+
+This is not bookkeeping. Every capability the harness has beyond its first version — the status provider, the node-path normalization, the property filter, the touch verbs, the orphan baseline — exists because a run like this one wrote down what it couldn't do. Quote real output; a gap without evidence can't be acted on later.
+
+Open gaps only become fixes once they reach the harness repo, which is a one-liner:
+
+```bash
+python3 tools/upstream_gaps.py log-devtools.md --into /path/to/godot-selftest-harness/log-devtools.md
+```
 
 Distinguish this from the Self-Improvement section below: that one proposes edits to `/verify` itself and needs user approval. Phase 6 is an unconditional write to the project's log, no approval needed.
 
