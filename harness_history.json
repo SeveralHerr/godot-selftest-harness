@@ -10,7 +10,7 @@
   "0.5.0": {
     "addons/godot_selftest/dev_tools.gd": "5cbbfc1c707bfc58991328c3ff7507d91092134c8054b21fa1f26543ee3f12de",
     "addons/godot_selftest/scene_validator.gd": "1c9ae37ac9939ee30662a2cf4a9b5b1687dcba3568376607d89e740aed973c07",
-    "tools/lint_project.gd": "6bd2c227f8a617587d839f313b25022817cf0c85b4a2c0babb369454d7795e2b",
+    "tools/lint_project.gd": "7f7967031e8b33a53134fc8c6108143db8b8bc939ed54b6408957d5ec122e812",
     "tools/run_tests.gd": "0276fafd3e35dda60a0b277d88e7e78b128069357d0893901ccf75d6e5430e5c",
     "tools/devtools.py": "aab83facf5bba1fe1ac8ca9424776bddd748b75f0743052335fdfa6a7ff575f3",
     "tools/check_devtools_log.py": "51dc6bf6389d28ab862f1d0f72657367a3dcbbd1e302cc1c50fae294f2b8f6c1",

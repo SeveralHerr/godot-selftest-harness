@@ -127,9 +127,16 @@ func _initialize() -> void:
 	if all_scenes or scenes.is_empty():
 		scenes = _find_all_scenes(scan_root)
 
+	# Paths exempt from the missing-sidecar check. Defaults cover the files the
+	# scaffolder copies in: it cannot generate a valid .uid (the ids are engine
+	# assigned), so without this every fresh install would report findings that are
+	# nobody's fault - and a gate that cries wolf on install day gets ignored.
+	var uid_ignore: Array = config.get("uid_check_ignore", ["res://addons/", "res://tools/"])
+
 	var results := {
 		"uids": {
 			"mismatches": [],
+			"missing_sidecars": [],
 			"had_error": false
 		},
 		"warnings": {
@@ -150,6 +157,7 @@ func _initialize() -> void:
 			_check_duplicate_ids(path, results["duplicate_ids"])
 		if not uid_ok:
 			results["uids"]["had_error"] = true
+		_check_missing_uid_sidecars(scan_root, test_dir, uid_ignore, results["uids"])
 
 	# Scene configuration warnings for selected scenes, unless uids-only
 	if not uids_only:
@@ -235,11 +243,16 @@ func _initialize() -> void:
 		# version it came from cannot be told apart from a regression later.
 		print("lint: godot-selftest-harness %s | scan_root %s" % [HARNESS_VERSION, scan_root])
 		if not warnings_only:
-			if results["uids"]["mismatches"].is_empty():
+			# "UIDs: OK" is only printed when BOTH passes are clean. It used to print
+			# while a script sat there with no sidecar at all, which is the report
+			# lying about what it checked.
+			if results["uids"]["mismatches"].is_empty() and results["uids"]["missing_sidecars"].is_empty():
 				print("UIDs: OK")
 			else:
 				for m in results["uids"]["mismatches"]:
 					print("%s: uid mismatch for %s -> file has %s, expected %s" % [m.path, m.res_path, m.file_uid, m.expected_uid])
+				for s in results["uids"]["missing_sidecars"]:
+					print("WARN: %s: %s" % [s.path, s.message])
 			for d in results["duplicate_ids"]:
 				print("ERROR: %s: %s" % [d.path, d.message])
 		if not uids_only:
@@ -401,6 +414,50 @@ func _check_uid_one(p: String, out) -> bool:
 						_add_finding(p, "uid_mismatch", path, "error", "uid mismatch for %s -> file has %s, expected %s" % [path, uid, expected])
 						ok = false
 	return ok
+
+
+# --- Missing .uid sidecars ---
+# The mismatch pass above only validates sidecars that already exist, so a script
+# created outside the editor - which is every script an agent writes - reported
+# "UIDs: OK" while having no sidecar at all. The omission then surfaces at review
+# time, or as a broken reference on somebody else's machine.
+#
+# Self-calibrating: Godot only began writing .uid files for scripts in 4.4, and a
+# project that has never been imported has none either. If not one .gd in the
+# project has a sidecar, the engine or the checkout simply does not do this, and
+# flagging every file would be noise rather than a finding - so the check stands
+# down entirely.
+func _check_missing_uid_sidecars(scan_root: String, test_dir: String, ignore: Array, out) -> void:
+	var gd_files := _scan(scan_root, ["gd"])
+	if test_dir != "" and not test_dir.begins_with(scan_root):
+		for p in _scan(test_dir, ["gd"]):
+			if not gd_files.has(p):
+				gd_files.append(p)
+
+	var any_sidecar := false
+	for p in gd_files:
+		if FileAccess.file_exists(p + ".uid"):
+			any_sidecar = true
+			break
+	if not any_sidecar:
+		return
+
+	for p in gd_files:
+		if _is_uid_ignored(p, ignore):
+			continue
+		if FileAccess.file_exists(p + ".uid"):
+			continue
+		var msg := "no .uid sidecar - open the project in the editor to generate one and commit it alongside the script"
+		out["missing_sidecars"].append({"path": p, "message": msg})
+		_add_finding(p, "uid_sidecar_missing", "", "warning", msg)
+
+
+func _is_uid_ignored(path: String, ignore: Array) -> bool:
+	for prefix in ignore:
+		var s := str(prefix)
+		if s != "" and path.begins_with(s):
+			return true
+	return false
 
 
 # --- Duplicate resource ids ---

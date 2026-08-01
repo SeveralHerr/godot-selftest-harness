@@ -24,6 +24,9 @@ Test flags (after `--`): `--filter NAME` (matches method name **or** test script
 `--file NAME` (one script; combines with `--filter` via AND), `--json`. A selector matching
 nothing is exit `2` (`SELECTED NOTHING — …selected 0 of N discovered`), never a pass — check
 the `Selected: N of M discovered` line, not just the exit code.
+`UIDs: OK` covers both halves: no stale `uid=` reference **and** no `.gd` missing its
+`.uid` sidecar. A script you just wrote outside the editor has none — commit the sidecar
+Godot generates alongside the script.
 Lint flags (after `--`): `--strict` (warnings fail), `--baseline-write PATH` /
 `--baseline PATH` (split findings into `NEW` vs `PRE-EXISTING` so repo debt isn't re-triaged
 by hand), `--find-orphans` (public functions called only from tests — advisory).

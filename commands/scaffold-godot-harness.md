@@ -154,6 +154,7 @@ Detect:
   "hud_layer_name": "HUD",
   "test_dir": "res://test/unit",
   "scan_root": "res://",
+  "uid_check_ignore": ["res://addons/", "res://tools/"],
   "fps_min": 30,
   "orphan_max": 0,
   "orphan_growth_max": 20,

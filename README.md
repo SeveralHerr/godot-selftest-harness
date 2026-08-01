@@ -240,6 +240,7 @@ Lives at `res://addons/godot_selftest/devtools_config.json`.
 | `hud_layer_name` | String | `HUD` | CanvasLayer name used by UI snapshot/validation verbs. |
 | `test_dir` | String | `res://test/unit` | Directory the test runner scans for `test_*.gd`. |
 | `scan_root` | String | `res://` | Root for scene/UID scanning. |
+| `uid_check_ignore` | Array | `["res://addons/", "res://tools/"]` | Path prefixes exempt from the missing-`.uid`-sidecar warning. The defaults cover the files the scaffolder copies in — it can't generate a valid `.uid` (ids are engine-assigned), and a gate that cries wolf on install day gets ignored. |
 | `fps_min` | int | `30` | Minimum acceptable FPS for `/verify` performance gate. |
 | `orphan_max` | int | `0` | Max tolerated **absolute** orphan nodes. Kept for compatibility only — `0` is unreachable in a real project (a fresh launch reports dozens). Gate on `orphan_growth_max` instead. |
 | `orphan_growth_max` | int | `20` | Max tolerated growth in orphan nodes vs. the startup baseline. This is the number that means "this change leaks". |
@@ -396,6 +397,17 @@ unrelated edits to the same file. This exists because deciding whether a warning
 repo debt or something you just caused otherwise means hand-checking `git log` per
 file — the same "is this noise mine?" problem that made an absolute orphan threshold
 useless.
+
+The UID pass has two halves. It validates that every `uid=` in a `.tscn`/`.tres` still
+resolves to the same resource, **and** that every `.gd` under `scan_root` / `test_dir`
+actually has a `.uid` sidecar. The second half exists because the first only inspects
+sidecars that already exist: a script created outside the editor — which is every script
+an agent writes — had no sidecar at all and lint happily reported `UIDs: OK`. The
+omission then surfaced at review time, or as a broken reference on someone else's
+machine. Missing sidecars are **warnings** (so they don't fail an existing project until
+you pass `--strict`), `uid_check_ignore` exempts paths, and the check stands down
+entirely if no `.gd` in the project has a sidecar — Godot only started writing them in
+4.4, and flagging every file in a 4.3 project would be noise, not a finding.
 
 `--find-orphans` covers a failure both other gates miss: a system with passing unit
 tests and no caller anywhere in the game. Lint checks UIDs and scenes, the test runner

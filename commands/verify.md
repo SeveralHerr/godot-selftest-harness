@@ -80,6 +80,8 @@ Exit-code contract (both runners): `0` = pass, `1` = findings (lint errors / fai
 
 Warnings alone do not fail; pass `--strict` to make them fail.
 
+`UIDs: OK` now means both halves of the UID pass are clean: no stale `uid=` reference **and** no `.gd` missing its `.uid` sidecar. A script you just created outside the editor has no sidecar, and that is reported as `WARN: <path>: no .uid sidecar` rather than being counted as OK. Commit the sidecar with the script; `uid_check_ignore` in the config exempts paths (default: `addons/`, `tools/`).
+
 **Pre-existing findings.** If lint reports warnings you believe are untouched repo debt, do not hand-check them file by file. Record a baseline at the merge-base and lint against it — findings then print grouped as `NEW` (these drive the exit code) and `PRE-EXISTING`:
 
 ```bash
