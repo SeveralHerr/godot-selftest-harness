@@ -59,6 +59,39 @@ grep -n 'config/features' "$ROOT/project.godot" || echo "WARN: no config/feature
    If no Python is found, use the `cp`-based fallbacks noted in steps 3, 4 and 7 and
    say clearly in the summary which safeguards were skipped.
 
+5. **On a refresh, work on a branch.** A re-scaffold rewrites a dozen files across
+   the project. Landing that straight on the working branch means it gets discovered
+   afterwards as unexplained churn in `git status` rather than read as a diff. So when
+   this is a **refresh** (the harness is already installed) of a **git repo** with a
+   **clean working tree**, do it on `harness/refresh-<version>`:
+
+   ```bash
+   VER="$("$PY" -c "import json,os;print(json.load(open(os.environ['P']))['version'])" 2>/dev/null)"
+   if git -C "$ROOT" rev-parse --git-dir >/dev/null 2>&1; then
+     CUR="$(git -C "$ROOT" rev-parse --abbrev-ref HEAD)"
+     if [ ! -f "$ROOT/addons/godot_selftest/dev_tools.gd" ]; then
+       echo "Fresh install on $CUR - no refresh branch needed."
+     elif [ -n "$(git -C "$ROOT" status --porcelain)" ]; then
+       echo "WARN: uncommitted changes on $CUR. Staying here so the refresh is not mixed"
+       echo "      into your work-in-progress; review with 'git diff' before committing."
+     elif case "$CUR" in harness/refresh-*) true;; *) false;; esac; then
+       echo "Already on $CUR - continuing here."
+     else
+       BR="harness/refresh-$VER"
+       git -C "$ROOT" checkout -b "$BR" 2>/dev/null || git -C "$ROOT" checkout "$BR"
+       echo "Refreshing on branch $BR (from $CUR)."
+     fi
+   else
+     echo "Not a git repo - the refresh will not be reviewable as a diff."
+   fi
+   ```
+
+   Set `P="${CLAUDE_PLUGIN_ROOT}/.claude-plugin/plugin.json"` before running it. Record
+   the branch name (and the branch you came from) for the summary in step 13.
+
+   **Never commit on the user's behalf**, here or anywhere in this command. The branch
+   exists so the change can be *read*; whether it lands is theirs to decide.
+
 ## Step 2 — Parse project identity (for reporting only)
 
 Read these keys from `project.godot` (do **not** write them into any file):
@@ -455,7 +488,38 @@ the error and stop before claiming success.
 
 ## Step 13 — Print next steps
 
-Report a summary that includes:
+**First, if this was a refresh in a git repo, show it as a diff.** An upgrade that is
+only visible as leftover junk in `git status` a week later is not reviewable:
+
+```bash
+if git -C "$ROOT" rev-parse --git-dir >/dev/null 2>&1; then
+  echo "Branch: $(git -C "$ROOT" rev-parse --abbrev-ref HEAD)"
+  git -C "$ROOT" status --short
+  echo "---"
+  git -C "$ROOT" diff --stat
+fi
+```
+
+Summarize what that shows, in plain terms:
+
+- which harness files changed, and from which version to which (step 4's report);
+- any `.bak` files created — **name them individually**. Each is a local edit about to
+  be replaced, and it belongs either in `devtools_ext/commands.gd` or upstream in the
+  plugin. Nothing else in this command produces a `.bak`, so if there are none, say so;
+- which `devtools_config.json` keys were updated versus kept as project-owned (step 7);
+- whether `project.godot`, `CLAUDE.md` or `.claude/settings.json` were touched.
+
+Then tell the user how to finish, and stop:
+
+```
+Review:  git diff <base-branch>...HEAD
+Keep:    git checkout <base-branch> && git merge --no-ff harness/refresh-<version>
+Discard: git checkout <base-branch> && git branch -D harness/refresh-<version>
+```
+
+Do **not** commit, merge, push, or delete a `.bak` yourself.
+
+Then report a summary that includes:
 
 1. **Register a command.** Open `res://devtools_ext/commands.gd` and register
    project verbs inside `register_commands(dev)`:
