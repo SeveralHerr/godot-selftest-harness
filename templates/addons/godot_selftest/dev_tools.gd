@@ -14,7 +14,15 @@ extends Node
 ## extension loads AFTER the generic handlers, a project may override a generic
 ## verb by registering the same action string (last-writer-wins).
 
+# harness-version: 0.5.0
+
 # --- Constants ---
+
+## Version of the godot-selftest-harness these files were copied from. Reported by the
+## `harness_version` verb and stamped into every copied tool script, so a gap logged
+## against a project can name the version it was seen on, and a refresh can tell a
+## stale file from a customized one. Bump with .claude-plugin/plugin.json.
+const HARNESS_VERSION: String = "0.5.0"
 
 const COMMANDS_PATH: String = "user://devtools_commands.json"
 const RESULTS_PATH: String = "user://devtools_results.json"
@@ -217,6 +225,7 @@ func _register_generic_handlers() -> void:
 	register_command("save_ui_baseline", _cmd_save_ui_baseline)
 	register_command("ui_snapshot_diff", _cmd_ui_snapshot_diff)
 	register_command("list_commands", _cmd_list_commands)
+	register_command("harness_version", _cmd_harness_version)
 
 
 func _load_extension() -> void:
@@ -752,6 +761,26 @@ func _cmd_list_commands(_args: Dictionary) -> Dictionary:
 		"success": true,
 		"message": "%d commands registered" % actions.size(),
 		"data": {"actions": actions},
+	}
+
+
+## Reports which harness revision the installed files came from. Without this, deciding
+## whether a refresh was a no-op or a real upgrade meant diffing template files against
+## the plugin repo by hand, and a gap logged before an upgrade could not be told apart
+## from a regression after one.
+##
+## Wire contract - data keys: harness_version (String), handlers (int),
+## extension_loaded (bool), config_path (String).
+func _cmd_harness_version(_args: Dictionary) -> Dictionary:
+	return {
+		"success": true,
+		"message": "harness %s" % HARNESS_VERSION,
+		"data": {
+			"harness_version": HARNESS_VERSION,
+			"handlers": _handlers.size(),
+			"extension_loaded": _extension != null,
+			"config_path": CONFIG_PATH,
+		},
 	}
 
 

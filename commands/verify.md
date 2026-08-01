@@ -42,6 +42,16 @@ echo "Using Python: $PY"
 
 Substitute `$PY` for `python3` in every command below.
 
+### Harness version
+
+Read the installed revision once, up front — Phase 6 needs it for the `harness:` field of every gap it logs, and a version that has to be reconstructed afterwards never gets recorded at all:
+
+```bash
+grep -m1 'harness-version:' tools/lint_project.gd   # works without a running game
+```
+
+Once the game is up (Phase 2), `python3 tools/devtools.py harness-version` reports the addon's version and the client's. A non-zero exit there means the two halves are on different versions — a half-refreshed install — and the fix is to re-run `/scaffold-godot-harness`.
+
 ### Harness drift check
 
 The installed harness can silently diverge from the plugin's templates — a project may have patched `dev_tools.gd` or `devtools.py` locally, or may be running a version predating fixes it now depends on. Either direction is a real hazard: a local patch is silently reverted by the next `/scaffold-godot-harness`, and a stale install means the pitfalls documented here don't match the code.
@@ -237,6 +247,7 @@ python3 tools/devtools.py cmd <verb> --args '{"key": value}'
 | `clear-nodes` | Free matching nodes: `--group NAME`, or via `cmd clear_nodes --args '{"method":"..."}'` / `'{"class":"..."}'` |
 | `screenshot` | Visual verification (always `sleep 0.5`–`1` after a state change first) |
 | `cmd <verb> --args '{...}'` | Any project-registered verb from `list-commands` |
+| `harness-version` | The installed harness revision, game-side and client-side. Fills the `harness:` field of every gap logged in Phase 6; a non-zero exit means the addon and the client are on different versions (re-run `/scaffold-godot-harness`) |
 
 ### Step 4: Design, execute, verify
 

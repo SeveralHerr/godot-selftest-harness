@@ -1,0 +1,140 @@
+#!/usr/bin/env python3
+"""Keep the harness version stamps and the release history honest.
+
+This repo ships files that get copied into other people's projects, and two
+things about that only work if they are exact:
+
+1. **Every copied file carries `# harness-version: X.Y.Z`**, matching
+   `.claude-plugin/plugin.json`. A stamp that lags a release is worse than no
+   stamp - it makes a gap look like it was logged against a version it wasn't.
+2. **`harness_history.json` records the sha256 of every shipped template file
+   per version.** `/scaffold-godot-harness` uses it to tell a *pristine older
+   copy* (safe to overwrite silently) from a *file the project edited* (must be
+   backed up). Without the history, a plain version bump leaves a `.bak` beside
+   every tool - untracked junk the scaffolder can never clean up.
+
+Usage:
+    python tools/record_version.py --check     # verify stamps + history (exit 1 on drift)
+    python tools/record_version.py --record    # write this version's hashes into the history
+
+Run `--check` before committing a release. Run `--record` once the templates for
+a version are final; re-recording the same version overwrites its entry, which is
+correct while a release is still in progress and harmless afterwards.
+"""
+
+import argparse
+import hashlib
+import json
+import re
+import sys
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parent.parent
+PLUGIN_JSON = REPO / ".claude-plugin" / "plugin.json"
+HISTORY = REPO / "harness_history.json"
+
+# Files copied verbatim into a target project, relative to templates/.
+SHIPPED = [
+    "addons/godot_selftest/dev_tools.gd",
+    "addons/godot_selftest/scene_validator.gd",
+    "tools/lint_project.gd",
+    "tools/run_tests.gd",
+    "tools/devtools.py",
+    "tools/check_devtools_log.py",
+    "tools/upstream_gaps.py",
+]
+
+# Files that must be byte-identical to their template (this repo keeps runnable copies).
+MIRRORED = {"tools/upstream_gaps.py": "tools/upstream_gaps.py"}
+
+_STAMP_RE = re.compile(r"^#\s*harness-version:\s*(\S+)\s*$", re.M)
+_CONST_RE = re.compile(r"""HARNESS_VERSION(?:\s*:\s*String)?\s*=\s*["'](\S+?)["']""")
+
+
+def plugin_version():
+    return json.loads(PLUGIN_JSON.read_text(encoding="utf-8"))["version"]
+
+
+def sha256(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def check():
+    version = plugin_version()
+    problems = []
+
+    for rel in SHIPPED:
+        path = REPO / "templates" / rel
+        if not path.is_file():
+            problems.append("%s: missing" % rel)
+            continue
+        text = path.read_text(encoding="utf-8")
+
+        stamps = _STAMP_RE.findall(text)
+        if not stamps:
+            problems.append("%s: no `# harness-version:` stamp" % rel)
+        elif any(s != version for s in stamps):
+            problems.append("%s: stamp %s != plugin.json %s" % (rel, ", ".join(stamps), version))
+
+        consts = _CONST_RE.findall(text)
+        if any(c != version for c in consts):
+            problems.append("%s: HARNESS_VERSION %s != plugin.json %s"
+                            % (rel, ", ".join(consts), version))
+
+    for rel, mirror in MIRRORED.items():
+        src, dst = REPO / "templates" / rel, REPO / mirror
+        if not dst.is_file():
+            problems.append("%s: mirror missing (copy templates/%s across)" % (mirror, rel))
+        elif sha256(src) != sha256(dst):
+            problems.append("%s: differs from templates/%s - copy the template across" % (mirror, rel))
+
+    history = json.loads(HISTORY.read_text(encoding="utf-8")) if HISTORY.exists() else {}
+    if version not in history:
+        problems.append("harness_history.json: no entry for %s (run --record)" % version)
+    else:
+        for rel in SHIPPED:
+            path = REPO / "templates" / rel
+            if path.is_file() and history[version].get(rel) != sha256(path):
+                problems.append("harness_history.json: %s hash is stale for %s (run --record)"
+                                % (rel, version))
+
+    if problems:
+        print("version check FAILED (%d problem(s)):" % len(problems))
+        for p in problems:
+            print("  - %s" % p)
+        return 1
+    print("version check OK: %s stamped in %d shipped file(s), history recorded."
+          % (version, len(SHIPPED)))
+    return 0
+
+
+def record():
+    version = plugin_version()
+    history = json.loads(HISTORY.read_text(encoding="utf-8")) if HISTORY.exists() else {}
+    entry = {}
+    for rel in SHIPPED:
+        path = REPO / "templates" / rel
+        if not path.is_file():
+            print("error: %s is missing; refusing to record a partial version" % rel,
+                  file=sys.stderr)
+            return 1
+        entry[rel] = sha256(path)
+    was = "updated" if version in history else "added"
+    history[version] = entry
+    ordered = {k: history[k] for k in sorted(history, key=lambda v: [int(n) for n in v.split(".")])}
+    HISTORY.write_text(json.dumps(ordered, indent=2) + "\n", encoding="utf-8")
+    print("%s %s in harness_history.json (%d file(s))" % (was, version, len(entry)))
+    return 0
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    g = ap.add_mutually_exclusive_group(required=True)
+    g.add_argument("--check", action="store_true", help="Verify stamps, mirrors and history")
+    g.add_argument("--record", action="store_true", help="Record this version's template hashes")
+    args = ap.parse_args()
+    return check() if args.check else record()
+
+
+if __name__ == "__main__":
+    sys.exit(main())

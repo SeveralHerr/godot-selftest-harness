@@ -40,6 +40,11 @@ extends SceneTree
 # console. Redirect to a file and read it back. Every line this script emits goes
 # to stdout via print(), so one redirect captures the whole report.
 
+# harness-version: 0.5.0
+## Harness revision these files were copied from. Printed in the header of every run so
+## a lint result, and any gap logged from it, can name the version it was produced on.
+const HARNESS_VERSION: String = "0.5.0"
+
 const CONFIG_PATH: String = "res://addons/godot_selftest/devtools_config.json"
 const DEFAULT_SCAN_ROOT: String = "res://"
 const DEFAULT_TEST_DIR: String = "res://test/unit"
@@ -220,11 +225,15 @@ func _initialize() -> void:
 
 	# Output
 	if json:
+		results["harness_version"] = HARNESS_VERSION
 		results["findings"] = _findings
 		if baseline_read != "":
 			results["baseline"] = {"path": baseline_read, "new": new_findings, "pre_existing": old_findings}
 		print(JSON.stringify(results, "  "))
 	else:
+		# Header first: every lint result is evidence, and evidence that cannot name the
+		# version it came from cannot be told apart from a regression later.
+		print("lint: godot-selftest-harness %s | scan_root %s" % [HARNESS_VERSION, scan_root])
 		if not warnings_only:
 			if results["uids"]["mismatches"].is_empty():
 				print("UIDs: OK")

@@ -41,6 +41,11 @@ extends SceneTree
 ## (res://addons/godot_selftest/devtools_config.json key "test_dir", default
 ## "res://test/unit") for files named test_*.gd.
 
+# harness-version: 0.5.0
+## Harness revision these files were copied from. See lint_project.gd / the
+## `harness_version` bus verb; bump with .claude-plugin/plugin.json.
+const HARNESS_VERSION: String = "0.5.0"
+
 const CONFIG_PATH: String = "res://addons/godot_selftest/devtools_config.json"
 const DEFAULT_TEST_DIR: String = "res://test/unit"
 
@@ -226,6 +231,7 @@ func _run_single_test(test_obj: RefCounted, method_name: String, script_path: St
 func _print_results() -> void:
 	if _json_output:
 		var output: Dictionary = {
+			"harness_version": HARNESS_VERSION,
 			"passed": _passed,
 			"failed": _failed,
 			"skipped": _skipped,
@@ -245,7 +251,7 @@ func _print_results() -> void:
 
 	print("")
 	print("=" .repeat(60))
-	print("  %s Unit Tests" % project_name)
+	print("  %s Unit Tests  (godot-selftest-harness %s)" % [project_name, HARNESS_VERSION])
 	print("=" .repeat(60))
 	print("")
 

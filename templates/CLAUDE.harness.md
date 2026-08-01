@@ -80,6 +80,7 @@ Launch first: `godot --path . --mute &` then `sleep 5 && python3 tools/devtools.
 | `clear-nodes --group G` (or `--method`/`--class`) | Free matching nodes |
 | `screenshot` | Visual check only (`sleep 0.5`–`1` after a state change) |
 | `list-commands` | Discover all registered verbs (generic + project) |
+| `harness-version` | Installed harness revision (game + client). Read it once per session — it fills the `harness:` field on every gap you log. Exits 1 on a mismatch, which means a half-refreshed install |
 | `cmd <verb> --args '{...}'` | Invoke any project-registered verb |
 
 ### Add project-specific debug verbs

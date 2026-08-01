@@ -23,6 +23,7 @@ Usage:
     python3 tools/devtools.py touch press --index 0 --pos 640,360
     python3 tools/devtools.py set-feature --touchscreen true
     python3 tools/devtools.py list-commands            # Discover all registered verbs
+    python3 tools/devtools.py harness-version          # Which harness revision is installed
     python3 tools/devtools.py cmd my_project_verb --args '{"foo": 1}'
     python3 tools/devtools.py quit
 
@@ -60,6 +61,12 @@ import uuid
 from pathlib import Path
 from typing import Optional  # noqa: F401
 
+
+# harness-version: 0.5.0
+# Version of the godot-selftest-harness this client was copied from. Compared against
+# the running game's own stamp by the `harness-version` verb, so a half-refreshed
+# install (new client, old autoload) is visible instead of mysterious.
+HARNESS_VERSION = "0.5.0"
 
 COMMANDS_FILE = "devtools_commands.json"
 RESULTS_FILE = "devtools_results.json"
@@ -686,6 +693,52 @@ def cmd_list_commands(args, project_path: Path):
         print(f"  {action}")
 
 
+def cmd_harness_version(args, project_path: Path):
+    """Report the harness revision installed game-side, and this client's own.
+
+    Data keys read: harness_version, handlers, extension_loaded (see the
+    _cmd_harness_version docstring in dev_tools.gd - these two halves must agree).
+    """
+    result = send_command(project_path, "harness_version")
+
+    if not result.get("success", False):
+        message = result.get("message", "")
+        if "Unknown action" in message:
+            # A pre-0.5.0 autoload: the verb does not exist over there at all.
+            print(f"Client:  {HARNESS_VERSION}  (tools/devtools.py)")
+            print("Game:    pre-0.5.0 - the running build has no 'harness_version' verb.")
+            print("The installed addon is older than this client. Re-run "
+                  "/scaffold-godot-harness to refresh it.", file=sys.stderr)
+            sys.exit(1)
+        print(f"Failed: {message}", file=sys.stderr)
+        sys.exit(1)
+
+    data = result.get("data") or {}
+    if args.json:
+        print(json.dumps({"client": HARNESS_VERSION, **data}, indent=2))
+        return
+
+    game_version = data.get("harness_version")
+    if game_version is None:
+        # Never paper over a missing key with a friendly line - that is exactly how
+        # three wire-contract mismatches shipped invisibly in 0.4.0.
+        print("harness-version: the reply carried no 'harness_version' key. "
+              f"Keys present: {sorted(data)}", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"Game:    {game_version}  (addons/godot_selftest/dev_tools.gd)")
+    print(f"Client:  {HARNESS_VERSION}  (tools/devtools.py)")
+    if "handlers" in data:
+        ext = data.get("extension_loaded")
+        suffix = "" if ext is None else (", extension loaded" if ext else ", no extension")
+        print(f"Verbs:   {data['handlers']} registered{suffix}")
+
+    if game_version != HARNESS_VERSION:
+        print(f"\nWARNING: half-refreshed install - the game is on {game_version} and this "
+              f"client on {HARNESS_VERSION}. Re-run /scaffold-godot-harness.", file=sys.stderr)
+        sys.exit(1)
+
+
 # ==================== INPUT SIMULATION ====================
 
 
@@ -1287,6 +1340,12 @@ def main():
     p = subparsers.add_parser("list-commands", help="List all registered verbs")
     p.add_argument("--json", "-j", action="store_true", help="Output raw JSON")
     p.set_defaults(func=cmd_list_commands)
+
+    # harness-version - which harness revision is installed
+    p = subparsers.add_parser("harness-version",
+                              help="Report the installed harness version (game + client)")
+    p.add_argument("--json", "-j", action="store_true", help="Output raw JSON")
+    p.set_defaults(func=cmd_harness_version)
 
     # input - nested subcommands
     input_parser = subparsers.add_parser("input", help="Simulate input actions")

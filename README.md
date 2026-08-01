@@ -263,7 +263,8 @@ set_state, run_method, performance, quit, input_press, input_release,
 input_tap, input_clear, input_actions, input_sequence, set_game_speed,
 wait_frames, step_time, clear_nodes, validate_ui, get_ui_snapshot,
 get_node_bounds, save_ui_baseline, ui_snapshot_diff, list_commands,
-touch_press, touch_release, touch_drag, touch_clear, touch_list, set_feature
+touch_press, touch_release, touch_drag, touch_clear, touch_list, set_feature,
+harness_version
 ```
 
 Notable behaviors:
@@ -276,6 +277,15 @@ Notable behaviors:
 - **`list_commands`** returns `{"success": true, ..., "data": {"actions":
   [sorted handler names]}}` so `/verify` and the Python client can discover the
   project-registered verbs.
+- **`harness_version`** returns `{"harness_version", "handlers",
+  "extension_loaded", "config_path"}` — the revision the installed files were copied
+  from. `list_commands` shows the verbs but never the revision, so deciding whether a
+  refresh was a no-op or a real upgrade used to mean diffing template files against this
+  repo by hand. The CLI prints the game's version *and* its own and **exits 1 when they
+  differ**, which is what makes a half-refreshed install (new client, old autoload)
+  visible instead of mysterious. Every copied file also carries a
+  `# harness-version: X.Y.Z` header stamp, and `lint_project.gd` prints the version in
+  its header, so a lint result or a logged gap can always name the version it came from.
 - **`get_state`** takes an optional `properties` array (the CLI's repeatable
   `--property`). Names that don't exist come back in `data["missing"]` rather than
   being silently dropped. `data["transform"]` is **always** present — see the sharp
@@ -313,7 +323,7 @@ Generic hyphenated subcommands mirror the bus verbs:
 
 ```
 ping, screenshot, scene-tree, validate, validate-all, get-state, set-state,
-run-method, performance, quit, logs,
+run-method, performance, quit, logs, harness-version,
 input <press|release|tap|clear|list|sequence>,
 touch <press|release|drag|clear|list>, set-feature, step-time,
 set-game-speed, wait-frames, clear-nodes, validate-ui, ui-snapshot,
@@ -341,6 +351,10 @@ Two subcommands make project verbs first-class without touching the CLI:
 
 - `list-commands` — sends `{action: "list_commands"}` and prints the discovered
   verbs (generic + project).
+- `harness-version` — prints the installed revision game-side and client-side. Exits 1
+  if they disagree, or if the running build predates the verb entirely (which names the
+  fix: re-run `/scaffold-godot-harness`). Use it to fill the `harness:` field when
+  logging a gap.
 
 ### Userdata directory resolution
 

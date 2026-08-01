@@ -11,6 +11,8 @@ into someone else's repo. Read `PURPOSE.md` for what the project is committed to
 | Path | Role |
 |---|---|
 | `.claude-plugin/plugin.json` | Name, version, description. **Bump `version` on any shipped change.** |
+| `harness_history.json` | sha256 of every shipped template file, per released version. The scaffolder reads it to tell a pristine older copy (overwrite silently) from a project-edited one (back up first). |
+| `tools/record_version.py` | `--check` (stamps + mirrors + history agree with `plugin.json`) / `--record` (write this version's hashes). |
 | `commands/scaffold-godot-harness.md` | The installer. 13 idempotent steps. |
 | `commands/verify.md` | The pre-commit gate the target project runs. |
 | `templates/addons/godot_selftest/dev_tools.gd` | The bridge core + all generic verbs (~2k lines). |
@@ -75,6 +77,24 @@ hand in the scratchpad:
 
 Say plainly which of these you actually ran. "Templates unchanged since last verified run"
 is a fine answer; "should be fine" is not.
+
+## Releasing a version
+
+Every shipped file carries `# harness-version: X.Y.Z` and a matching `HARNESS_VERSION`
+constant. They are what let a gap name the version it was seen on and let a refresh tell
+a stale file from a customized one, so they must not lag the release:
+
+```bash
+python tools/record_version.py --record   # after bumping plugin.json and the stamps
+python tools/record_version.py --check    # exits 1 on any drift
+```
+
+`--check` verifies three things at once: every stamp and constant equals `plugin.json`'s
+version, `tools/upstream_gaps.py` is still byte-identical to its template, and
+`harness_history.json` holds current hashes for this version. Run it before committing.
+**Never edit or delete a past entry in `harness_history.json`** — the scaffolder uses it
+to recognize files it shipped, and a rewritten hash turns a pristine file into one that
+looks project-edited.
 
 ## Docs move together
 

@@ -48,6 +48,9 @@ import re
 import sys
 from pathlib import Path
 
+# harness-version: 0.5.0
+HARNESS_VERSION = "0.5.0"
+
 DEFAULT_DEST = "log-devtools.md"
 
 _GAP_RE = re.compile(r"^- Gap\b")

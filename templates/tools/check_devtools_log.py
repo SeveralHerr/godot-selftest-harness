@@ -43,6 +43,9 @@ import subprocess
 import sys
 from pathlib import Path
 
+# harness-version: 0.5.0
+HARNESS_VERSION = "0.5.0"
+
 DEFAULT_LOG_FILES = ["log-devtools.md"]
 
 # A dated entry heading: "## 2026-08-01 — ...". The date may sit anywhere in the
