@@ -91,9 +91,13 @@ is perishable: once a workaround is found, the friction that forced it is forgot
 the next turn. Entries that quote real output are the ones that later become features.
 
 A `Stop` hook (`tools/check_devtools_log.py`, wired into `.claude/settings.json`)
-prints a reminder when a session changes Godot code without touching the log. It is
+prints a reminder when a session changes Godot code without adding an entry **dated
+today** to the log. It reads the file's `## ` headings rather than its git status, because
+"the file changed" is satisfied by any stray byte — a log whose newest entry was three
+weeks old used to pass, which is exactly the decay the hook exists to catch. It is
 advisory by default — set `"log_check_block": true` in `devtools_config.json` to make
-it a blocking `Stop` instead. It is written in Python rather than shell so it behaves
+it a blocking `Stop` instead, or `"log_check_dated_entry": false` to fall back to the
+weaker check. It is written in Python rather than shell so it behaves
 identically on Windows, macOS, and Linux, and it always exits 0: a reminder must never
 break a session.
 
@@ -210,6 +214,7 @@ Lives at `res://addons/godot_selftest/devtools_config.json`.
 | `log_files` | Array | `["log-devtools.md"]` | Files the `Stop` hook expects to change alongside code. |
 | `log_check_globs` | Array | `[]` | Extra path substrings the `Stop` hook counts as "code". |
 | `log_check_block` | bool | `false` | `true` makes the logging reminder a blocking `Stop` instead of advisory. |
+| `log_check_dated_entry` | bool | `true` | The `Stop` hook requires an entry heading carrying **today's date**. `false` falls back to "the file changed at all", which any stray byte satisfies. |
 
 ## Generic commands
 

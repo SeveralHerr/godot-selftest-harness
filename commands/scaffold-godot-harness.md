@@ -164,7 +164,8 @@ Detect:
   "mute": true,
   "log_files": ["log-devtools.md"],
   "log_check_globs": [],
-  "log_check_block": false
+  "log_check_block": false,
+  "log_check_dated_entry": true
 }
 ```
 
