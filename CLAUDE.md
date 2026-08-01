@@ -18,6 +18,7 @@ into someone else's repo. Read `PURPOSE.md` for what the project is committed to
 | `templates/tools/devtools.py` | Python CLI client — the *other half* of the wire contract. |
 | `templates/tools/lint_project.gd`, `run_tests.gd` | Headless runners. Exit `0` pass / `1` findings / `2` couldn't run. |
 | `templates/tools/check_devtools_log.py` | `Stop` hook installed into the target project. Always exits 0. |
+| `templates/tools/upstream_gaps.py` | Pools a project log's open gaps into this repo's log, deduped by id. **`tools/upstream_gaps.py` is a byte-identical copy** — edit the template, then copy it across. |
 | `templates/devtools_ext/commands.gd` | Stub the target owns; `commands.example.gd` is the reference. |
 | `templates/CLAUDE.harness.md` | The delimited section merged into the target's `CLAUDE.md`. |
 | `templates/log-devtools.md` | Seed gaps log for target projects. |
@@ -94,6 +95,17 @@ Append an entry at the end of a working session: what you couldn't do, the real 
 proved it, and the smallest change that would have closed it. An honest "no gaps this turn"
 line counts — it's what distinguishes an absent gap from a forgotten log. There is no
 `Stop` hook wired in this repo; the discipline is manual here.
+
+Every gap carries `- [<id>] status: … | seen: N | harness: X.Y.Z`. Harness-native gaps use
+the `H-NNN` namespace; gaps pooled from a project arrive as `<project>:G-NNN` via
+`tools/upstream_gaps.py` and are never renumbered. Pull before starting a release:
+
+```bash
+python tools/upstream_gaps.py ../<game>/log-devtools.md   # deduped by id, safe to re-run
+```
+
+Closing a gap means editing its status line to `status: fixed | fixed-in: <version>` in
+**this** log — the project's copy stays open until that project refreshes and confirms it.
 
 ## Gotchas that have already cost time
 

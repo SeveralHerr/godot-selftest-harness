@@ -90,6 +90,43 @@ session wrote down what it couldn't do at the moment it couldn't do it. That evi
 is perishable: once a workaround is found, the friction that forced it is forgotten by
 the next turn. Entries that quote real output are the ones that later become features.
 
+Each gap carries a status line, which is what makes the file answerable later:
+
+```markdown
+  - [G-007] status: open | seen: 2 | harness: 0.4.0
+```
+
+Ids are stable and never reused. `status:` is `open`, `fixed` (plus `fixed-in: X.Y.Z`) or
+`wontfix`; a gap whose fix shipped only in part stays **open**. `seen:` is bumped when a
+gap bites again — a `seen: 3` is the strongest signal this file can produce, and three
+separately-worded entries are the weakest. `harness:` records the installed version
+(`python3 tools/devtools.py harness-version`), so a gap logged before an upgrade is
+distinguishable from a regression after one.
+
+### Getting gaps upstream
+
+A logged gap only becomes a fix once it reaches this repo, and for one full release the
+only transport was a human pasting text between two repositories — a transport that never
+ran. `tools/upstream_gaps.py` (installed into every project) is that transport:
+
+```bash
+# from the project, pushing its open gaps up
+python3 tools/upstream_gaps.py log-devtools.md \
+    --into /path/to/godot-selftest-harness/log-devtools.md
+
+# from the harness repo, pulling from several projects at once
+python3 tools/upstream_gaps.py ../game-a/log-devtools.md ../game-b/log-devtools.md
+```
+
+It is deliberately boring: no PR, no review step, no filtering by importance. Open gaps
+are appended verbatim, deduped by id, and `seen:` is bumped when an id reappears. Ids are
+qualified with the project name on the way up (`gather:G-007`) because a `G-007` exists in
+every project's log; a gap with no id at all still travels, under a stable `auto-<hash>`
+derived from its text. Repeat sightings within one source log collapse into the highest
+`seen:` count rather than becoming two entries. The source is never modified, nothing is
+ever deleted from the destination, and a second run on unchanged input is a no-op. Flags:
+`--project NAME`, `--include-fixed`, `--dry-run`.
+
 A `Stop` hook (`tools/check_devtools_log.py`, wired into `.claude/settings.json`)
 prints a reminder when a session changes Godot code without adding an entry **dated
 today** to the log. It reads the file's `## ` headings rather than its git status, because

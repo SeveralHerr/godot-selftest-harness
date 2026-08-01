@@ -84,7 +84,7 @@ to `<file>.bak` first so a project's own tool of the same name is never lost.
 
 ```bash
 mkdir -p "$ROOT/tools"
-for f in lint_project.gd run_tests.gd devtools.py check_devtools_log.py; do
+for f in lint_project.gd run_tests.gd devtools.py check_devtools_log.py upstream_gaps.py; do
   src="${CLAUDE_PLUGIN_ROOT}/templates/tools/$f"
   dst="$ROOT/tools/$f"
   if [ -f "$dst" ] && ! cmp -s "$src" "$dst"; then
@@ -429,9 +429,17 @@ Report a summary that includes:
 
 5. **Devtools gaps log.** `log-devtools.md` now exists and `CLAUDE.md` instructs
    every response to append an entry naming what `/verify` or the devtools
-   couldn't do, plus a suggested fix. A `Stop` hook reminds when code changes
-   land without one. Tell the user these entries are the harness's improvement
-   pipeline — worth reading periodically and feeding back upstream.
+   couldn't do, each with a `- [G-NNN] status: open | seen: 1 | harness: X.Y.Z`
+   line and a suggested fix. A `Stop` hook reminds when code changes land
+   without an entry **dated today**. These entries are the harness's improvement
+   pipeline, and they only pay off once they reach it:
+
+   ```bash
+   python3 tools/upstream_gaps.py log-devtools.md \
+       --into /path/to/godot-selftest-harness/log-devtools.md
+   ```
+
+   Deduped by id and safe to re-run. Suggest it whenever the log has open gaps.
 
 Also mention: run **`/verify`** (from this plugin) to execute the full runtime
 validation workflow (lint → headless tests → launch → ping → validate-all →
@@ -445,7 +453,8 @@ sequence → performance → quit).
   namespaced scene validator (`scene_validator.gd`), and `devtools_config.json`.
 - `res://tools/` — `lint_project.gd` (headless UID + scene lint),
   `run_tests.gd` (headless unit test runner), `devtools.py` (Python CLI client),
-  `check_devtools_log.py` (the `Stop`-hook logging reminder).
+  `check_devtools_log.py` (the `Stop`-hook logging reminder), `upstream_gaps.py`
+  (pools this project's open gaps into the harness repo's log).
 - `res://devtools_ext/commands.gd` — your project's command registry extension
   (plus `commands.example.gd` for reference).
 - `res://test/unit/` and `res://test/sequences/` — a seed unit test and a smoke
