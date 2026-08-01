@@ -49,7 +49,7 @@ in parallel against a wire contract fixed up front. Verified against Godot 4.7.1
   $ devtools.py touch clear
   No active touches to clear
   ```
-  - [H-001] status: open | seen: 1 | harness: 0.4.0
+  - [H-001] status: open | seen: 2 | harness: 0.5.0
     (the three mismatches shipped fixed in 0.4.0; the structural gap — nothing exercises
     the two halves *together* — is what stays open)
   - Improvement: **a bridge contract test that ships with the plugin.** A script that
@@ -152,7 +152,7 @@ in parallel against a wire contract fixed up front. Verified against Godot 4.7.1
 - Gap: **still no way to validate a template change** — unchanged from the entry above,
   second appearance. `CLAUDE.md` now writes down the manual scratch-project procedure,
   which makes the gap cheaper to work around and no closer to closed.
-  - [H-005] status: open | seen: 2 | harness: 0.4.0
+  - [H-005] status: open | seen: 3 | harness: 0.5.0
   - Improvement: unchanged — `tools/check_templates.sh` per the previous entry.
 
 ## 2026-08-01 - Upstreamed 14 open gap(s) from gather (harness 0.4.0)
@@ -168,7 +168,7 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   template evolution (new flags, new docstrings); no project edits existed to protect.
   Workaround: diffed all three by hand to confirm they were disposable, then reported
   them to the user rather than deleting unprompted.
-  - [gather:G-001] status: open | seen: 1 | harness: 0.4.0 | source: gather 2026-08-01
+  - [gather:G-001] status: fixed | fixed-in: 0.5.0 | seen: 1 | harness: 0.4.0 | source: gather 2026-08-01
   - Improvement: have step 4 skip the backup when the existing file matches a *known
     previous template version* — e.g. stamp a `# harness-version: N` header into copied
     tools and only back up when the target's stamp is absent or modified.
@@ -177,7 +177,7 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   merging `hud_layer_name` worked only because the existing value (`UI2`) happened to be
   non-default; a project that legitimately set it back to `"HUD"` would be
   indistinguishable from an unpatched default on the next refresh.
-  - [gather:G-002] status: open | seen: 1 | harness: 0.4.0 | source: gather 2026-08-01
+  - [gather:G-002] status: fixed | fixed-in: 0.5.0 | seen: 1 | harness: 0.4.0 | source: gather 2026-08-01
   - Improvement: write a `"_scaffold_defaults"` sidecar block into
     `devtools_config.json` recording the values scaffold last wrote, so a later run can
     diff "what I wrote" against "what's there now" and only overwrite untouched keys.
@@ -185,7 +185,7 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
 - Gap: **No verb reports which harness version is installed** — deciding whether this
   refresh was a no-op or a real upgrade required diffing template files against the
   repo by hand. `list-commands` shows verbs but not the harness revision.
-  - [gather:G-003] status: open | seen: 2 | harness: 0.4.0 | source: gather 2026-08-01
+  - [gather:G-003] status: fixed | fixed-in: 0.5.0 | seen: 2 | harness: 0.4.0 | source: gather 2026-08-01
   - Improvement: add a `harness-version` verb (and a line in `lint_project.gd`'s header
     output) reporting the template revision the installed files came from.
 
@@ -197,7 +197,7 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   pass looks like to an agent grepping for the exit code. Workaround: fell back to
   running the whole suite, which defeats the point of a filter when several agents are
   adding test files concurrently.
-  - [gather:G-004] status: open | seen: 2 | harness: 0.4.0 | source: gather 2026-08-01
+  - [gather:G-004] status: fixed | fixed-in: 0.5.0 | seen: 2 | harness: 0.4.0 | source: gather 2026-08-01
   - Improvement: match `--filter` against the test *script filename* as well as the
     method name, and make a run that selected zero tests exit non-zero (or at minimum
     print `filter '<x>' selected 0 of N tests` as a warning).
@@ -210,6 +210,9 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   Workaround: pre-created stub files declaring all four new `class_name`s, ran `--import`
   once up front, then told every agent not to run it.
   - [gather:G-005] status: open | seen: 3 | harness: 0.4.0 | source: gather 2026-08-01
+    (0.5.0 shipped the `--session` half, so N instances no longer answer each
+    other's commands; the `--import` class-cache race this entry also names is
+    untouched, so the gap stays open)
   - Improvement: teach `tools/devtools.py` to derive its command/result filenames from a
     `--session` id (defaulting to the current behaviour), and have `scaffold` document a
     `--session` + `use_custom_user_dir` recipe, so N agents can each own an instance.
@@ -218,7 +221,7 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   notice** — `lint_project.gd` reported `UIDs: OK` for `test/unit/test_enemy_spawner.gd`
   while the file had no sidecar at all, because the check only validates sidecars that
   exist. CLAUDE.md requires committing them alongside the script.
-  - [gather:G-006] status: open | seen: 1 | harness: 0.4.0 | source: gather 2026-08-01
+  - [gather:G-006] status: fixed | fixed-in: 0.5.0 | seen: 1 | harness: 0.4.0 | source: gather 2026-08-01
   - Improvement: have the UID pass flag `.gd` files under `scan_root`/`test_dir` with no
     `.uid` sidecar as a warning, so the omission is visible before commit rather than at
     review time.
@@ -229,7 +232,7 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   required leaving the project entirely: `git -C ~/Documents/GitHub/godot-selftest-harness
   log --oneline` showed `922c45d Ship the devtools gaps log, and close the gaps it recorded
   (0.4.0)`. Nothing in this repo records that.
-  - [gather:G-007] status: open | seen: 1 | harness: 0.4.0 | source: gather 2026-08-01
+  - [gather:G-007] status: fixed | fixed-in: 0.5.0 | seen: 1 | harness: 0.4.0 | source: gather 2026-08-01
   - Improvement: give each gap a stable id and a status line —
     `- [G-007] status: open | fixed-in: 0.5.0 | seen: 2` — so a fixed gap can be filtered
     out before the log is pasted back, and recurrences can be counted instead of narrated.
@@ -239,7 +242,7 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   normalized]`, so any byte-level change to `log-devtools.md` satisfies it. A session that
   appends "no gaps this turn" forever passes the check forever, which is precisely the
   decay mode the hook exists to catch.
-  - [gather:G-008] status: open | seen: 1 | harness: 0.4.0 | source: gather 2026-08-01
+  - [gather:G-008] status: fixed | fixed-in: 0.5.0 | seen: 1 | harness: 0.4.0 | source: gather 2026-08-01
   - Improvement: require an entry whose `## ` heading carries today's date, rather than
     treating the file's mere presence in `git status` as compliance.
 
@@ -285,7 +288,7 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   transport has never run for this batch: the harness log's only heading is
   `## 2026-08-01 — Ship the gaps log, close what it recorded (0.4.0)`, so all six of this
   project's gaps are still local.
-  - [gather:G-012] status: open | seen: 2 | harness: 0.4.0 | source: gather 2026-08-01
+  - [gather:G-012] status: fixed | fixed-in: 0.5.0 | seen: 2 | harness: 0.4.0 | source: gather 2026-08-01
   - Improvement: as already filed — an `upstream_gaps` script that appends open gaps to
     the harness repo's log, deduped by id. The prompt written this turn is the manual
     version of exactly that script, which is the strongest evidence yet that it should
@@ -326,3 +329,180 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   - Improvement: teach `lint_project.gd` a `--baseline`-style vendored-path skip list (or reuse
     the existing `--baseline` split) so `addons/*` findings report as PRE-EXISTING/VENDORED
     instead of NEW.
+
+## 2026-08-01 — Close the game's backlog and repair the feedback loop (0.5.0)
+
+First release driven by gaps logged in a *different* repo. Nine items: four on the loop
+itself (ids/status, the `Stop` hook, an upstream script, version stamping) and five on
+what the game actually hit. Validated against Godot 4.6.1 in a scratch project assembled
+from `templates/`, plus a reconstructed 0.4.0 install for the upgrade path.
+
+**Closed in 0.5.0** — `gather:G-001` `G-002` (scaffold refresh hygiene), `gather:G-003`
+(harness version), `gather:G-004` (test filter), `gather:G-006` (missing UID sidecars),
+`gather:G-007` (gap ids/status), `gather:G-008` (Stop hook), `gather:G-012` (upstream
+path), `H-006` (this repo's own always-on context). `gather:G-005` stays **open**: the
+`--session` half shipped, the `--import` class-cache race it also names did not.
+
+**Still open and untouched**: `gather:G-009` (no owner-PID detection for a stale
+instance), `gather:G-010` (`run-method` needs an absolute `/root/` path),
+`gather:G-011` (game-level, belongs in that project's `commands.gd`), `gather:G-013`
+`G-014` (web-export renderer lint, headless export check), `gather:G-015` (vendored
+addon UIDs). All six are now pooled here rather than only in the game's log, which is
+the loop working.
+
+- Gap: **a byte-level hash comparison silently does nothing on Windows, and the failure
+  looks exactly like the bug it was meant to fix.** `B4`'s "don't back up a pristine
+  file" check compares sha256 against recorded hashes. With `core.autocrlf=true` — the
+  default on Windows — the plugin and the target project hold CRLF copies of files whose
+  recorded hashes were computed from LF bytes, so *nothing ever matches* and every file
+  is backed up exactly as before. The first run against a reconstructed 0.4.0 install:
+  ```
+  ! tools/lint_project.gd was MODIFIED locally -> saved as tools/lint_project.gd.bak
+  ...
+  .bak files created: 6
+  ```
+  Found only because the upgrade was actually simulated; reading the code shows nothing,
+  and the feature would have shipped looking implemented and doing nothing.
+  - [H-008] status: fixed | fixed-in: 0.5.0 | seen: 1 | harness: 0.5.0
+  - Improvement (done): hash content with line endings normalized to LF, in both
+    `record_version.py` and `scaffold_install.py`, with a comment in each saying why they
+    must agree.
+  - Improvement (still open): the template-check script `H-005` keeps asking for should
+    include an **upgrade** case, not just a fresh install — build a project from the
+    previous release's templates, run the installer, and assert zero `.bak` files. Every
+    scaffold bug in this log is a refresh bug, and a fresh-install test would have caught
+    none of them.
+
+- Gap: **the seeded `log-devtools.md` can never be updated in a project that already has
+  one.** Scaffold step 9a creates it only if absent (correctly — it must never truncate a
+  real log), so the `## Format` section installed on day one is frozen forever. `A1`
+  changed that format, and the game's log still documents the old one; the ids had to be
+  retrofitted there by hand, from this repo. `CLAUDE.md` solves the same problem with
+  `<!-- BEGIN/END -->` markers and refreshes in place.
+  - [H-009] status: open | seen: 1 | harness: 0.5.0
+  - Improvement: wrap the log's header/Format section in the same delimiters and have
+    step 9a refresh *that block* while leaving every entry untouched — so the format can
+    evolve without a hand edit in every project that uses the harness.
+
+- Gap: **nothing tests the scaffolder, which is now the most intricate part of the
+  plugin.** `scaffold_install.py` has a genuinely non-obvious ownership rule (a key the
+  project edits becomes project-owned permanently, so a value later set *back* to the
+  default is still preserved). Getting it right took three attempts, each caught only by
+  hand-building a fake project in the scratchpad and eyeballing the output — including
+  one bug where keys matching the shipped default never entered the owned set at all and
+  every upstream default change was silently declined.
+  - [H-010] status: open | seen: 1 | harness: 0.5.0
+  - Improvement: a `tools/test_scaffold.py` driving `scaffold_install.py` over temp
+    projects and asserting the outcomes (fresh, pristine upgrade, edited file, edited
+    key, key-reverted-to-default, re-run). Every case already exists as a shell
+    incantation in this session's transcript; none is repeatable.
+
+- Verified this turn with no gap: driving the real `devtools.py` against the real
+  autoload over the file bus caught nothing new, because the two halves were edited
+  together this time — `harness_version` and `ping` gained their `data` keys on both
+  sides in one commit, per `CLAUDE.md`. Two headless instances sharing one `user://`
+  answered only their own clients, which is the first time parallel runtime verification
+  has been possible at all.
+
+## 2026-08-01 - Upstreamed 7 open gap(s) from gather (harness 0.4.0)
+
+Pooled by `tools/upstream_gaps.py` from `C:\Users\gotmi\Documents\GitHub\gather\log-devtools.md`. Gap text is the project's,
+verbatim; only the id line is rewritten (qualified with the project name so
+ids from two projects cannot collide, plus a `source:` back-pointer).
+
+- Gap: **No way to read whether an input action is currently pressed** — the whole point of
+  the touch overlay is that a button latches a real `InputMap` action and later releases it,
+  but `input list` reports only the *bindings*:
+  `gather: E - Physical` / `attack: Space - Physical`. There is no `Input.is_action_pressed`
+  readout, so proving "the MINE button is holding `gather` right now" had to be done
+  indirectly through whatever gameplay node happened to expose the state —
+  `cmd player_state` (`state=PlayerGather`) for gather, and
+  `get-state --node /root/Main/DestroyManager --property is_holding_e` for destroy. A project
+  without such a node could not assert a held action at all.
+  - [gather:G-021] status: open | seen: 1 | harness: 0.4.0 | source: gather 2026-08-01
+  - Improvement: add `input state [ACTION...]` returning
+    `{action: {pressed: bool, strength: float}}` from `Input.is_action_pressed` /
+    `get_action_strength`, so a hold/release pair is assertable without a gameplay proxy.
+
+- Gap: **The drift check names files but cannot say which side is ahead** — Phase 0 reported
+  `DRIFT:` on all six harness files (`dev_tools.gd`, `scene_validator.gd`, `devtools.py`,
+  `lint_project.gd`, `run_tests.gd`, `check_devtools_log.py`) while `tools/*.bak` copies from
+  the last in-place refresh sat untracked beside them. `cmp -s` gives a boolean, so
+  "the project patched this locally" and "the install predates the plugin" look identical, and
+  the workflow's own instruction to compare `git log -1 --format=%cd` fails for the plugin side
+  because those templates live outside this repo. Resolved by reporting drift unresolved.
+  - [gather:G-022] status: open | seen: 1 | harness: 0.4.0 | source: gather 2026-08-01
+  - Improvement: stamp a `# harness-template: <sha>` line into each copied template at scaffold
+    time; the drift check then compares stamps and reports ahead/behind instead of just differs.
+    Closes with [G-003], which is the same missing-version-identity problem at verb level.
+
+- Gap: **`set-state` cannot write a vector-typed property** — the documented `run-method`
+  coercion gap (`gather-6sp`) also applies to `set-state`. Resizing the viewport to exercise
+  `camera_hud.gd`'s `size_changed` handler needed `/root.size`, and every value form silently
+  produced garbage rather than erroring:
+  ```
+  $ devtools.py set-state --node "/root" --property size --value '{"x":1280,"y":720}'
+  State updated
+  $ devtools.py get-state --node "/root" --property size
+  size: (232, 64)
+  ```
+  `--value '[1280,720]'` produced the same `(232, 64)`. The run still proved the reflow
+  (the HUD tracked 232x64 exactly: `Rect: -160, -62, 47x13` == `232/4.935 x 64/4.935`), but
+  by accident — the resize I asked for is not the resize I got, and nothing said so.
+  - [gather:G-016] status: open | seen: 1 | harness: 0.4.0 | source: gather 2026-08-01
+  - Improvement: have `set-state` coerce a 2/3/4-element array or an `{x,y,...}` dict to the
+    property's declared type via `type_convert()`, and **fail loudly** when the target
+    property is a vector type and the value cannot be converted, instead of writing whatever
+    the bad cast yields and answering `State updated`.
+
+- Gap: **No verb resizes the window, so the single most important behaviour of a
+  resolution change is untestable by design** — `/verify` has `set-game-speed`,
+  `wait-frames` and `step-time` for the time axis and nothing at all for the viewport axis.
+  Every anchor, every `size_changed` handler and every `get_viewport_rect()` caller in the
+  project is only ever exercised at one size unless you quit and relaunch with
+  `--resolution WxH`, which costs a full boot per data point and cannot test the
+  *transition* at all.
+  - [gather:G-017] status: open | seen: 1 | harness: 0.4.0 | source: gather 2026-08-01
+  - Improvement: add a generic `set-resolution --size WxH` verb that calls
+    `DisplayServer.window_set_size()` and returns the resulting `get_viewport_rect().size`,
+    so a caller can assert the resize landed before asserting on layout.
+
+- Gap: **`validate-ui` applies screen-space checks to world-space Controls, so its verdict
+  is a function of where the player is standing** — this project's diegetic HUD hangs off
+  `Player/Camera2D`, and `ui_negative_pos` reports its *global* position:
+  ```
+  [WARN] ui_negative_pos: Label 'Label3' has negative position (-267, -51)
+  ```
+  That number is the player's world position plus an offset; it says nothing about layout.
+  9 of the run's 9 findings were this. Deciding whether the change regressed anything took a
+  full `git stash` + relaunch + `validate-ui` on HEAD to compare (HEAD: 10 issues, branch: 9
+  — the change removes `ui_zero_size` on `UI`), which is exactly the hand-triage that lint's
+  `--baseline` exists to abolish.
+  - [gather:G-018] status: open | seen: 1 | harness: 0.4.0 | source: gather 2026-08-01
+  - Improvement: give `validate-ui` the same `--baseline PATH` / `--baseline-write PATH`
+    split `lint_project.gd` already has, so UI findings report as `NEW` vs `PRE-EXISTING`;
+    and skip `ui_negative_pos` for Controls whose canvas ancestor is not a `CanvasLayer`,
+    where negative coordinates are the normal case rather than a defect.
+
+- Gap: **`input press <action>` does not drive the gather loop, and the failure is
+  indistinguishable from a real bug** — after `cmd goto_resource` put the player 6 units from
+  a Stone node, holding `gather` for 1.8s left `state: PlayerIdle` and `xp: 0`, with the
+  census unchanged. Confirming this was pre-existing rather than a regression from the scene
+  edits cost another stash + relaunch cycle on HEAD (identical `PlayerIdle`). CLAUDE.md
+  already warns that driving gather through the hotbar's stop signal leaves the timer
+  running; the *start* side has the same class of problem and is undocumented.
+  - [gather:G-019] status: open | seen: 1 | harness: 0.4.0 | source: gather 2026-08-01
+  - Improvement: add a project verb `gather_once` in `devtools_ext/commands.gd` that calls
+    `ResourceManager2.start_removing_resource()` directly and returns the node it engaged
+    (or an explicit `"no resource in reach"`), so a gather assertion tests the gather loop
+    instead of testing input plumbing.
+
+- Gap: **Harness drift is detected but the report has no bearing on the run** — Phase 0
+  flagged `DRIFT: tools/check_devtools_log.py differs from the plugin template`, with the
+  plugin ahead (`Sat Aug 1 15:45:28 2026` vs the project's `Sat Aug 1 14:33:55 2026`). Three
+  stale `.bak` files from an earlier refresh (`tools/devtools.py.bak`, `tools/lint_project.gd.bak`,
+  `tools/run_tests.gd.bak`) are still sitting untracked in the tree, which is what a
+  half-finished refresh looks like.
+  - [gather:G-020] status: open | seen: 1 | harness: 0.4.0 | source: gather 2026-08-01
+  - Improvement: have `/scaffold-godot-harness` delete its own `.bak` files once the refreshed
+    file passes a syntax check, so a completed refresh leaves no residue to mistake for drift.
