@@ -4,15 +4,30 @@ extends SceneTree
 ## Generic headless unit test runner for the godot_selftest harness.
 ## Run: godot --headless --script res://tools/run_tests.gd
 ## Args: -- --json          Output results as JSON
-##       -- --filter NAME   Run only tests matching NAME
+##       -- --filter NAME   Run only tests whose METHOD NAME or SCRIPT FILENAME
+##                          contains NAME (case-insensitive)
+##       -- --file NAME     Run only tests from this test script. NAME may be a
+##                          bare basename (test_player), a filename
+##                          (test_player.gd) or any substring of the path.
+##
+## --filter and --file combine with AND, so `--file test_player --filter damage`
+## runs the damage tests of one file.
 ##
 ## Exit codes. The runner always calls quit() with its own result, so the process
 ## exit code means "the tests said so" and never "Godot leaked an RID at shutdown":
-##   0  every discovered test passed (or every test was filtered out)
+##   0  every selected test passed
 ##   1  one or more tests failed
-##   2  the runner itself could not run - test_dir is missing, or a test script
-##      failed to load / instantiate. Nothing was proven either way; treat this as
-##      a broken gate, not as a test failure.
+##   2  the runner itself could not run, i.e. NOTHING WAS VERIFIED - test_dir is
+##      missing, a test script failed to load / instantiate, no test scripts were
+##      discovered at all, or a --filter/--file selected zero of the discovered
+##      tests. Treat this as a broken gate, not as a test failure.
+##
+## That last case used to exit 0. A filter matching nothing skipped the entire
+## suite and printed `Total: 0 | Passed: 0 | Failed: 0`, which is byte-identical
+## to a clean pass for anything reading the exit code - and two agents in one
+## session shipped work on the strength of it. A selection that selects nothing
+## is now a runner error naming what it did: `filter 'spawner' selected 0 of 111
+## discovered test(s)`.
 ##
 ## Windows note: the stock Godot .exe is the non-console build and prints nothing
 ## to a PowerShell console, so redirect headless runs to a file and read that back
@@ -60,7 +75,14 @@ var _errors: Array[Dictionary] = []
 var _results: Array[Dictionary] = []
 var _json_output: bool = false
 var _filter: String = ""
+var _file_filter: String = ""
 var _runner_error: bool = false
+## Test methods found before any selector was applied, and how many survived it.
+var _discovered: int = 0
+var _selected: int = 0
+## Set when a selector matched nothing. Reported instead of "the suite did not
+## complete", because the suite is fine - the selector isn't.
+var _selection_error: String = ""
 
 
 func _initialize() -> void:
@@ -72,6 +94,9 @@ func _initialize() -> void:
 			"--filter":
 				if i + 1 < args.size():
 					_filter = args[i + 1]
+			"--file":
+				if i + 1 < args.size():
+					_file_filter = args[i + 1]
 
 	var test_dir: String = _load_test_dir()
 	if not DirAccess.dir_exists_absolute(test_dir):
@@ -82,14 +107,72 @@ func _initialize() -> void:
 		return
 
 	var test_scripts: Array[String] = _discover_test_scripts(test_dir)
+	if test_scripts.is_empty():
+		# "0 tests passed" is not a pass. Discovering nothing means the gate did
+		# not run, so say so rather than reporting a clean sweep of an empty set.
+		_runner_error = true
+		_errors.append({
+			"script": test_dir,
+			"error": "no test_*.gd scripts found - nothing was verified",
+		})
+		_print_results()
+		quit(_exit_code())
+		return
 
 	# Test methods may await, so the whole run is a coroutine. _initialize()
 	# returns at the first await and the main loop resumes it frame by frame;
 	# quit() is only reached once every test has actually finished.
 	await _run_all_tests(test_scripts)
+
+	if _selected == 0 and _discovered > 0:
+		_runner_error = true
+		_selection_error = "%s selected 0 of %d discovered test(s)" % [
+			_selector_description(), _discovered,
+		]
+
 	_print_results()
 
 	quit(_exit_code())
+
+
+## Human-readable form of whichever selectors were passed, for the zero-match error.
+func _selector_description() -> String:
+	var parts: PackedStringArray = []
+	if _filter != "":
+		parts.append("filter '%s'" % _filter)
+	if _file_filter != "":
+		parts.append("file '%s'" % _file_filter)
+	if parts.is_empty():
+		return "selection"
+	return " + ".join(parts)
+
+
+## True when a test method survives --filter and --file.
+##
+## --filter deliberately matches the SCRIPT FILENAME as well as the method name:
+## matching method names alone meant `--filter spawner` against a brand new
+## test_enemy_spawner.gd selected nothing at all, because none of its methods
+## happened to repeat the word. Both comparisons are case-insensitive.
+func _is_selected(method_name: String, script_path: String) -> bool:
+	var file_name: String = script_path.get_file()
+
+	if _file_filter != "":
+		var want: String = _file_filter.to_lower()
+		var have: String = file_name.to_lower()
+		var matched: bool = (
+			have == want
+			or have == want + ".gd"
+			or script_path.to_lower().contains(want)
+		)
+		if not matched:
+			return false
+
+	if _filter != "":
+		var needle: String = _filter.to_lower()
+		if not (method_name.to_lower().contains(needle) or file_name.to_lower().contains(needle)):
+			return false
+
+	return true
 
 
 func _exit_code() -> int:
@@ -176,9 +259,11 @@ func _run_all_tests(test_scripts: Array[String]) -> void:
 			var method_name: String = method["name"]
 			if not method_name.begins_with("test_"):
 				continue
-			if _filter != "" and not method_name.contains(_filter):
+			_discovered += 1
+			if not _is_selected(method_name, script_path):
 				_skipped += 1
 				continue
+			_selected += 1
 
 			await _run_single_test(test_obj, method_name, script_path)
 
@@ -236,6 +321,11 @@ func _print_results() -> void:
 			"failed": _failed,
 			"skipped": _skipped,
 			"total": _passed + _failed + _skipped,
+			"discovered": _discovered,
+			"selected": _selected,
+			"filter": _filter,
+			"file": _file_filter,
+			"selection_error": _selection_error,
 			"errors": _errors,
 			"results": _results,
 			"runner_error": _runner_error,
@@ -271,9 +361,16 @@ func _print_results() -> void:
 	print("-" .repeat(60))
 	var total: int = _passed + _failed + _skipped
 	print("  Total: %d  |  Passed: %d  |  Failed: %d  |  Skipped: %d" % [total, _passed, _failed, _skipped])
+	if _filter != "" or _file_filter != "":
+		print("  Selected: %d of %d discovered  (%s)" % [_selected, _discovered, _selector_description()])
 	print("-" .repeat(60))
 
-	if _runner_error:
+	if _selection_error != "":
+		print("  SELECTED NOTHING - %s (exit 2)" % _selection_error)
+		print("  Nothing was verified. --filter matches method names and test script")
+		print("  filenames; --file matches the script path. Run without selectors to")
+		print("  see what exists.")
+	elif _runner_error:
 		print("  RUNNER ERROR - the suite did not run to completion (exit 2)")
 	elif _failed == 0:
 		print("  ALL TESTS PASSED")

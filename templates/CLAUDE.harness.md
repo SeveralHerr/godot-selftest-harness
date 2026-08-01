@@ -20,6 +20,10 @@ godot --headless --path . --script res://tools/run_tests.gd      # unit tests (t
 Exit codes (both): `0` pass, `1` findings, `2` **the runner couldn't run** — a `2` means you
 verified nothing. Redirect to a file and read it back; the Windows Godot build often prints
 nothing to the console, so a failed run looks like silent success.
+Test flags (after `--`): `--filter NAME` (matches method name **or** test script filename),
+`--file NAME` (one script; combines with `--filter` via AND), `--json`. A selector matching
+nothing is exit `2` (`SELECTED NOTHING — …selected 0 of N discovered`), never a pass — check
+the `Selected: N of M discovered` line, not just the exit code.
 Lint flags (after `--`): `--strict` (warnings fail), `--baseline-write PATH` /
 `--baseline PATH` (split findings into `NEW` vs `PRE-EXISTING` so repo debt isn't re-triaged
 by hand), `--find-orphans` (public functions called only from tests — advisory).

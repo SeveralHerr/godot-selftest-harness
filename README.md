@@ -427,6 +427,22 @@ This makes layout, anchors, and container sorting assertable. It does **not** ma
 pixels assertable — nothing is rendered. Visual regressions still need a running game
 and a screenshot.
 
+The test runner's flags (pass after `--`):
+
+| Flag | Purpose |
+|---|---|
+| `--filter NAME` | Run tests whose **method name or test script filename** contains `NAME` (case-insensitive). |
+| `--file NAME` | Run one test script: a bare name (`test_player`), a filename (`test_player.gd`), or any path substring. Combines with `--filter` via AND. |
+| `--json` | Emit the full result dictionary, including `discovered`, `selected`, `filter`, `file`, `selection_error`. |
+
+**A selection that matches nothing is exit 2, not a pass.** `--filter` used to match method
+names only, so `--filter spawner` against a brand-new `test_enemy_spawner.gd` selected
+nothing, skipped the entire suite, and printed `Total: 0 | Passed: 0 | Failed: 0` with exit
+`0` — byte-identical to a clean run for anything grepping the exit code. Two agents in one
+session shipped work on the strength of that output. The runner now matches filenames too,
+reports `Selected: N of M discovered` whenever a selector is in play, and treats a
+zero-selection (or discovering no test scripts at all) as "nothing was verified".
+
 ### What the test runner cannot catch
 
 GDScript has no exception handling, and a runtime error inside a test method aborts

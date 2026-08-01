@@ -98,6 +98,14 @@ cat tests.log
 
 `run_tests.gd` auto-discovers tests under the configured `test_dir`. Stop if any tests fail.
 
+**Narrowing the run.** `--filter NAME` matches a test's method name **or its script filename**; `--file NAME` matches the script path (bare name, filename, or substring). They combine with AND:
+
+```bash
+"$GODOT_BIN" --headless --path . --script res://tools/run_tests.gd -- --file test_player --filter damage
+```
+
+A selector that matches nothing is **exit 2**, not a pass: `SELECTED NOTHING - filter 'spawner' selected 0 of 111 discovered test(s)`. Before this, a filter that hit nothing skipped the whole suite and printed `Total: 0 | Passed: 0 | Failed: 0` with exit 0 — indistinguishable from a clean run, and work shipped on the strength of it. Discovering no test scripts at all is exit 2 for the same reason. The summary line now also prints `Selected: N of M discovered` whenever a selector is in play, so a filter quietly matching two of eleven files is visible in the output rather than only in the exit code.
+
 **Capture stderr, and read it.** Two failure modes only appear there:
 
 - A test script that fails to parse. The runner now reports this as exit `2` with an `[ERR]` line, but before that fix a broken script printed `Total: 0 | ALL TESTS PASSED` and exited `0` while real tests sat undiscovered beside it. Never read "all tests passed" without checking the test *count* is what you expect.
