@@ -51,7 +51,7 @@ Read these keys from `project.godot` (do **not** write them into any file):
 - `run/main_scene` — used in step 7.
 
 Use these to compute and later report the exact `user://` directory the Python
-client polls (see step 12). The default per-platform Godot userdata dir is:
+client polls (see step 13). The default per-platform Godot userdata dir is:
 
 - macOS: `~/Library/Application Support/Godot/app_userdata/<name>/`
 - Linux: `~/.local/share/godot/app_userdata/<name>/`
@@ -84,7 +84,7 @@ to `<file>.bak` first so a project's own tool of the same name is never lost.
 
 ```bash
 mkdir -p "$ROOT/tools"
-for f in lint_project.gd run_tests.gd devtools.py; do
+for f in lint_project.gd run_tests.gd devtools.py check_devtools_log.py; do
   src="${CLAUDE_PLUGIN_ROOT}/templates/tools/$f"
   dst="$ROOT/tools/$f"
   if [ -f "$dst" ] && ! cmp -s "$src" "$dst"; then
@@ -156,11 +156,29 @@ Detect:
   "scan_root": "res://",
   "fps_min": 30,
   "orphan_max": 0,
+  "orphan_growth_max": 20,
+  "safe_area_inset": { "left": 0, "top": 0, "right": 0, "bottom": 0 },
   "main_scene": "",
   "entry_hook": { "node_path": "", "method": "" },
-  "mute": true
+  "entry_points": {},
+  "mute": true,
+  "log_files": ["log-devtools.md"],
+  "log_check_globs": [],
+  "log_check_block": false
 }
 ```
+
+Notes on the newer keys, so a patch of an existing config doesn't get them wrong:
+
+- `orphan_max` is retained for compatibility but is **not** the gate — `0` is
+  unreachable (a real project reports dozens of orphans on a fresh launch). `/verify`
+  gates on `orphan_growth_max`, growth vs. the session baseline.
+- `safe_area_inset` all-zero **disables** the safe-area check, so scaffolding adds no
+  new findings to an existing project. Populate it only where an overlay, notch, or
+  rounded corner actually eats the viewport edge.
+- `entry_points` is optional; each entry is `{scene, node_path, method, args, match}`
+  and lets `/verify` reach a scene the single `entry_hook` can't (a boss room, a shop).
+- The `log_*` keys drive the `Stop` hook from step 9.
 
 Set `main_scene` and `hud_layer_name` from detection; leave the rest at defaults
 unless the project already customized them.
@@ -223,7 +241,90 @@ The template section is deliberately **lean and reference-style** (a pointer /
 cheat-sheet, not a manual) because `CLAUDE.md` is always-on, per-session context.
 Keep the full procedures in `/verify`, this command, and the README.
 
-## Step 9 — Wire the DevTools autoload (idempotent)
+## Step 9 — Install the devtools gaps log + its `Stop` hook
+
+The harness improves from evidence, and the evidence is perishable: the moment a
+workaround is found, the friction that forced it is forgotten. `log-devtools.md`
+is where each session records what `/verify` or the devtools couldn't do, so those
+gaps can later be upstreamed into the harness itself.
+
+Three pieces, all idempotent:
+
+**9a. Seed the log** — create it only if absent, so an existing log is never
+truncated:
+
+```bash
+if [ ! -f "$ROOT/log-devtools.md" ]; then
+  cp "${CLAUDE_PLUGIN_ROOT}/templates/log-devtools.md" "$ROOT/log-devtools.md"
+  echo "Created log-devtools.md"
+else
+  echo "log-devtools.md already exists — left untouched."
+fi
+```
+
+**9b. The hook script** — `tools/check_devtools_log.py` was already copied in step 4.
+It is a Claude Code `Stop` hook: it asks git whether this session changed Godot code
+without also changing `log-devtools.md`, and if so prints a `systemMessage` reminder.
+It is written in Python (not shell) because the harness already requires Python 3 for
+`devtools.py`, and this way the hook works identically on Windows, macOS, and Linux.
+It always exits 0 — a reminder must never break a session.
+
+**9c. Wire the `Stop` hook into `<ROOT>/.claude/settings.json`.** Merge, never
+overwrite: a project may already have hooks. Detect the Python interpreter first
+(`python3` on macOS/Linux, usually `python` on Windows).
+
+**Probe each candidate by actually running it — do not use `command -v`.** On Windows,
+`command -v python3` succeeds against the Microsoft Store *App execution alias* stub,
+which then refuses to run (`Python was not found; run without arguments to install from
+the Microsoft Store…`). Existence is not executability, and a hook wired to that stub
+fails silently on every turn:
+
+```bash
+PY=""
+for c in python3 python py; do
+  if "$c" -c "import sys" >/dev/null 2>&1; then PY="$c"; break; fi
+done
+[ -z "$PY" ] && echo "WARN: no working Python found — skipping the Stop hook (devtools.py also needs it)."
+
+[ -n "$PY" ] && ROOT="$ROOT" PY="$PY" "$PY" - <<'PYEOF'
+import json, os, pathlib
+root = pathlib.Path(os.environ["ROOT"])
+py = os.environ["PY"]
+settings = root / ".claude" / "settings.json"
+marker = "check_devtools_log.py"
+cmd = 'cd "${CLAUDE_PROJECT_DIR:-.}" && %s tools/check_devtools_log.py' % py
+
+data = {}
+if settings.exists():
+    text = settings.read_text(encoding="utf-8").strip()
+    data = json.loads(text) if text else {}
+
+stop = data.setdefault("hooks", {}).setdefault("Stop", [])
+if any(marker in h.get("command", "") for e in stop for h in e.get("hooks", [])):
+    print("Devtools-log Stop hook already installed — no change.")
+else:
+    stop.append({"hooks": [{
+        "type": "command",
+        "command": cmd,
+        "timeout": 10,
+        "statusMessage": "Checking devtools log...",
+    }]})
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    settings.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    print("Installed the devtools-log Stop hook in .claude/settings.json")
+PYEOF
+```
+
+If the project's `.claude/settings.json` is malformed JSON, **stop and report it**
+rather than overwriting — that file may hold permissions the user depends on.
+
+The hook is **advisory** by default (it warns; it does not fail or restart the turn).
+A project that finds the warning easy to ignore can set `"log_check_block": true` in
+`devtools_config.json` to make it a blocking `Stop` instead. Step 8's `CLAUDE.md`
+section carries the matching instruction — the hook only reminds; the convention
+itself lives in `CLAUDE.md`.
+
+## Step 10 — Wire the DevTools autoload (idempotent)
 
 Add the DevTools autoload to `project.godot` **only if it is not already
 present**. Find the `[autoload]` section; if there is no `DevTools=` line,
@@ -254,7 +355,7 @@ else
 fi
 ```
 
-## Step 10 — Detect the Godot binary
+## Step 11 — Detect the Godot binary
 
 Resolve the Godot binary in this priority order and record it for `/verify`:
 
@@ -274,7 +375,7 @@ else GODOT=""; fi
 [ -n "$GODOT" ] && echo "Godot binary: $GODOT" || echo "WARN: no Godot binary found. Set GODOT_BIN."
 ```
 
-## Step 11 — Smoke check
+## Step 12 — Smoke check
 
 If a Godot binary was found, run the headless linter to confirm the project
 loads and the core parses:
@@ -287,7 +388,7 @@ Surface any parser errors or load failures verbatim. A clean exit (code 0) plus
 per-scene `OK` / `UIDs: OK` output means the install parses. If it fails, report
 the error and stop before claiming success.
 
-## Step 12 — Print next steps
+## Step 13 — Print next steps
 
 Report a summary that includes:
 
@@ -325,6 +426,12 @@ Report a summary that includes:
    (between the `godot-selftest-harness` markers) so future sessions know it
    exists and how to drive it — re-running scaffold refreshes that section.
 
+5. **Devtools gaps log.** `log-devtools.md` now exists and `CLAUDE.md` instructs
+   every response to append an entry naming what `/verify` or the devtools
+   couldn't do, plus a suggested fix. A `Stop` hook reminds when code changes
+   land without one. Tell the user these entries are the harness's improvement
+   pipeline — worth reading periodically and feeding back upstream.
+
 Also mention: run **`/verify`** (from this plugin) to execute the full runtime
 validation workflow (lint → headless tests → launch → ping → validate-all →
 sequence → performance → quit).
@@ -336,7 +443,8 @@ sequence → performance → quit).
 - `res://addons/godot_selftest/` — the DevTools core (`dev_tools.gd`), the
   namespaced scene validator (`scene_validator.gd`), and `devtools_config.json`.
 - `res://tools/` — `lint_project.gd` (headless UID + scene lint),
-  `run_tests.gd` (headless unit test runner), `devtools.py` (Python CLI client).
+  `run_tests.gd` (headless unit test runner), `devtools.py` (Python CLI client),
+  `check_devtools_log.py` (the `Stop`-hook logging reminder).
 - `res://devtools_ext/commands.gd` — your project's command registry extension
   (plus `commands.example.gd` for reference).
 - `res://test/unit/` and `res://test/sequences/` — a seed unit test and a smoke
@@ -346,3 +454,6 @@ sequence → performance → quit).
   `<!-- BEGIN godot-selftest-harness -->` / `<!-- END godot-selftest-harness -->`
   markers. Created if absent, refreshed in place if the markers exist, or appended
   if a `CLAUDE.md` already exists without them (never clobbering existing content).
+- `<ROOT>/log-devtools.md` — the devtools/`/verify` gaps log (seeded only if
+  absent), plus a `Stop` hook entry in `<ROOT>/.claude/settings.json` that reminds
+  when code changes without a log entry. Existing hooks are merged, never replaced.

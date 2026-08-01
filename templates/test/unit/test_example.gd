@@ -16,6 +16,13 @@ extends RefCounted
 ##   _T.assert_gt(actual, threshold, context)
 ##   _T.assert_gte(actual, threshold, context)
 ##   _T.assert_float_eq(actual, expected, tolerance, context)
+##
+## Headless UI helpers (see test_ui_layout_resolves_headlessly below):
+##   await _T.instantiate_ui(scene, viewport_size)  -> Node, layout resolved
+##   _T.free_ui(node)                               -> tear-down, no orphans
+##
+## Test methods may be coroutines: if a method awaits, the runner awaits it too.
+## Methods that don't await are unaffected.
 
 var _T  # assertion helper injected by run_tests.gd
 
@@ -28,3 +35,42 @@ func test_arithmetic_sanity() -> String:
 
 func test_boolean_sanity() -> String:
 	return _T.assert_true(true, "true should be true")
+
+func test_ui_layout_resolves_headlessly() -> String:
+	# Without _T.instantiate_ui() every assertion below would read (0, 0): a
+	# Control that never enters a tree has no viewport to anchor against.
+	var ui: Control = await _T.instantiate_ui(_build_hud_scene(), Vector2i(640, 360))
+	if ui == null:
+		return "instantiate_ui returned null"
+
+	var err: String = _T.assert_eq(ui.size, Vector2(640, 360), "root fills the viewport")
+	if err == "":
+		var bar: Control = ui.get_node("Bar")
+		err = _T.assert_eq(bar.size, Vector2(640, 48), "bar spans the bottom edge")
+		if err == "":
+			err = _T.assert_eq(bar.get_global_rect().end.y, 360.0, "bar is flush with the bottom")
+
+	_T.free_ui(ui)
+	return err
+
+# Not named test_*, so the runner ignores it. Builds a two-node HUD in code so
+# the example needs no .tscn file on disk.
+func _build_hud_scene() -> PackedScene:
+	var root := Control.new()
+	root.name = "Root"
+	root.anchor_right = 1.0
+	root.anchor_bottom = 1.0
+
+	var bar := ColorRect.new()
+	bar.name = "Bar"
+	bar.anchor_top = 1.0
+	bar.anchor_right = 1.0
+	bar.anchor_bottom = 1.0
+	bar.offset_top = -48.0
+	root.add_child(bar)
+	bar.owner = root
+
+	var scene := PackedScene.new()
+	scene.pack(root)
+	root.free()
+	return scene

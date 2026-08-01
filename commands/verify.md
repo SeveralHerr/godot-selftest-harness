@@ -30,21 +30,70 @@ Read the config so you know the thresholds and hooks for this project:
 python3 -c "import json; print(json.dumps(json.load(open('addons/godot_selftest/devtools_config.json')), indent=2))" 2>/dev/null || echo "{}"
 ```
 
-Relevant keys: `fps_min` (default 30), `orphan_max` (default 0), `mute` (default true), `main_scene`, and `entry_hook` `{node_path, method}`. If the file is missing, assume the defaults above.
+Relevant keys: `fps_min` (default 30), `orphan_max` (default 0), `orphan_growth_max`, `mute` (default true), `main_scene`, `entry_hook` `{node_path, method}`, `entry_points` (see Phase 2), and `safe_area_inset`. If the file is missing, assume the defaults above.
+
+**Python interpreter.** Every `python3 ...` below assumes a working `python3`. On Windows, `python3` often resolves to the Microsoft Store *App execution alias* stub, which exists but refuses to run. Probe by executing, not by `command -v`:
+
+```bash
+PY=""; for c in python3 python py; do "$c" -c "import sys" >/dev/null 2>&1 && { PY="$c"; break; }; done
+[ -z "$PY" ] && { echo "ERROR: no working Python found." >&2; exit 1; }
+echo "Using Python: $PY"
+```
+
+Substitute `$PY` for `python3` in every command below.
+
+### Harness drift check
+
+The installed harness can silently diverge from the plugin's templates — a project may have patched `dev_tools.gd` or `devtools.py` locally, or may be running a version predating fixes it now depends on. Either direction is a real hazard: a local patch is silently reverted by the next `/scaffold-godot-harness`, and a stale install means the pitfalls documented here don't match the code.
+
+```bash
+for f in addons/godot_selftest/dev_tools.gd addons/godot_selftest/scene_validator.gd \
+         tools/devtools.py tools/lint_project.gd tools/run_tests.gd tools/check_devtools_log.py; do
+  src="${CLAUDE_PLUGIN_ROOT}/templates/$f"
+  [ -f "$src" ] && [ -f "$f" ] || continue
+  cmp -s "$src" "$f" || echo "DRIFT: $f differs from the plugin template"
+done
+```
+
+Report any drift in the summary, naming which side is ahead (`git log -1 --format=%cd -- <file>` on the project side vs the plugin's version). Do **not** auto-resolve it: if the project is ahead, the fix belongs upstream in the plugin; if the plugin is ahead, re-run `/scaffold-godot-harness`. Drift is a finding, not an error — continue the run.
 
 ## Phase 1: Headless Lint & Unit Tests (no game running)
 
+Both runners write to stdout and set a meaningful exit code. **Redirect to a file and read it back** rather than trusting the console — the Godot binary on Windows is often the non-console build, which prints nothing to PowerShell, so a failed run looks like a silent success.
+
 ```bash
-"$GODOT_BIN" --headless --path . --script res://tools/lint_project.gd
+"$GODOT_BIN" --headless --path . --script res://tools/lint_project.gd > lint.log 2>&1; echo "exit=$?"
+cat lint.log
 ```
 
-Stop if lint reports errors.
+Exit-code contract (both runners): `0` = pass, `1` = findings (lint errors / failing tests) — stop and report them, `2` = **the runner itself could not run** (bad `devtools_config.json`, missing `test_dir`, unreadable `scan_root`) — stop with a different message, because a `2` means you verified nothing, not that the code is clean. The runners call `quit(n)` with their own counts, so the code is not polluted by Godot's leaked-RID-at-shutdown noise. The last line of lint output is also machine-readable: `lint: N error(s), M warning(s) -> exit C`.
+
+Warnings alone do not fail; pass `--strict` to make them fail.
+
+**Pre-existing findings.** If lint reports warnings you believe are untouched repo debt, do not hand-check them file by file. Record a baseline at the merge-base and lint against it — findings then print grouped as `NEW` (these drive the exit code) and `PRE-EXISTING`:
 
 ```bash
-"$GODOT_BIN" --headless --path . --script res://tools/run_tests.gd
+git stash && "$GODOT_BIN" --headless --path . --script res://tools/lint_project.gd -- --baseline-write .lint-baseline.json > /dev/null 2>&1; git stash pop
+"$GODOT_BIN" --headless --path . --script res://tools/lint_project.gd -- --baseline .lint-baseline.json > lint.log 2>&1; echo "exit=$?"
+```
+
+Finding keys are `file|rule|subject` with no line numbers, so a finding survives unrelated edits to the same file.
+
+Optionally, `-- --find-orphans` warns about public functions whose only callers outside their own file live under `test_dir` — code that has passing unit tests and no reachable caller. It is a heuristic (advisory only, never fails the run) but it catches the case where both gates say "clean" and the system is simply never invoked.
+
+```bash
+"$GODOT_BIN" --headless --path . --script res://tools/run_tests.gd > tests.log 2>&1; echo "exit=$?"
+cat tests.log
 ```
 
 `run_tests.gd` auto-discovers tests under the configured `test_dir`. Stop if any tests fail.
+
+**Capture stderr, and read it.** Two failure modes only appear there:
+
+- A test script that fails to parse. The runner now reports this as exit `2` with an `[ERR]` line, but before that fix a broken script printed `Total: 0 | ALL TESTS PASSED` and exited `0` while real tests sat undiscovered beside it. Never read "all tests passed" without checking the test *count* is what you expect.
+- A runtime error *inside* a test method. GDScript has no exception handling: the error aborts only that method and returns the declared type's default — `""` for a `-> String` test, which is indistinguishable from a pass. The suite cannot detect this. The `[ERR]`/`[SCRIPT ERROR]` lines on stderr are the only signal.
+
+Treat exit `2` as "**you verified nothing**" — it is not a test failure and must not be reported as one, nor waved through as a pass.
 
 ## Phase 2: Launch Game
 
@@ -67,7 +116,13 @@ If ping fails, retry once:
 sleep 3 && python3 tools/devtools.py ping
 ```
 
-If it fails twice, check the Godot terminal output for errors and stop.
+If it fails twice, check the Godot terminal output for errors and stop. A failed call now returns in ~2s rather than hanging for the full timeout, so the retry is cheap. **Read which of the three failures you got — they have different causes:**
+
+| Message | Means |
+|---|---|
+| `game not running: … was never picked up` | Nothing is polling that directory: the game is dead, **or** you are polling the wrong `user://`. The signal can't tell these apart — check `--userdata` / `GODOT_USERDATA` before concluding it crashed. |
+| `Crossed replies: …` | Another client or thread is driving the same game. Serialize your calls. |
+| `No response … WAS picked up` | The game is alive and the handler is hung. This is a bug in the verb, not a connection problem. |
 
 ### Determine the live scene (do NOT assume a name)
 
@@ -91,14 +146,42 @@ sleep 3
 
 Then re-check `scene-tree` and confirm the root scene changed to the expected playable scene (use `config.main_scene`'s basename if set, otherwise just confirm it is no longer the entry screen). If `entry_hook` is empty, proceed with whatever scene loaded. If the scene is in an unexpected/error state (root name is `?` or empty), stop and report the failure.
 
+### Named entry points (diff-aware)
+
+A single `entry_hook` reaches only the default playable scene, so a change to a script that only runs in some *other* scene — a boss room, a shop, a level-2 variant — has **no runtime path at all** and gets verified by reading code instead of by observing the game. Optional `config.entry_points` fixes that:
+
+```json
+"entry_points": {
+  "boss": {
+    "scene": "res://scenes/boss_room.tscn",
+    "node_path": "/root/Main/Encounters",
+    "method": "start_boss_fight",
+    "args": [],
+    "match": ["boss", "encounters/"]
+  }
+}
+```
+
+Selection: after reading the diff (Phase 4 Step 1), if any changed path contains one of an entry point's `match` substrings, use that entry point instead of the default `entry_hook` — load its `scene` (`cmd start_game --args '{"scene": "..."}'` or the project's own scene-loading verb, discovered via `list-commands`), then call its `node_path`/`method`. If several match, run the phase once per matching entry point. If none match, use the default `entry_hook`.
+
+Note the difference from `entry_hook`: reaching a scene is rarely enough. A boss room that loads with the boss hidden until an intro sequence runs is *not* in a testable state — the entry point's `method` must be whatever the game itself calls to actually start the encounter. If a changed script has no reachable entry point, say so explicitly in the summary rather than reporting the change as verified.
+
+**Baseline the orphan count here.** Scene loads and entry hooks create orphans that have nothing to do with the diff. Once the playable scene is up, re-baseline so Phase 3's performance check measures *your* growth:
+
+```bash
+python3 tools/devtools.py performance --reset-baseline
+```
+
 ## Phase 3: Validation
 
 Run in order:
 
 1. `python3 tools/devtools.py validate-all` — 0 issues required
-2. `python3 tools/devtools.py validate-ui` — 0 issues required
+2. `python3 tools/devtools.py validate-ui` — 0 issues required. If `config.safe_area_inset` is non-zero this also reports `ui_outside_safe_area` for Controls straying under an overlay/notch/rounded corner; with an all-zero inset the check is skipped entirely.
 3. `python3 tools/devtools.py screenshot` — visual verification (add a short `sleep` first if you just changed state)
-4. `python3 tools/devtools.py performance` — FPS must be `>= config.fps_min` (default 30) and orphan nodes `<= config.orphan_max` (default 0)
+4. `python3 tools/devtools.py performance` — FPS must be `>= config.fps_min` (default 30); orphan **growth** since the baseline must be `<= config.orphan_growth_max`
+
+   Gate on `orphan_growth`, not the absolute count. A real project reports dozens of orphans on a fresh launch before any test action, so the historical `orphan_max: 0` was unreachable — and a threshold nothing can ever satisfy trains you to skip the check entirely. Growth-since-baseline is the number that actually means "this change leaks". Report the absolute count alongside it for context, and if `orphan_growth` is unavailable (older harness install), say so rather than silently falling back to a check you know is noise.
 
 No game-specific exceptions are baked in. If `validate-ui` reports issues you believe are pre-existing/benign, report them explicitly in the summary rather than silently ignoring — and consider a Phase 6 proposal to add a baseline via `save-ui-baseline`.
 
@@ -140,7 +223,10 @@ python3 tools/devtools.py cmd <verb> --args '{"key": value}'
 
 | Command | Use for |
 |---|---|
-| `get-state --node PATH` | Read any node's exported/script properties (primary assertion tool) |
+| `get-state --node PATH --property NAME` | Read node properties (primary assertion tool). `--property` is repeatable — always use it; an unfiltered `Label` returns ~120 keys. Assert transforms on `data.transform`, which is always present: Godot hides `position`/`scale`/`rotation` on container children, so a scale animation on a `VBoxContainer` child is invisible to the property dump while working perfectly on screen |
+| `step-time --seconds N` | Advance ~N game-seconds with `time_scale` pinned to 1.0 — for sampling a tween at a chosen moment instead of guessing with `set-game-speed` + sleeps. Physics time is exact; process-driven tweens (the `Tween` default) land within ~1 frame, so compare the returned `process_seconds` rather than assuming |
+| `touch <press\|release\|drag\|clear\|list> --index N --pos X,Y` | Real `InputEventScreenTouch`/`Drag` — the only way to exercise multi-touch |
+| `set-feature --touchscreen true` | Make touch UI visible on desktop (it hides itself when no touchscreen is reported). Set it **before** the scene loads: a Control that read availability in its own `_ready()` won't re-evaluate |
 | `set-state --node PATH --property NAME --value V` | Set a raw property (see pitfall about signals below) |
 | `run-method --node PATH --method NAME --args "[...]"` | Call any method on a node — **preferred** for anything that should emit a signal / run side effects |
 | `input tap ACTION --hold N` / `input press` / `input release` | Simulate input actions defined in the project |
@@ -193,6 +279,21 @@ python3 tools/devtools.py get-state --node "/root/<Root>/Entities/Enemy"   # exp
 python3 tools/devtools.py quit
 ```
 
+## Phase 6: Log the gaps (REQUIRED)
+
+Append an entry to `log-devtools.md` at the project root (create it if missing) naming every gap in this workflow or the devtools that showed up during the run, each with the smallest improvement that would have closed it. If the run hit none, write one explicit "no gaps this turn" line.
+
+```markdown
+## YYYY-MM-DD — <what this run verified>
+
+- Gap: **<what was missing>** — <the command run, the output it gave, the workaround used>
+  - Improvement: <the smallest change that would have closed it>
+```
+
+This is not bookkeeping. Every capability the harness has beyond its first version — the status provider, the node-path normalization, the property filter, the touch verbs, the orphan baseline — exists because a run like this one wrote down what it couldn't do. Quote real output; a gap without evidence can't be acted on later. Note recurrences explicitly (a gap that bites twice is a stronger signal than a new one), and record closures too, including whether the fix actually paid off.
+
+Distinguish this from the Self-Improvement section below: that one proposes edits to `/verify` itself and needs user approval. Phase 6 is an unconditional write to the project's log, no approval needed.
+
 ## Self-Improvement (Post-Run)
 
 After writing the Pass/Fail Summary, reflect on the entire run and identify improvements to this file. **Do not edit this file directly.** Instead, present proposals to the user for approval.
@@ -233,4 +334,4 @@ For each issue, present a recommendation in this format:
 
 ## Pass/Fail Summary
 
-Report results as a table: Godot binary used, config thresholds (fps_min / orphan_max), lint status, unit test status, live scene name (and whether the entry_hook fired), validate-all, validate-ui, performance (FPS + orphan nodes vs thresholds), and each change-specific test (name + what it verified + pass/fail). List the project verbs discovered via `list-commands` that you used. Also check the Godot terminal output for GDScript runtime errors or warnings. If all pass, the commit is safe to proceed.
+Report results as a table: Godot binary used, harness drift (Phase 0) if any, config thresholds (fps_min / orphan_growth_max), lint status, unit test status, live scene name (and which entry point fired), validate-all, validate-ui, performance (FPS + orphan growth vs baseline), and each change-specific test (name + what it verified + pass/fail). List the project verbs discovered via `list-commands` that you used. Also check the Godot terminal output for GDScript runtime errors or warnings. If all pass, the commit is safe to proceed.
