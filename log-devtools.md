@@ -101,3 +101,27 @@ in parallel against a wire contract fixed up front. Verified against Godot 4.7.1
   defects were on the one seam that spanned two owners — the bridge protocol. Worth
   remembering that the contract is the risk surface, so the contract is what needs a
   test, not the halves.
+
+---
+
+## 2026-08-01 — Add `PURPOSE.md` and this repo's own `CLAUDE.md`
+
+- Gap: **the plugin repo had no always-on context of its own.** Every session started by
+  reading the 461-line `README.md` to re-derive things that never change — that this repo
+  is not a Godot project, that a game-specific verb belongs in a target's `commands.gd`,
+  that a verb change touches four docs. `README.md` is a reference manual, so the working
+  rules sit spread across it by topic rather than stated once.
+  - Improvement (done): `CLAUDE.md` (working rules, repo map, gotchas) and `PURPOSE.md`
+    (design commitments and non-goals). The plugin scaffolds a `CLAUDE.md` into every
+    target project and had none itself.
+  - Improvement (still open): nothing keeps `CLAUDE.md`'s "docs move together" list honest.
+    A verb added to `dev_tools.gd` and `devtools.py` with no matching edit to `README.md`,
+    `templates/CLAUDE.harness.md`, or `commands/verify.md` is exactly the cheat-sheet drift
+    the list warns about, and it is currently caught by memory alone. The generic-verb set
+    is machine-extractable from the `register_command(` calls — a check could diff it
+    against the three docs.
+
+- Gap: **still no way to validate a template change** — unchanged from the entry above,
+  second appearance. `CLAUDE.md` now writes down the manual scratch-project procedure,
+  which makes the gap cheaper to work around and no closer to closed.
+  - Improvement: unchanged — `tools/check_templates.sh` per the previous entry.
