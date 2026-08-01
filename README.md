@@ -357,6 +357,45 @@ Two subcommands make project verbs first-class without touching the CLI:
   fix: re-run `/scaffold-godot-harness`). Use it to fill the `harness:` field when
   logging a gap.
 
+### Parallel verification (`--session`)
+
+The bridge is one command file and one result file in one `user://` directory, so a
+second running instance answers the first client's commands and neither notices. In
+practice that means concurrent agents cannot verify at runtime at all — every one of them
+has to be forbidden from launching the game, and a single owner does each check serially.
+
+`--session <id>` splices the id into the bus filenames
+(`devtools_commands_<id>.json`, …) on **both** halves, so instances stop crossing:
+
+```bash
+# each instance owns a bus
+godot --path . --mute -- --devtools-session a &
+godot --path . --mute -- --devtools-session b &
+
+python3 tools/devtools.py --session a ping   # DevTools is running (…, session: a)
+python3 tools/devtools.py --session b ping
+```
+
+Game-side the id comes from `-- --devtools-session <id>` or the `GODOT_DEVTOOLS_SESSION`
+environment variable (the flag wins); client-side from `--session/-S` or the same
+variable. With no session the filenames are exactly what they always were, so nothing
+about existing single-instance usage changes. `ping` and `harness-version` report the
+session they answered on, so "which instance is this?" is answerable rather than assumed.
+
+**A shared `user://` is still shared.** Separate buses fix the crossing, not the rest of
+the directory: screenshots, UI baselines and save files still collide, and
+`--headless --import` still races on a single `.godot/` class cache. For real isolation,
+give each instance its own userdata directory too:
+
+```bash
+GODOT_USERDATA=/tmp/run-a godot --path . -- --devtools-session a &
+python3 tools/devtools.py --session a --userdata /tmp/run-a ping
+```
+
+or set `application/config/use_custom_user_dir` + `custom_user_dir_name` in a per-worker
+copy of `project.godot`. Use `--session` when instances share a directory; use both when
+they must not share anything.
+
 ### Userdata directory resolution
 
 The CLI must poll the same `user://` directory the game writes to. It resolves
@@ -538,7 +577,8 @@ Run it after any script/scene/gameplay change, before committing.
   names; the core loads them by path, so the `class_name` is convenience only.
   Keep new addon classes namespaced.
 - **Single-client file bus.** The bridge is one command file / one result file
-  with no locking. Concurrent clients still race and clobber each other's
-  commands; request ids make the resulting crossed reply an error rather than
-  silent corruption, but they do not make it safe. Drive the game from **one**
-  client at a time.
+  with no locking. Concurrent clients on the **same** bus still race and clobber
+  each other's commands; request ids make the resulting crossed reply an error rather
+  than silent corruption, but they do not make it safe. Drive one bus from **one**
+  client at a time, and give genuinely parallel instances separate buses with
+  `--session` (above).

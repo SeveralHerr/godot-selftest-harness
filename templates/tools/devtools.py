@@ -43,6 +43,18 @@ Concurrency:
     refuses to return a reply stamped with somebody else's id, which turns a
     crossed reply from silent data corruption into a clear error.
 
+    For genuinely parallel work, give each instance its own bus with --session:
+
+        godot --path . -- --devtools-session a &
+        python3 tools/devtools.py --session a ping
+
+    The id is spliced into the bus filenames (devtools_commands_a.json, ...), so
+    N instances can share one user:// dir without answering each other's
+    commands. Without a session the filenames are unchanged, so nothing about
+    existing usage moves. Note that a shared user:// still means shared
+    screenshots and a shared save dir - for full isolation combine --session with
+    a per-instance user:// (see the README's parallel-verification recipe).
+
 User data path resolution (highest priority first):
     1. --userdata <path>                                (global CLI flag)
     2. GODOT_USERDATA environment variable
@@ -72,6 +84,14 @@ COMMANDS_FILE = "devtools_commands.json"
 RESULTS_FILE = "devtools_results.json"
 LOG_FILE = "devtools_log.jsonl"
 
+# Set from the global --session flag (or GODOT_DEVTOOLS_SESSION). Empty means the
+# shared default bus, i.e. the historical behavior.
+_SESSION = ""
+
+# Same character class the autoload's _resolve_session() accepts: the id becomes part
+# of a filename, so anything outside it is dropped rather than escaped.
+_SESSION_SAFE = re.compile(r"[^A-Za-z0-9_-]")
+
 # How long to wait for the game to *consume* the command file before declaring
 # it dead. The autoload polls every ~100 ms, so 2.0s is ~20 poll cycles of
 # slack: far more than a loaded machine, a GC pause, or a mid-frame hitch can
@@ -93,6 +113,29 @@ _PRECHECK_ENABLED = True
 # run_method / get_node_bounds and by most project verbs; "node" is the key
 # input_sequence assert steps use.
 _NODE_PATH_KEYS = ("node_path", "node")
+
+
+def sanitize_session(session):
+    """Mirror the autoload's session sanitization. Must stay in lockstep with it."""
+    return _SESSION_SAFE.sub("", session or "")
+
+
+def bus_filenames(session=None):
+    """(commands, results, log) filenames for a session id.
+
+    Splices the id in before the extension, exactly as `_resolve_session()` does on
+    the GDScript side. These two are the only halves that have to agree; if they ever
+    disagree the client polls a file nothing writes, which looks identical to a dead
+    game.
+    """
+    s = sanitize_session(_SESSION if session is None else session)
+    if not s:
+        return COMMANDS_FILE, RESULTS_FILE, LOG_FILE
+    return (
+        "devtools_commands_%s.json" % s,
+        "devtools_results_%s.json" % s,
+        "devtools_log_%s.jsonl" % s,
+    )
 
 
 class BridgeError(TimeoutError):
@@ -281,12 +324,18 @@ def _wait_for_pickup(commands_path: Path, user_data: Path, action: str):
         "still sitting there means nothing is polling that directory.\n"
         "Note that polling the WRONG user:// directory looks exactly like a dead "
         "game - set --userdata <path> or GODOT_USERDATA if the game is running.\n"
-        "Pass --no-precheck to skip this check and wait the full timeout.".format(
+        "Pass --no-precheck to skip this check and wait the full timeout.{session}".format(
             action=action,
             secs=PRECHECK_SECONDS,
             cycles=PRECHECK_SECONDS / 0.1,
             dir=user_data,
-            file=COMMANDS_FILE,
+            file=commands_path.name,
+            session=(
+                "\nThis client is on session '%s'; the game must have been launched "
+                "with `-- --devtools-session %s` (or GODOT_DEVTOOLS_SESSION set) or it "
+                "is writing a different bus." % (_SESSION, _SESSION)
+                if _SESSION else ""
+            ),
         )
     )
 
@@ -303,8 +352,9 @@ def send_command(project_path: Path, action: str, args: dict = None, timeout: fl
     user_data = get_user_data_path(project_path)
     user_data.mkdir(parents=True, exist_ok=True)
 
-    commands_path = user_data / COMMANDS_FILE
-    results_path = user_data / RESULTS_FILE
+    commands_name, results_name, _ = bus_filenames()
+    commands_path = user_data / commands_name
+    results_path = user_data / results_name
 
     # Clear any existing result
     if results_path.exists():
@@ -597,7 +647,7 @@ def cmd_run_method(args, project_path: Path):
 def cmd_logs(args, project_path: Path):
     """View DevTools logs."""
     user_data = get_user_data_path(project_path)
-    log_path = user_data / LOG_FILE
+    log_path = user_data / bus_filenames()[2]
 
     if not log_path.exists():
         print("No logs found")
@@ -627,7 +677,12 @@ def cmd_ping(args, project_path: Path):
     try:
         result = send_command(project_path, "ping", timeout=5.0)
         if result["success"]:
-            print(f"DevTools is running (timestamp: {result['data']['timestamp']:.0f})")
+            data = result.get("data") or {}
+            # data.session (see _cmd_ping in dev_tools.gd). Absent on a pre-0.5.0
+            # build, which is fine - it can only be on the default bus anyway.
+            session = data.get("session") or ""
+            where = f", session: {session}" if session else ""
+            print(f"DevTools is running (timestamp: {data['timestamp']:.0f}{where})")
         else:
             print("DevTools responded but with error")
             sys.exit(1)
@@ -1265,6 +1320,12 @@ def main():
         action="store_true",
         help=f"Skip the {PRECHECK_SECONDS:g}s 'is the game running' precheck and wait the full timeout",
     )
+    parser.add_argument(
+        "--session", "-S", default=os.environ.get("GODOT_DEVTOOLS_SESSION", ""),
+        help="Bus id, so several game instances can share one user:// dir. Must match the "
+             "game's `-- --devtools-session <id>`. Default: GODOT_DEVTOOLS_SESSION, else "
+             "the shared bus (previous behavior).",
+    )
 
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -1477,9 +1538,20 @@ def main():
 
     args = parser.parse_args()
 
-    global _USERDATA_OVERRIDE, _PRECHECK_ENABLED
+    global _USERDATA_OVERRIDE, _PRECHECK_ENABLED, _SESSION
     _USERDATA_OVERRIDE = args.userdata
     _PRECHECK_ENABLED = not args.no_precheck
+    _SESSION = sanitize_session(args.session)
+    if args.session and not _SESSION:
+        print(f"error: --session {args.session!r} contains no usable characters "
+              "(allowed: A-Z a-z 0-9 _ -)", file=sys.stderr)
+        sys.exit(2)
+    if args.session and _SESSION != args.session:
+        # Say so rather than quietly using a different id than was asked for: the
+        # game sanitizes identically, but a silently rewritten id is indistinguishable
+        # from a dead game if the two ever stop agreeing.
+        print(f"note: --session {args.session!r} sanitized to {_SESSION!r} "
+              "(allowed: A-Z a-z 0-9 _ -)", file=sys.stderr)
 
     project_path = Path(args.project).resolve()
     try:

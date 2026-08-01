@@ -127,6 +127,10 @@ the combo window tests nothing the moment the readout starts fading on that time
 - **One command at a time.** The bus is one command file / one result file. Requests
   carry an id the game echoes, so a crossed reply now errors (`Crossed replies: …`)
   instead of silently returning another request's data — detection, not concurrency.
+  For *parallel* instances give each its own bus: launch with
+  `-- --devtools-session <id>` and call with `--session <id>`. `ping` then reports which
+  session answered. Buses only — a shared `user://` still shares screenshots, baselines
+  and the `.godot/` import cache, so add `GODOT_USERDATA` per instance to isolate fully.
 - **`game not running` in ~2s** means a dead game *or* the wrong `user://` dir; the
   error can't tell them apart. Check `--userdata` before assuming a crash.
 - **Assert transforms on `data.transform`, not the property dump.** Godot hides

@@ -424,6 +424,24 @@ Report a summary that includes:
    client polls for command/result files (computed in step 2), e.g. on macOS:
    `~/Library/Application Support/Godot/app_userdata/<name>/`.
 
+   If step 2 found `use_custom_user_dir` **true**, say so — a custom user dir is
+   the usual reason a running game looks dead to the client.
+
+   **Running more than one instance.** The bus is one command/result file pair, so
+   two instances in the same `user://` answer each other's commands. Give each a
+   session id — the game via `-- --devtools-session <id>` (or
+   `GODOT_DEVTOOLS_SESSION`), the client via `--session <id>`:
+
+   ```bash
+   "$GODOT" --path "$ROOT" --mute -- --devtools-session a &
+   python3 "$ROOT/tools/devtools.py" --session a ping
+   ```
+
+   That separates the buses only. Screenshots, UI baselines and saves still share
+   the directory, and `--import` still races on one `.godot/` cache — for full
+   isolation combine `--session` with a per-instance `GODOT_USERDATA` (or
+   `use_custom_user_dir` + `custom_user_dir_name` per worker).
+
 4. **Project CLAUDE.md.** The project's `CLAUDE.md` now documents the harness
    (between the `godot-selftest-harness` markers) so future sessions know it
    exists and how to drive it — re-running scaffold refreshes that section.
