@@ -139,7 +139,7 @@ Same installer, for `res://tools/`:
 "$PY" "${CLAUDE_PLUGIN_ROOT}/tools/scaffold_install.py" files --project "$ROOT" \
   --plugin-root "${CLAUDE_PLUGIN_ROOT}" \
   tools/lint_project.gd tools/run_tests.gd tools/devtools.py \
-  tools/check_devtools_log.py tools/upstream_gaps.py
+  tools/check_devtools_log.py tools/upstream_gaps.py tools/verify_ledger.py
 chmod +x "$ROOT/tools/devtools.py" 2>/dev/null || true
 ```
 
@@ -602,7 +602,8 @@ sequence → performance → quit).
 - `res://tools/` — `lint_project.gd` (headless UID + scene lint),
   `run_tests.gd` (headless unit test runner), `devtools.py` (Python CLI client),
   `check_devtools_log.py` (the `Stop`-hook logging reminder), `upstream_gaps.py`
-  (pools this project's open gaps into the harness repo's log).
+  (pools this project's open gaps into the harness repo's log), `verify_ledger.py`
+  (records what each `/verify` run reached; `stats` reads the history back).
 - `res://devtools_ext/commands.gd` — your project's command registry extension
   (plus `commands.example.gd` for reference).
 - `res://test/unit/` and `res://test/sequences/` — a seed unit test and a smoke
@@ -615,3 +616,6 @@ sequence → performance → quit).
 - `<ROOT>/log-devtools.md` — the devtools/`/verify` gaps log (seeded only if
   absent), plus a `Stop` hook entry in `<ROOT>/.claude/settings.json` that reminds
   when code changes without a log entry. Existing hooks are merged, never replaced.
+- `<ROOT>/.devtools/verify-runs.jsonl` — appended by `/verify` Phase 5, one line per
+  run. Not created at scaffold time (an empty ledger and an unused harness should not
+  look alike). Commit it; do not gitignore `.devtools/`, or the measurement is lost.

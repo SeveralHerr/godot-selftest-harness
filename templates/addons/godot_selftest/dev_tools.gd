@@ -14,15 +14,14 @@ extends Node
 ## extension loads AFTER the generic handlers, a project may override a generic
 ## verb by registering the same action string (last-writer-wins).
 
-# harness-version: 0.5.0
-
+# harness-version: 0.6.0
 # --- Constants ---
 
 ## Version of the godot-selftest-harness these files were copied from. Reported by the
 ## `harness_version` verb and stamped into every copied tool script, so a gap logged
 ## against a project can name the version it was seen on, and a refresh can tell a
 ## stale file from a customized one. Bump with .claude-plugin/plugin.json.
-const HARNESS_VERSION: String = "0.5.0"
+const HARNESS_VERSION: String = "0.6.0"
 
 ## Default bus filenames. With a session id (see _resolve_session) the id is spliced in
 ## before the extension, so two instances can each own a bus in the same user:// dir.
@@ -463,10 +462,25 @@ func _cmd_scene_tree(args: Dictionary) -> Dictionary:
 
 
 func _serialize_node(node: Node, depth: int) -> Dictionary:
+	# `script` is the node's script resource path, or "" when it has none (or has a
+	# built-in one, which has no path). It exists so a caller can answer "did this run
+	# actually touch the file I changed?" by intersecting a scene-tree snapshot with a
+	# diff, instead of asking a human or a model to remember. `tools/verify_ledger.py`
+	# is that caller. Keep the key present-but-empty rather than absent: a missing key
+	# and "no script" must not look the same to the client.
+	var script_path: String = ""
+	var node_script: Script = node.get_script() as Script
+	if node_script != null:
+		script_path = node_script.resource_path
+
+	# `scene_file` is set by Godot on the root of an instanced scene, so a changed
+	# .tscn is reachable the same way a changed .gd is. Empty for ordinary nodes.
 	var data: Dictionary = {
 		"name": node.name,
 		"type": node.get_class(),
 		"path": str(node.get_path()),
+		"script": script_path,
+		"scene_file": node.scene_file_path,
 	}
 
 	if node is Node2D:

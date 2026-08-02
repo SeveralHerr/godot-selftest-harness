@@ -287,6 +287,13 @@ Notable behaviors:
   visible instead of mysterious. Every copied file also carries a
   `# harness-version: X.Y.Z` header stamp, and `lint_project.gd` prints the version in
   its header, so a lint result or a logged gap can always name the version it came from.
+- **`scene_tree`** serializes each node as `{name, type, path, script, scene_file}`
+  plus type-specific extras and `children`. `script` is the node's `res://` script path
+  (`""` when it has none or has a built-in one) and `scene_file` is set on the root of
+  an instanced scene. Both keys are **always present, possibly empty** — a missing key
+  and "no script" must not look alike. They are what make `/verify`'s reach measurement
+  a set intersection against the diff instead of a self-assessment, and they also save
+  a round of guessing when mapping a changed `.gd` to the node path that runs it.
 - **`get_state`** takes an optional `properties` array (the CLI's repeatable
   `--property`). Names that don't exist come back in `data["missing"]` rather than
   being silently dropped. `data["transform"]` is **always** present — see the sharp
@@ -454,6 +461,38 @@ green-lights orphaned code, and both report clean. It is a heuristic — signal
 callbacks, `call()`-by-name, and `@export` hooks produce false positives — so it is
 opt-in and advisory.
 
+### The run ledger (`tools/verify_ledger.py`)
+
+Phase 5 appends one row per `/verify` run to `.devtools/verify-runs.jsonl`, including
+the runs where nothing went wrong. It exists because `log-devtools.md` has no
+denominator: thirty gap entries say the harness was in the way thirty times, not
+whether that was out of forty runs or four hundred, and only the ratio answers "is this
+thing earning its keep?"
+
+```bash
+python3 tools/verify_ledger.py record --scene-tree tree.json --run run.json
+python3 tools/verify_ledger.py stats
+```
+
+`record` derives everything it can — timestamp, sha, branch, changed files — and takes
+only runner exit codes, Phase 4 check results, and duration from the caller. The split
+is deliberate: a run can misreport its own checks, but not whether it touched the diff.
+
+**Reach is the field that matters.** `scene-tree` reports each node's `script` and
+`scene_file` (0.6.0+), so reach is the intersection of a snapshot with `git diff` rather
+than a self-assessment by the thing being measured. `--scene-tree` is repeatable and the
+union is taken, because a node spawned mid-test is absent from an early capture and one
+freed by the last test is absent from a late one.
+
+A green run that never loaded the changed file is the failure this whole harness exists
+to prevent, and a pass/fail summary cannot see it — both cases print "all checks
+passed". `stats` breaks reach out per harness version, which is what tells you whether a
+release improved anything or just felt like it. Files reach cannot speak to (`.cfg`,
+shaders, `project.godot`) are recorded as `not_applicable` rather than counted as
+misses; runs with no snapshot record reach as `null`, never as zero.
+
+Commit the ledger. Its value is entirely in being long.
+
 ### Headless UI tests
 
 Headless Godot renders nothing and pumps no frames on its own, so a `Control` under
@@ -576,6 +615,18 @@ Run it after any script/scene/gameplay change, before committing.
   `GodotSelftestSceneValidator`) so they never clash with a project's own class
   names; the core loads them by path, so the `class_name` is convenience only.
   Keep new addon classes namespaced.
+- **Reach proves loading, not exercising.** A changed script attached to a node that
+  was in the tree counts as reached even if the specific function you edited never
+  ran. It is a floor, not a coverage number — it can prove a run was blind, never that
+  it was thorough. The stronger claim still comes from the Phase 4 assertions, which
+  are self-reported. Reach also only speaks to `.gd` and `.tscn`; an autoload-only or
+  `class_name`-only script that no node instantiates will read as unreached even when
+  the tests genuinely drove it.
+- **A skipped `/verify` leaves no trace.** The ledger records runs that happened, so
+  if the messy changes are the ones that skip it, every rate is flattered and nothing
+  in the file reveals the omission. Recording aborted runs (`verdict: "aborted"`)
+  covers the case where verification was attempted and failed; it cannot cover the
+  case where it was never attempted.
 - **Single-client file bus.** The bridge is one command file / one result file
   with no locking. Concurrent clients on the **same** bus still race and clobber
   each other's commands; request ids make the resulting crossed reply an error rather
