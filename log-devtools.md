@@ -604,3 +604,84 @@ log as prose, in the ledger as an enum, and the `Stop` hook now requires it.
   - Improvement: shipped — `_entry_dates()` tracks fences and skips their contents.
     Found by running the hook against the real shipped seed rather than a fixture,
     which is the same lesson as [H-013] one release earlier.
+
+## 2026-08-01 - Upstreamed 5 open gap(s) from gather (harness 0.4.0, 0.7.0, unknown)
+
+Pooled by `tools/upstream_gaps.py` from `C:\Users\gotmi\Documents\GitHub\gather\log-devtools.md`. Gap text is the project's,
+verbatim; only the id line is rewritten (qualified with the project name so
+ids from two projects cannot collide, plus a `source:` back-pointer).
+
+- Gap: **`gather_stats` cannot observe an in-progress gather** — the one verb named for the
+  gather loop returns only world state (`cap`, `census`, `land_tiles`, `live_nodes`,
+  `spawnable`, `tuning`). Holding the touch MINE button and re-reading it produced a
+  byte-identical response, so the hold was unobservable through the verb that exists for it:
+  ```
+  {'cap': 40, 'land_tiles': 111, 'live_nodes': 40, 'spawnable': [...], 'tuning': {...}}
+  ```
+  Falling back to `get-state --node /root/Main/ResourceManager --property hold_timer` returned
+  `@Timer@14:<Timer#92090140860>` — an opaque object id, not a remaining time. The hold was
+  verified indirectly instead (the ITEM button cycling `HotBarInventory.selected_index` 0 -> 1
+  proves the same touch -> `_input` -> `send_action` path).
+  - [gather:G-024] status: open | seen: 1 | harness: unknown | source: gather 2026-08-01
+  - Improvement: add `is_gathering`, `hold_time_left` and `target_resource` to the
+    `gather_stats` payload — three fields off `ResourceManager2`, and the gather loop becomes
+    assertable at runtime instead of only in unit tests.
+
+- Gap: **git-bash rewrites `/root/...` node paths into Windows paths** — every `--node`
+  argument starting with `/root` is mangled by MSYS path conversion before Python sees it:
+  ```
+  Unknown property on C:/Program Files/Git/root/Main/ResourceManager: removing_resource
+  ```
+  `devtools.py` normalizes it back (the node resolved and `hold_timer` returned fine), but the
+  mangled path is echoed in every error message, so a genuine typo and a path-conversion
+  artifact look identical and the first instinct is to debug the wrong thing.
+  - [gather:G-025] status: open | seen: 1 | harness: unknown | source: gather 2026-08-01
+  - Improvement: echo the *normalized* path in error messages, not the raw argv one.
+
+- Gap: **`.gdignore` does not exclude a directory from `validate-all`** — added
+  `addons/virtual_joystick/{previews,test}/.gdignore` so the vendored demo leaves the import
+  and lint scan, but the validator still walks it:
+  ```
+  res://addons/virtual_joystick/test/test.tscn:
+    [INFO] relative_nodepath: Node 'Player' property 'joystick_left' uses relative path: ...
+  ```
+  Two of the 28 validate-all findings are from a directory Godot itself is told to skip.
+  - [gather:G-026] status: open | seen: 1 | harness: unknown | source: gather 2026-08-01
+  - Improvement: have `scene_validator.gd` skip any directory containing a `.gdignore`, the
+    same rule the engine applies.
+
+- Gap: **`/scaffold-godot-harness` step 11 has no Windows branch for locating Godot** — the
+  documented probe is `$GODOT_BIN` -> `/Applications/Godot.app/...` -> `command -v godot`.
+  On this machine all three miss (the binary is a bare
+  `/c/Users/gotmi/Documents/Godot_v4.7.1-stable_win64.exe`, never on PATH), so step 11 falls
+  through to `WARN: no Godot binary found` and steps 12's smoke check would be skipped
+  entirely. Only this project's own `CLAUDE.md` records the real path; a first-time scaffold
+  on a Windows box would report install-success having verified nothing.
+  - [gather:G-027] status: open | seen: 1 | harness: 0.7.0 | source: gather 2026-08-01
+  - Improvement: add a Windows branch to the step 11 probe — glob
+    `~/Documents/Godot_v*_win64.exe`, `/c/Program Files/Godot/*.exe` and
+    `$LOCALAPPDATA/Programs/Godot/*.exe` — and, once found, write the resolved path into
+    `devtools_config.json` as `godot_bin` so `/verify` and later refreshes stop re-deriving it.
+
+- Gap: **`--import` silently rewrites `project.godot`, dropping comments and explicit
+  settings** — CLAUDE.md requires `--import` after any new `class_name` and the scaffold
+  smoke check runs it, but nothing warns that Godot *rewrites the file it read*. After
+  `godot --headless --path . --import`, `git diff project.godot` showed a clean tree turn
+  dirty with every explanatory comment stripped and three settings deleted outright:
+  ```
+  -window/stretch/mode="disabled"
+  -renderer/rendering_method="forward_plus"
+  -renderer/rendering_method.web="gl_compatibility"
+  ```
+  Godot drops keys it considers default, but `.web` is the override the in-file comment says
+  keeps the itch.io build from failing to start in the browser — a loss that only surfaces on
+  deploy, long after the commit. It was caught only because `git status` was read again before
+  staging; had the refresh been committed straight from the earlier clean status, it would have
+  shipped inside a "harness refresh" commit nobody would think to check for a renderer change.
+  Workaround: `git checkout -- project.godot`, then re-confirmed the `DevTools` autoload
+  survived (it did — it was already committed).
+  - [gather:G-028] status: open | seen: 1 | harness: 0.7.0 | source: gather 2026-08-01
+  - Improvement: have the scaffolder and `/verify` snapshot `project.godot` before any
+    `--import` and restore it (or diff and warn loudly) afterward — the import step needs the
+    *cache* rebuilt, never the project file edited. Failing that, CLAUDE.md's `--import` rule
+    should carry an explicit "check `git diff project.godot` afterward" warning.
