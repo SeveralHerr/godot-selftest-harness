@@ -506,3 +506,54 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   - [gather:G-020] status: open | seen: 1 | harness: 0.4.0 | source: gather 2026-08-01
   - Improvement: have `/scaffold-godot-harness` delete its own `.bak` files once the refreshed
     file passes a syntax check, so a completed refresh leaves no residue to mistake for drift.
+
+## 2026-08-01 — Measure whether the harness is load-bearing (0.6.0)
+
+Built the run ledger: `tools/verify_ledger.py`, a `script`/`scene_file` key on every
+`scene-tree` node, and a Phase 5 step in `/verify` that appends one row per run to
+`.devtools/verify-runs.jsonl`. The question it answers is not "did this run pass" but
+"did this run touch the code it claimed to verify" — which no existing artifact could
+answer, because `log-devtools.md` records only the runs that went badly.
+
+- Gap: **The gaps log has no denominator, so no claim about the harness's value is
+  falsifiable from anything in the repo** — 36 status lines across two projects say the
+  harness was in the way 36 times; nothing anywhere says out of how many runs. Asked
+  directly whether the harness earns its keep in the projects using it, the honest answer
+  was that the repo cannot tell, and neither `harness_history.json` (ships what, when) nor
+  the gaps log (friction only) closes it.
+  - [H-011] status: fixed | fixed-in: 0.6.0
+  - Improvement: shipped — `verify_ledger.py record` appends every run including the clean
+    ones; `stats` reports reach, verdict mix, and reach broken out per harness version, so
+    "did 0.6.0 actually improve anything" is answerable instead of asserted.
+
+- Gap: **`/verify` already knew when it hadn't reached the changed code, and threw the
+  fact away every run** — `commands/verify.md` has instructed since 0.3.0 that "if a
+  changed script has no reachable entry point, say so explicitly in the summary rather
+  than reporting the change as verified". That confession only ever landed in a chat
+  transcript. There was no way to ask how often it happened, which is precisely the
+  number that says whether the runtime phase is doing work or decorating a lint run.
+  - [H-012] status: fixed | fixed-in: 0.6.0
+  - Improvement: shipped — reach is now computed, not claimed: `scene-tree` carries each
+    node's `script` and `scene_file`, and the ledger intersects a snapshot union against
+    `git diff`. A run can misreport its own checks but cannot misreport whether it loaded
+    the diff.
+
+- Gap: **Nothing in this repo could have caught the dot-path bug that the end-to-end run
+  caught in three seconds** — `_norm()` used `lstrip("./")`, which strips leading `.` and
+  `/` as a character class, so `.devtools/run.json` normalized to `devtools/run.json`. A
+  changed file under any dot-directory would have scored as permanently unreached. Both
+  halves would have agreed with each other in any unit test written against them; only
+  running the real client against a real Godot game with a real `git status` surfaced it,
+  which is the same lesson as the 0.4.0 three-mismatch release.
+  - [H-013] status: open | seen: 1 | harness: 0.6.0
+  - Improvement: the `tools/check_templates.sh` already tracked as [H-008] should assemble
+    the scratch project, launch it, and drive at least one verb end-to-end — a parse check
+    and a `py_compile` would both have passed on this bug.
+
+- Gap: **`prompt.md` was deleted from the working tree by something outside this session**
+  — session-start `git status` was clean; midway through, `git diff --stat` showed
+  `prompt.md | 40 ------`. No command run this session touched it. Restored from HEAD
+  rather than folded into the release commit, but there is no record of what removed it.
+  - [H-014] status: open | seen: 1 | harness: 0.6.0
+  - Improvement: none obvious at the harness level — noting it so a recurrence is
+    recognizable as a pattern rather than re-diagnosed from scratch.

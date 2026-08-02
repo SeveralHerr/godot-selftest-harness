@@ -21,7 +21,7 @@ distinguishable from a forgotten log.
 
 - Gap: **<what was missing>** — <evidence: the command run, the output it gave, the
   workaround used instead>
-  - [G-001] status: open | seen: 1 | harness: 0.5.0
+  - [G-001] status: open | seen: 1 | harness: 0.6.0
   - Improvement: <the smallest change that would have closed it>
 ```
 
@@ -37,7 +37,7 @@ narrated in a sentence.
 | `status:` | `open` / `fixed` / `wontfix` | `wontfix` needs a reason on the Improvement line. |
 | `fixed-in:` | a harness version | Only on `status: fixed`. Omit otherwise. |
 | `seen:` | an integer | How many times this gap has been hit. **Bump this instead of writing a second entry** — a recurrence is a stronger signal than a new gap, and only a counter makes that visible. |
-| `harness:` | `X.Y.Z` | The installed harness version it was observed against, from `python3 tools/devtools.py harness-version` (or the `harness 0.5.0` line in `lint_project.gd`'s output). Without it, a gap logged before an upgrade can't be told from a regression after one. |
+| `harness:` | `X.Y.Z` | The installed harness version it was observed against, from `python3 tools/devtools.py harness-version` (or the `harness 0.6.0` line in `lint_project.gd`'s output). Without it, a gap logged before an upgrade can't be told from a regression after one. |
 
 Guidelines that make an entry useful later:
 

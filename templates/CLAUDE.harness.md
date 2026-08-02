@@ -48,7 +48,7 @@ from a forgotten log.
 ## YYYY-MM-DD — <what this response did>
 
 - Gap: **<what was missing>** — <the command run, the output it gave, the workaround used>
-  - [G-001] status: open | seen: 1 | harness: 0.5.0
+  - [G-001] status: open | seen: 1 | harness: 0.6.0
   - Improvement: <the smallest change that would have closed it>
 ```
 
@@ -65,13 +65,24 @@ project using it. A `Stop` hook (`tools/check_devtools_log.py`, wired in
 `.claude/settings.json`) prints a reminder when a session changes code without touching
 the log; it is advisory, not a gate.
 
+### THE VERIFY LEDGER
+`/verify` Phase 5 appends one line per run to `.devtools/verify-runs.jsonl` — including
+the clean ones, which is the point. The gaps log records what the harness couldn't do;
+the ledger is the denominator it lacks.
+
+The field worth reading is **reach**: computed by intersecting the diff against the
+`script`/`scene_file` paths in a `scene-tree` snapshot, so it says whether a run actually
+loaded the code it claimed to verify rather than asking the run to grade itself. A pass
+on an unreached file is a statement about the diff, not the running game — report it that
+way. `python3 tools/verify_ledger.py stats` reads the history back. Commit the ledger.
+
 ### Command cheat-sheet (`python3 tools/devtools.py <verb>`)
 Launch first: `godot --path . --mute &` then `sleep 5 && python3 tools/devtools.py ping`.
 
 | Verb | Use |
 |---|---|
 | `ping` / `quit` | Confirm bridge is live / shut game down cleanly |
-| `scene-tree` | Discover root scene name + node paths (don't assume names) |
+| `scene-tree` | Discover root scene name + node paths (don't assume names). Each node carries `script` and `scene_file`, so a changed file maps to the node that runs it |
 | `get-state --node PATH [--property N ...]` | Read a node's properties. **Always pass `--property`** — an unfiltered `Label` is ~120 keys. Repeatable; unknown names are reported, not dropped |
 | `set-state --node PATH --property N --value V` | Set raw property (bypasses setters/signals) |
 | `run-method --node PATH --method N --args "[...]"` | Call a method — preferred when a signal should fire |

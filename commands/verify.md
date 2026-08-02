@@ -58,7 +58,8 @@ The installed harness can silently diverge from the plugin's templates — a pro
 
 ```bash
 for f in addons/godot_selftest/dev_tools.gd addons/godot_selftest/scene_validator.gd \
-         tools/devtools.py tools/lint_project.gd tools/run_tests.gd tools/check_devtools_log.py; do
+         tools/devtools.py tools/lint_project.gd tools/run_tests.gd \
+         tools/check_devtools_log.py tools/upstream_gaps.py tools/verify_ledger.py; do
   src="${CLAUDE_PLUGIN_ROOT}/templates/$f"
   [ -f "$src" ] && [ -f "$f" ] || continue
   cmp -s "$src" "$f" || echo "DRIFT: $f differs from the plugin template"
@@ -205,6 +206,12 @@ Run in order:
 
 No game-specific exceptions are baked in. If `validate-ui` reports issues you believe are pre-existing/benign, report them explicitly in the summary rather than silently ignoring — and consider a Phase 6 proposal to add a baseline via `save-ui-baseline`.
 
+**Capture a scene-tree snapshot before moving on.** Phase 5 uses it to compute which changed files this run actually reached; it costs one command and cannot be reconstructed after the game exits.
+
+```bash
+python3 tools/devtools.py scene-tree > .devtools/tree-phase3.json
+```
+
 ## Phase 4: Change-Specific Tests (diff-aware, generic)
 
 The point of this phase is to prove the **actual changes in this session** work at runtime. There are no pre-written game recipes — you design tests dynamically from the diff, using generic primitives plus whatever verbs the project registered.
@@ -253,6 +260,7 @@ python3 tools/devtools.py cmd <verb> --args '{"key": value}'
 | `set-game-speed N` | Speed up time-dependent behavior (timers, tweens, physics) |
 | `wait-frames N` | Advance N physics frames deterministically |
 | `node-bounds PATH` | Exact position/size of a node (ground truth for layout/movement) |
+| `scene-tree --depth N` | The live hierarchy as JSON. Every node carries `script` (its `res://` script path, `""` if none) and `scene_file` (set on instanced scene roots) — which is how Phase 5 computes reach, and also the fastest way to map a changed `.gd` to the node path that runs it |
 | `ui-snapshot` / `ui-snapshot-diff` | Structured UI state; diff against a saved baseline |
 | `clear-nodes` | Free matching nodes: `--group NAME`, or via `cmd clear_nodes --args '{"method":"..."}'` / `'{"class":"..."}'` |
 | `screenshot` | Visual verification (always `sleep 0.5`–`1` after a state change first) |
@@ -294,11 +302,47 @@ python3 tools/devtools.py get-state --node "/root/<Root>/Entities/Enemy"   # exp
 - **A run that never changes is broken, not passing.** If repeated samples return identical values — especially all-zero ones — suspect the session is dead or frozen before you conclude the code under test is wrong. Check the `status` field the project's status provider attaches to every response (see the extension section of the harness CLAUDE.md); if the project has not registered one, verify liveness explicitly before trusting a flat result. A dead player or a paused tree answers every query with well-formed zeros.
 - **One in-flight command at a time.** The bridge is a single command/result file pair, so concurrent callers overwrite each other and replies come back for the wrong request (typically surfacing as a missing key in the response). Never poll from a background thread while sampling on the main one — serialize every call.
 
-## Phase 5: Clean Shutdown
+## Phase 5: Record the run, then shut down
+
+**Snapshot the tree once more before quitting**, while everything the tests spawned still exists:
 
 ```bash
+python3 tools/devtools.py scene-tree > .devtools/tree-phase4.json
 python3 tools/devtools.py quit
 ```
+
+Then append this run to the ledger. Write the results you have into a JSON object and hand it over; everything else — timestamp, sha, branch, changed files, and reach — is derived, not asked for:
+
+```bash
+cat > .devtools/run.json <<'EOF'
+{"verdict": "pass",
+ "lint":  {"exit": 0, "new": 0, "pre_existing": 7},
+ "tests": {"exit": 0, "total": 111, "failed": 0},
+ "runtime": {"launched": true, "scene": "<root scene>", "entry_point": "<what fired, or null>",
+             "fps": 58.2, "orphan_growth": 3, "orphan_growth_exceeded": false},
+ "checks": [{"name": "<Phase 4 test name>", "result": "pass"}],
+ "duration_s": 94}
+EOF
+
+python3 tools/verify_ledger.py record \
+  --scene-tree .devtools/tree-phase3.json \
+  --scene-tree .devtools/tree-phase4.json \
+  --run .devtools/run.json
+```
+
+`verdict` is `pass`, `fail`, or **`aborted`** — the last one whenever a runner exited `2` or the game never came up. An aborted run verified nothing, and the ledger counts it separately for exactly the reason the exit-code contract exists: it must never be filed as a pass.
+
+The command prints which changed files the run reached, and names the ones it did not. **Carry that line into the Pass/Fail Summary verbatim.** A green run on a file nothing touched is a statement about the diff, not about the running game, and it is the one failure this workflow cannot otherwise see — the summary says "all checks passed" either way.
+
+Both `checks` and `verdict` are self-reported; reach is computed from the snapshots. If they disagree — every check passing on a file the snapshots say was never loaded — believe the snapshots and say so.
+
+To read the accumulated history at any time:
+
+```bash
+python3 tools/verify_ledger.py stats
+```
+
+Commit `.devtools/verify-runs.jsonl` along with the change. It is the only record of how often this harness was load-bearing, and its value is entirely in being long. The `tree-*.json` and `run.json` scratch files are inputs, not records — leave them out of the commit.
 
 ## Phase 6: Log the gaps (REQUIRED)
 
@@ -308,7 +352,7 @@ Append an entry to `log-devtools.md` at the project root (create it if missing) 
 ## YYYY-MM-DD — <what this run verified>
 
 - Gap: **<what was missing>** — <the command run, the output it gave, the workaround used>
-  - [G-001] status: open | seen: 1 | harness: 0.5.0
+  - [G-001] status: open | seen: 1 | harness: 0.6.0
   - Improvement: <the smallest change that would have closed it>
 ```
 
@@ -373,4 +417,6 @@ For each issue, present a recommendation in this format:
 
 ## Pass/Fail Summary
 
-Report results as a table: Godot binary used, harness drift (Phase 0) if any, config thresholds (fps_min / orphan_growth_max), lint status, unit test status, live scene name (and which entry point fired), validate-all, validate-ui, performance (FPS + orphan growth vs baseline), and each change-specific test (name + what it verified + pass/fail). List the project verbs discovered via `list-commands` that you used. Also check the Godot terminal output for GDScript runtime errors or warnings. If all pass, the commit is safe to proceed.
+Report results as a table: Godot binary used, harness drift (Phase 0) if any, config thresholds (fps_min / orphan_growth_max), lint status, unit test status, live scene name (and which entry point fired), validate-all, validate-ui, performance (FPS + orphan growth vs baseline), and each change-specific test (name + what it verified + pass/fail). List the project verbs discovered via `list-commands` that you used. Also check the Godot terminal output for GDScript runtime errors or warnings.
+
+**Include the reach line from Phase 5**, naming any changed file the run did not reach. Do not report a run as verified when its changed files were never loaded — say which ones were covered at runtime and which were only read. If all checks pass *and* the changed files were reached, the commit is safe to proceed; if checks pass but reach was partial, say so plainly and let the user decide.
