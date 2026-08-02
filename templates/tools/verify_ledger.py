@@ -18,19 +18,39 @@ set intersection against the diff rather than a self-assessment by the thing bei
 measured. A green run that never reached the changed code is the failure mode this
 whole harness exists to make visible, and it is invisible in a pass/fail summary.
 
-Two subcommands:
+**The other half is whether it was worth running at all.** Reach says the harness did
+something; it cannot say the something was needed. A log that only records gaps can only
+ever recommend more harness — it has no vocabulary for *this task didn't need the tool*,
+so a harness that is the wrong choice for half its runs would produce a tidy stream of
+feature requests and never once suggest being used less. Hence `value` (one of
+`warranted` / `overkill` / `insufficient` / `inconclusive`) and `cheaper_alternative`,
+which names what would have produced the same confidence for less.
 
+Those two are self-reported, and self-reports about one's own usefulness bias one way.
+Three things push back: the verdict is a countable enum rather than prose, `expected` is
+written before the run and copied in verbatim afterwards, and `_reconcile_value()`
+downgrades a `warranted` whose changed files were never loaded. None of that makes the
+field objective. It makes it harder to inflate without noticing.
+
+Three subcommands:
+
+    python3 tools/verify_ledger.py reach  --scene-tree tree.json
     python3 tools/verify_ledger.py record --scene-tree tree.json --run run.json
     python3 tools/verify_ledger.py stats
 
 `record` derives the mechanical fields itself (timestamp, sha, branch, changed files,
 reach) and takes only the run-specific ones it cannot know — runner exit codes, the
-Phase 4 checks, duration — as a JSON object from `--run` (or stdin). Trust boundary:
-anything derivable is derived, so a run can misreport its own checks but cannot
-misreport whether it touched the diff.
+Phase 4 checks, duration, and the value reflection — as a JSON object from `--run` (or
+stdin). Trust boundary: anything derivable is derived, so a run can misreport its own
+checks but cannot misreport whether it touched the diff.
 
-`stats` aggregates. Reach rate is the headline; it is also broken out per harness
-version, which is what tells you whether a release actually improved anything.
+`reach` computes reach without writing a row, because the verdict depends on it: a run
+that never loaded the changed file is `insufficient` however well its checks went, and
+that has to be knowable before the row is written.
+
+`stats` aggregates. Reach rate is the headline, broken out per harness version so a
+release's effect is visible; the value mix and the collected `cheaper_alternative` lines
+are the part that can tell you to run /verify less often.
 
 Exit codes: 0 fine, 1 bad input, 2 nothing to report (no ledger yet).
 """
@@ -45,8 +65,8 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
-# harness-version: 0.6.0
-HARNESS_VERSION = "0.6.0"
+# harness-version: 0.7.0
+HARNESS_VERSION = "0.7.0"
 
 LEDGER_PATH = Path(".devtools") / "verify-runs.jsonl"
 
@@ -171,6 +191,35 @@ def compute_reach(changed, snapshot_paths):
     return reached, unreached, skipped
 
 
+# The four verdicts a run can carry. `warranted` needs a named claim, `overkill` means
+# it confirmed what was already known, `insufficient` means it could not reach or assert
+# the thing that mattered, `inconclusive` means it aborted or was too small to judge.
+# Deliberately not a free-text field: a countable enum is what lets `stats` say "31% of
+# runs were overkill", which is a sentence no amount of prose in a log will produce.
+VALUES = ("warranted", "overkill", "insufficient", "inconclusive")
+
+
+def _reconcile_value(value, reached, unreached, checks):
+    """Cross-check a self-reported verdict against what the snapshots actually show.
+
+    The verdict is the one field here the run grades itself on, so it gets the one
+    mechanical check available: a run whose changed files were never loaded did not
+    earn `warranted`, however well its checks went. Returns (value, note-or-None).
+    """
+    if value not in VALUES:
+        return "inconclusive", ("value %r is not one of %s - recorded as inconclusive"
+                                % (value, ", ".join(VALUES)))
+    if value == "warranted" and reached is not None and not reached and unreached:
+        return "insufficient", (
+            "downgraded warranted -> insufficient: no changed file was loaded at "
+            "runtime (%s), so nothing runtime said was about this diff"
+            % ", ".join(unreached))
+    if value == "warranted" and not checks:
+        return value, ("warranted with no Phase 4 checks recorded - the claim that "
+                       "earned it is not in the row")
+    return value, None
+
+
 def _load_run(args):
     if args.run:
         try:
@@ -204,6 +253,10 @@ def cmd_record(args, root):
     sha = _git(root, "rev-parse", "--short", "HEAD")
     branch = _git(root, "rev-parse", "--abbrev-ref", "HEAD")
 
+    checks = run.get("checks") or []
+    value, note = _reconcile_value(run.get("value"), reached, unreached, checks)
+    cheaper = (run.get("cheaper_alternative") or "").strip()
+
     row = {
         "ts": datetime.datetime.now(datetime.timezone.utc)
                   .replace(microsecond=0).isoformat().replace("+00:00", "Z"),
@@ -215,8 +268,15 @@ def cmd_record(args, root):
         "lint": run.get("lint"),
         "tests": run.get("tests"),
         "runtime": run.get("runtime"),
-        "checks": run.get("checks") or [],
+        "checks": checks,
         "duration_s": run.get("duration_s"),
+        # Was the harness worth running here, and what would have been cheaper? Both are
+        # self-reported and both are the point: gaps can only ever recommend more
+        # harness, so without these the log cannot say "this task didn't need it".
+        "value": value,
+        "value_reported": run.get("value"),
+        "cheaper_alternative": cheaper or None,
+        "expected": (run.get("expected") or "").strip() or None,
         "reach": {
             # null (not []) when no snapshot was supplied: "we could not tell" is a
             # different fact from "it reached nothing", and conflating them is exactly
@@ -232,14 +292,43 @@ def cmd_record(args, root):
     with path.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(row, sort_keys=True) + "\n")
 
+    print("verify_ledger: recorded %s run, value=%s - %s"
+          % (row["verdict"], value, _reach_line(reached, unreached)))
+    if note:
+        print("verify_ledger: %s" % note, file=sys.stderr)
+    if not cheaper:
+        print("verify_ledger: no cheaper_alternative given - the field that says when "
+              "the harness was the wrong tool is the one it is easiest to leave blank",
+              file=sys.stderr)
+    return 0
+
+
+def _reach_line(reached, unreached):
     if reached is None:
-        detail = "reach not computed (no scene-tree snapshot)"
-    else:
-        total = len(reached) + len(unreached)
-        detail = "reached %d/%d changed file(s)" % (len(reached), total)
-        if unreached:
-            detail += "; NOT reached: " + ", ".join(unreached)
-    print("verify_ledger: recorded %s run - %s" % (row["verdict"], detail))
+        return "reach not computed (no scene-tree snapshot)"
+    total = len(reached) + len(unreached)
+    detail = "reached %d/%d changed file(s)" % (len(reached), total)
+    if unreached:
+        detail += "; NOT reached: " + ", ".join(unreached)
+    return detail
+
+
+def cmd_reach(args, root):
+    """Compute reach without writing a row.
+
+    Phase 6 picks its verdict partly from reach - a run that never loaded the changed
+    file is `insufficient` however well its checks went - so reach has to be readable
+    before the row is written, not only after.
+    """
+    changed = changed_files(root)
+    snapshot = load_snapshots(args.scene_tree)
+    reached, unreached, skipped = compute_reach(changed or set(), snapshot)
+    print(_reach_line(reached, unreached))
+    if skipped:
+        print("not applicable (reach cannot speak to these): " + ", ".join(skipped))
+    if reached is not None and not reached and unreached:
+        print("\nNo changed file was loaded at runtime. Phase 6 verdict is "
+              "`insufficient`, not `warranted`, even if every check passed.")
     return 0
 
 
@@ -273,6 +362,9 @@ def cmd_stats(args, root):
         return 2
 
     verdicts = defaultdict(int)
+    values = defaultdict(int)
+    cheaper = []
+    overkill_seconds = 0.0
     reached_n = unreached_n = 0
     per_version = defaultdict(lambda: [0, 0])
     runtime_findings = 0
@@ -282,6 +374,12 @@ def cmd_stats(args, root):
 
     for row in rows:
         verdicts[row.get("verdict", "unknown")] += 1
+        val = row.get("value") or "unrecorded"
+        values[val] += 1
+        if row.get("cheaper_alternative"):
+            cheaper.append((val, row["cheaper_alternative"]))
+        if val == "overkill" and isinstance(row.get("duration_s"), (int, float)):
+            overkill_seconds += row["duration_s"]
 
         reach = row.get("reach") or {}
         r, u = reach.get("reached"), reach.get("unreached")
@@ -333,6 +431,26 @@ def cmd_stats(args, root):
         print("duration: median %.0fs, total %.0f min"
               % (statistics.median(durations), sum(durations) / 60.0))
 
+    print("\nwas it worth running?")
+    for name in VALUES + ("unrecorded",):
+        if values.get(name):
+            print("  %-13s %3d  (%s)" % (name, values[name], _pct(values[name], total)))
+
+    if overkill_seconds:
+        print("  time spent on runs judged overkill: %.0f min" % (overkill_seconds / 60.0))
+
+    if cheaper:
+        print("\nwhat would have been cheaper (most recent first):")
+        for val, text in list(reversed(cheaper))[:8]:
+            print("  [%s] %s" % (val, text))
+        print("  -- a phrase repeating here is a finding about *when* to run /verify,")
+        print("     which no amount of feature work on the harness would surface.")
+
+    if not values.get("overkill") and total >= 8:
+        print("\nNot one run in %d judged itself overkill. That is possible, and it is "
+              "also what a log that flatters the tool looks like - check the entries "
+              "before believing the number." % total)
+
     aborted = verdicts.get("aborted", 0)
     if aborted:
         print("\n%d run(s) verified nothing (exit 2). Those are not passes." % aborted)
@@ -359,6 +477,11 @@ def main():
     p.add_argument("--run", metavar="FILE",
                    help="JSON object of this run's results. Default: read stdin.")
     p.set_defaults(func=cmd_record)
+
+    p = sub.add_parser("reach", help="Compute reach without recording a run")
+    p.add_argument("--scene-tree", metavar="FILE", action="append",
+                   help="A `devtools.py scene-tree` capture. Repeatable.")
+    p.set_defaults(func=cmd_reach)
 
     p = sub.add_parser("stats", help="Aggregate the ledger")
     p.add_argument("--verbose", "-v", action="store_true",

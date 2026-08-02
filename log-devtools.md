@@ -557,3 +557,50 @@ answer, because `log-devtools.md` records only the runs that went badly.
   - [H-014] status: open | seen: 1 | harness: 0.6.0
   - Improvement: none obvious at the harness level — noting it so a recurrence is
     recognizable as a pattern rather than re-diagnosed from scratch.
+
+## 2026-08-01 — Make the log able to say the harness wasn't needed (0.7.0)
+
+Added the `Value:` block: a four-way verdict, the prediction that preceded the run, and
+the cheapest alternative that would have produced the same confidence. It goes in the
+log as prose, in the ledger as an enum, and the `Stop` hook now requires it.
+
+- Value: **warranted** — driving the real bus is what proved the two new `scene-tree`
+  keys populate correctly (`res://main.gd` / `res://main.tscn` / `res://child.gd`), and
+  running the hook against the actual shipped seed log is what exposed the fence bug
+  below. Neither was visible from the diff.
+  - Expected: that `reach` would report 1/2 with `lonely_hud.gd` unreached, and that the
+    hook would go quiet only after a compliant entry.
+  - Got: exactly that — plus one thing not predicted, the fenced-example parsing.
+  - Cheaper: nothing for the bus check. The `stats` and enum work could have been proven
+    with fixtures alone; the ~3 min of Godot launches bought only the two bus assertions.
+
+- Gap: **A log that only records gaps can only ever recommend more harness** — asked
+  whether the tool was helping, the repo could report reach and run counts but had no
+  field anywhere meaning *this task did not need it*. Every one of the 40 gap entries
+  across two projects is a feature request; not one is "should have skipped /verify".
+  That is a property of the form, not of the work.
+  - [H-015] status: fixed | fixed-in: 0.7.0
+  - Improvement: shipped — `Value:` verdict + `Cheaper:` in the log, `value` /
+    `cheaper_alternative` / `expected` in the ledger row, value mix in `stats`.
+
+- Gap: **A self-report about one's own usefulness has a known bias direction and no
+  mechanical check** — the `value` field is exactly the kind of judgment field this repo
+  criticized in the 0.6.0 design notes. Mitigated four ways (enum not prose, prediction
+  written first, `Cheaper:` must name something concrete, `_reconcile_value()` downgrades
+  a `warranted` whose files were never loaded, preserving `value_reported`), none of
+  which make it objective.
+  - [H-016] status: open | seen: 1 | harness: 0.7.0
+  - Improvement: the only real check would be an outside one — sample N `warranted` rows
+    and re-derive the verdict from the row alone, without the prose. Worth doing once
+    `gather` has accumulated enough rows to sample.
+
+- Gap: **The `Stop` hook counted the log's own worked examples as entries** — adding two
+  fenced examples to `templates/log-devtools.md` made the pristine seed report
+  `its newest is 2026-07-26` instead of `no dated entry at all`, because `_HEADING_RE`
+  reads `##` inside ``` fences. Behaviorally near-harmless, but a fenced example dated
+  today would have silenced the hook for a session that logged nothing — the file
+  documenting itself into compliance.
+  - [H-017] status: fixed | fixed-in: 0.7.0
+  - Improvement: shipped — `_entry_dates()` tracks fences and skips their contents.
+    Found by running the hook against the real shipped seed rather than a fixture,
+    which is the same lesson as [H-013] one release earlier.

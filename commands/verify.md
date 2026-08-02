@@ -230,6 +230,19 @@ If the working tree is clean, use your knowledge of what was modified in this se
 
 Map each changed script to the node(s) it drives using the root scene name discovered in Phase 2 (e.g. a changed `player.gd` likely corresponds to a node you can find via `scene-tree`).
 
+**Write down one prediction before you test anything.** One line, held until Phase 6:
+
+> Expected: <what runtime should reveal that reading this diff cannot>
+
+If you cannot name anything — the change is a rename, a comment, a constant with no
+observable effect — **say that instead**, and expect to record the run as `overkill` in
+Phase 6. That is a legitimate and useful outcome, not a failure to try hard enough.
+
+This exists because "using the harness was worth it" is easy to write after any run that
+passed, and hard to write honestly with a prediction already on the page that the run
+merely confirmed. Write it first; it costs one line and it is the only thing standing
+between the log and a stream of self-congratulation.
+
 ### Step 2: Discover the project's registered debug verbs
 
 The core exposes a fixed set of generic verbs; individual projects register their own domain verbs in their DevTools extension. Discover them:
@@ -311,6 +324,14 @@ python3 tools/devtools.py scene-tree > .devtools/tree-phase4.json
 python3 tools/devtools.py quit
 ```
 
+**Read reach before you judge the run** — it decides between `warranted` and `insufficient`, and it is a fact rather than an impression:
+
+```bash
+python3 tools/verify_ledger.py reach \
+  --scene-tree .devtools/tree-phase3.json \
+  --scene-tree .devtools/tree-phase4.json
+```
+
 Then append this run to the ledger. Write the results you have into a JSON object and hand it over; everything else — timestamp, sha, branch, changed files, and reach — is derived, not asked for:
 
 ```bash
@@ -321,7 +342,10 @@ cat > .devtools/run.json <<'EOF'
  "runtime": {"launched": true, "scene": "<root scene>", "entry_point": "<what fired, or null>",
              "fps": 58.2, "orphan_growth": 3, "orphan_growth_exceeded": false},
  "checks": [{"name": "<Phase 4 test name>", "result": "pass"}],
- "duration_s": 94}
+ "duration_s": 94,
+ "expected": "<the Phase 4 Step 1 prediction, verbatim>",
+ "value": "warranted",
+ "cheaper_alternative": "<what would have given the same confidence for less, or 'nothing'>"}
 EOF
 
 python3 tools/verify_ledger.py record \
@@ -329,6 +353,8 @@ python3 tools/verify_ledger.py record \
   --scene-tree .devtools/tree-phase4.json \
   --run .devtools/run.json
 ```
+
+`value` is `warranted`, `overkill`, `insufficient`, or `inconclusive` — the same verdict Phase 6 writes up in prose, recorded here as an enum so it is countable. `record` downgrades a `warranted` whose changed files were never loaded, and says so on stderr. Leaving `cheaper_alternative` blank also draws a warning: it is the field that can say the harness was the wrong tool, and therefore the easiest one to skip.
 
 `verdict` is `pass`, `fail`, or **`aborted`** — the last one whenever a runner exited `2` or the game never came up. An aborted run verified nothing, and the ledger counts it separately for exactly the reason the exit-code contract exists: it must never be filed as a pass.
 
@@ -344,17 +370,40 @@ python3 tools/verify_ledger.py stats
 
 Commit `.devtools/verify-runs.jsonl` along with the change. It is the only record of how often this harness was load-bearing, and its value is entirely in being long. The `tree-*.json` and `run.json` scratch files are inputs, not records — leave them out of the commit.
 
-## Phase 6: Log the gaps (REQUIRED)
+## Phase 6: Log the run (REQUIRED)
 
-Append an entry to `log-devtools.md` at the project root (create it if missing) naming every gap in this workflow or the devtools that showed up during the run, each with the smallest improvement that would have closed it. If the run hit none, write one explicit "no gaps this turn" line.
+Append an entry to `log-devtools.md` at the project root (create it if missing). It has two required halves: **was this run worth doing**, and **what was missing from it**. If the run hit no gaps, write one explicit "no gaps this turn" line — but the `Value:` block is required either way, and a clean run is exactly when it is most worth writing.
 
 ```markdown
 ## YYYY-MM-DD — <what this run verified>
 
+- Value: **<warranted|overkill|insufficient|inconclusive>** — <one sentence of why>
+  - Expected: <the prediction you wrote in Phase 4 Step 1, copied verbatim>
+  - Got: <what runtime actually told you — quote the assertion, not "it passed">
+  - Cheaper: <the cheapest thing that would have given the same confidence>
+
 - Gap: **<what was missing>** — <the command run, the output it gave, the workaround used>
-  - [G-001] status: open | seen: 1 | harness: 0.6.0
+  - [G-001] status: open | seen: 1 | harness: 0.7.0
   - Improvement: <the smallest change that would have closed it>
 ```
+
+### Choosing the verdict
+
+| Verdict | When |
+|---|---|
+| `warranted` | Runtime produced a claim the diff could not. Name it specifically — "the tween rests at 0.85, not 1.0", not "verified the animation". |
+| `overkill` | Everything passed and confirmed what was already known. Renames, comments, constants, pure refactors, and anything lint alone settled belong here. |
+| `insufficient` | It ran but could not reach or assert the thing that mattered. **Reach from Phase 5 decides this, not your impression** — if the changed file was never loaded, the verdict is `insufficient` even when every check passed. File the gap. |
+| `inconclusive` | Aborted (a runner exit `2`, or the game never came up), or the change was too small to judge. |
+
+Two rules that keep this honest:
+
+1. **Copy `Expected:` from Phase 4 verbatim.** Do not rewrite it to match what you found. A prediction edited after the fact is worse than no prediction, because it reads as evidence.
+2. **`Cheaper:` must name something concrete** — "reading `player.gd:40-60`", "the existing unit test", "lint alone, 4s", or "nothing, this needed the running game". "Probably still worth it" is not an answer to the question.
+
+`overkill` is the verdict that will be under-reported, because a run that passed feels like a run that helped. If a stretch of entries contains no `overkill` at all, suspect the log before believing the harness.
+
+Both facts also go into the ledger row in Phase 5 (`value` and `cheaper_alternative`), which is what makes them countable across runs rather than only readable one at a time.
 
 The `[G-NNN]` status line is required — it is what lets a later reader tell an open gap from one fixed two versions ago:
 

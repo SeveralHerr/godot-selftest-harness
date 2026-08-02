@@ -39,18 +39,34 @@ by hand), `--find-orphans` (public functions called only from tests — advisory
 
 ### DEVTOOLS LOG (REQUIRED)
 At the end of **every** response, append an entry to `log-devtools.md` (create it if
-missing) recording any gaps in `/verify` or the devtools harness that would have helped
-with this task, each with a suggested improvement. If nothing was missing, write one
-explicit "no gaps this turn" line — that is what makes an absent gap distinguishable
-from a forgotten log.
+missing). Two required halves: **was using the harness worth it**, and **what was
+missing from it**. If nothing was missing, write one explicit "no gaps this turn" line —
+that is what makes an absent gap distinguishable from a forgotten log. The `Value:`
+block is required either way.
 
 ```markdown
 ## YYYY-MM-DD — <what this response did>
 
+- Value: **<warranted|overkill|insufficient|inconclusive>** — <one sentence of why>
+  - Expected: <what you predicted runtime would reveal, written before running it>
+  - Got: <what it actually told you — quote the assertion, not "it passed">
+  - Cheaper: <the cheapest thing that would have given the same confidence>
+
 - Gap: **<what was missing>** — <the command run, the output it gave, the workaround used>
-  - [G-001] status: open | seen: 1 | harness: 0.6.0
+  - [G-001] status: open | seen: 1 | harness: 0.7.0
   - Improvement: <the smallest change that would have closed it>
 ```
+
+`warranted` = runtime produced a claim the diff could not (name it). `overkill` =
+everything passed and confirmed what was already known — renames, comments, pure
+refactors, anything lint alone settled. `insufficient` = it ran but never reached or
+asserted what mattered (**reach decides this, not your impression**); file the gap.
+`inconclusive` = aborted or too small to judge.
+
+**`overkill` is a useful entry, not an admission.** It is also the one that goes
+unwritten, because a run that passed feels like a run that helped. `Cheaper:` must name
+something concrete — "reading `player.gd:40-60`", "lint alone, 4s", "nothing, this needed
+the running game". "Probably still worth it" is not an answer.
 
 The `[G-NNN]` line is required and is what makes the log answerable: ids are stable and
 never reused, `status:` is `open`/`fixed`/`wontfix` (`fixed` adds `fixed-in: X.Y.Z`),
@@ -74,7 +90,9 @@ The field worth reading is **reach**: computed by intersecting the diff against 
 `script`/`scene_file` paths in a `scene-tree` snapshot, so it says whether a run actually
 loaded the code it claimed to verify rather than asking the run to grade itself. A pass
 on an unreached file is a statement about the diff, not the running game — report it that
-way. `python3 tools/verify_ledger.py stats` reads the history back. Commit the ledger.
+way. Each row also carries the `value` verdict above, so "how often was this overkill?"
+is a query. `python3 tools/verify_ledger.py stats` reads the history back; `reach`
+computes reach alone without writing a row. Commit the ledger.
 
 ### Command cheat-sheet (`python3 tools/devtools.py <verb>`)
 Launch first: `godot --path . --mute &` then `sleep 5 && python3 tools/devtools.py ping`.
