@@ -66,16 +66,20 @@ just gets the section appended. The section is intentionally lean and
 reference-style because `CLAUDE.md` is always-on context — it points at `/verify`,
 `/scaffold-godot-harness`, and this README rather than restating them.
 
-## The devtools gaps log
+## The devtools log
 
 Scaffolding installs `log-devtools.md` at the project root and a matching rule in
-`CLAUDE.md`: **at the end of every response, append an entry naming any gap in
-`/verify` or the devtools that would have helped with the task, plus a suggested
-improvement for each.** An honest "no gaps this turn" line counts — it is what
-makes an absent gap distinguishable from a forgotten log.
+`CLAUDE.md`. Every entry has **two required halves**: whether running the harness was
+worth it, and what was missing from it. An honest "no gaps this turn" line counts for
+the second half — it is what makes an absent gap distinguishable from a forgotten log.
 
 ```markdown
 ## 2026-07-25 — Animate the HUD orb losing a hit point
+
+- Value: **warranted** — the tween landed at the wrong scale and only the running game said so.
+  - Expected: whether `orb.scale` actually returns to 1.0 after the hit animation.
+  - Got: `get-state --property scale` read `0.85` at rest; `data.transform` confirmed it.
+  - Cheaper: nothing. Reading the file is what produced the wrong belief in the first place.
 
 - Gap: **`get-state` has no `--property` filter**, despite the cheat-sheet listing it.
   `devtools.py: error: unrecognized arguments: --property scale` — so every read
@@ -83,7 +87,44 @@ makes an absent gap distinguishable from a forgotten log.
   - Improvement: add `--property` (repeatable) to `get-state`.
 ```
 
-This is the harness's improvement pipeline, not bookkeeping. Nearly every capability
+### Why value is recorded, not only gaps
+
+A log that asks only "what was missing?" can only ever answer "add more harness." It has
+no vocabulary for *this task didn't need the tool* — so a harness that is the wrong
+choice for half the changes it runs on would generate a tidy stream of feature requests
+and never once suggest being used less. The `Value:` block is the half that can say so.
+
+| Verdict | Means | What it should change |
+|---|---|---|
+| `warranted` | Runtime produced a claim the diff could not. Name it specifically. | Nothing — the harness worked. |
+| `overkill` | Everything passed and confirmed what was already known. | Invoke `/verify` less for this shape of change. |
+| `insufficient` | It ran but couldn't reach or assert what mattered. Reach decides this, not impression. | File the gap. |
+| `inconclusive` | Aborted, or too small to judge. | Nothing. Don't inflate to `warranted`. |
+
+This is a self-report about the tool's own usefulness, and self-reports of that kind bias
+one way. Four things push back, and none of them make it objective — they make it harder
+to inflate without noticing:
+
+1. **The prediction is written first.** `/verify` Phase 4 Step 1 records what runtime
+   should reveal that the diff cannot, *before* any test runs; Phase 6 copies it in
+   verbatim. "It was useful" is easy to write after any run that passed and much harder
+   with a prediction already on the page that the run merely confirmed.
+2. **`Cheaper:` demands a concrete alternative** — "reading `ore_vein.gd:40-52`", "lint
+   alone, 4s", "nothing, this needed the running game". "Probably still worth it" is not
+   an answer to the question that was asked.
+3. **The verdict is cross-checked against reach.** `verify_ledger.py record` downgrades a
+   `warranted` whose changed files were never loaded, keeping the original under
+   `value_reported` so the disagreement stays auditable.
+4. **It is a countable enum, not prose**, so `stats` can say "31% of runs were overkill"
+   — a sentence no amount of narrative in a log will ever produce.
+
+`overkill` is the verdict that will be under-reported, because a run that passed feels
+like a run that helped. `stats` says so out loud when a long stretch contains none, and
+the collected `Cheaper:` lines are the real product: if "reading the file" appears thirty
+times, that is a finding about *when* to reach for the harness, which no amount of
+feature work on it would have surfaced.
+
+The gaps half is the harness's improvement pipeline, not bookkeeping. Nearly every capability
 here beyond the first version — the status provider, node-path normalization, the
 property filter, `step-time`, the touch verbs, the orphan baseline — exists because a
 session wrote down what it couldn't do at the moment it couldn't do it. That evidence
@@ -134,7 +175,10 @@ today** to the log. It reads the file's `## ` headings rather than its git statu
 weeks old used to pass, which is exactly the decay the hook exists to catch. It is
 advisory by default — set `"log_check_block": true` in `devtools_config.json` to make
 it a blocking `Stop` instead, or `"log_check_dated_entry": false` to fall back to the
-weaker check. It is written in Python rather than shell so it behaves
+weaker check. Since 0.7.0 it also requires today's entry to carry a `- Value:` verdict
+(`"log_check_value": false` turns that off): the value half is the one that can say the
+harness wasn't needed, which makes it the half a rushed session drops, and its absence is
+invisible because a log full of gap entries looks diligent. It is written in Python rather than shell so it behaves
 identically on Windows, macOS, and Linux, and it always exits 0: a reminder must never
 break a session.
 
@@ -253,6 +297,7 @@ Lives at `res://addons/godot_selftest/devtools_config.json`.
 | `log_check_globs` | Array | `[]` | Extra path substrings the `Stop` hook counts as "code". |
 | `log_check_block` | bool | `false` | `true` makes the logging reminder a blocking `Stop` instead of advisory. |
 | `log_check_dated_entry` | bool | `true` | The `Stop` hook requires an entry heading carrying **today's date**. `false` falls back to "the file changed at all", which any stray byte satisfies. |
+| `log_check_value` | bool | `true` | Today's entry must also carry a `- Value: <warranted\|overkill\|insufficient\|inconclusive>` verdict. `false` requires only the dated entry. |
 
 ## Generic commands
 
@@ -470,6 +515,7 @@ whether that was out of forty runs or four hundred, and only the ratio answers "
 thing earning its keep?"
 
 ```bash
+python3 tools/verify_ledger.py reach  --scene-tree tree.json   # dry run, writes nothing
 python3 tools/verify_ledger.py record --scene-tree tree.json --run run.json
 python3 tools/verify_ledger.py stats
 ```
@@ -490,6 +536,18 @@ passed". `stats` breaks reach out per harness version, which is what tells you w
 release improved anything or just felt like it. Files reach cannot speak to (`.cfg`,
 shaders, `project.godot`) are recorded as `not_applicable` rather than counted as
 misses; runs with no snapshot record reach as `null`, never as zero.
+
+Each row also carries the run's `value` verdict, its `expected` prediction, and its
+`cheaper_alternative` — the countable form of the log's `Value:` block, so "how often was
+this overkill?" is a query rather than a reading exercise. `reach` exists as a separate
+dry-run subcommand because the verdict depends on reach: a run that never loaded the
+changed file is `insufficient` however well its checks went, and that has to be knowable
+*before* the row is written.
+
+`stats` reports the value mix, the time spent on runs judged overkill, and the recent
+`cheaper_alternative` lines. It also calls out a long stretch with no `overkill` at all,
+because that is both a genuinely possible outcome and what a log that flatters the tool
+looks like.
 
 Commit the ledger. Its value is entirely in being long.
 
