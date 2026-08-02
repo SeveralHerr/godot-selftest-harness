@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "godot_selftest_harness",
+  "project_id": "7c92e67e-1ae5-48a9-bc5d-847d6ddf01ac"
+}
