@@ -26,8 +26,12 @@ Usage:
     python tools/scaffold_install.py files  --project ROOT [--plugin-root DIR] REL...
     python tools/scaffold_install.py config --project ROOT [--plugin-root DIR]
                                             [--set key=json-value ...]
+    python tools/scaffold_install.py format-block --project ROOT [--plugin-root DIR]
 
-Both modes are idempotent and print a line per file/key describing what they did.
+All modes are idempotent and print a line per file/key describing what they did.
+`format-block` refreshes the harness-authored Format section of an installed
+log-devtools.md in place (between the BEGIN/END markers) without touching the
+project's entries; a marker-less (pre-0.8.0) log is left alone.
 """
 
 import argparse
@@ -40,6 +44,9 @@ from pathlib import Path
 MANIFEST_REL = "addons/godot_selftest/.harness_manifest.json"
 CONFIG_REL = "addons/godot_selftest/devtools_config.json"
 SCAFFOLD_DEFAULTS_KEY = "_scaffold_defaults"
+LOG_REL = "log-devtools.md"
+FORMAT_BEGIN = "<!-- BEGIN godot-selftest-harness-format -->"
+FORMAT_END = "<!-- END godot-selftest-harness-format -->"
 
 
 def sha256(path):
@@ -205,6 +212,44 @@ def patch_config(plugin_root, project, overrides):
     return 0
 
 
+def refresh_format_block(plugin_root, project):
+    """Refresh the marked Format section of an installed log-devtools.md (H-009).
+
+    The log's *entries* belong to the project and are never touched. The Format
+    section between the markers is harness-authored and used to be frozen at
+    whatever version first seeded the file - a new verdict or status field could
+    never reach an existing install. Same mechanism as the CLAUDE.md block:
+    replace the marked span, inclusive, in place. A log without markers predates
+    this scheme; guessing where its format section ends would risk eating
+    entries, so it is reported and left alone.
+    """
+    template = (plugin_root / "templates" / LOG_REL).read_text(encoding="utf-8")
+    t_begin, t_end = template.find(FORMAT_BEGIN), template.find(FORMAT_END)
+    if t_begin < 0 or t_end < 0:
+        print("error: the template log has no format markers - plugin is broken",
+              file=sys.stderr)
+        return 1
+    block = template[t_begin:t_end + len(FORMAT_END)]
+
+    path = project / LOG_REL
+    if not path.exists():
+        print("  = %s absent; nothing to refresh (step 9a seeds it)" % LOG_REL)
+        return 0
+    text = path.read_text(encoding="utf-8")
+    begin, end = text.find(FORMAT_BEGIN), text.find(FORMAT_END)
+    if begin < 0 or end < 0:
+        print("  = %s has no format markers (seeded before 0.8.0) - left untouched"
+              % LOG_REL)
+        return 0
+    updated = text[:begin] + block + text[end + len(FORMAT_END):]
+    if updated == text:
+        print("  = %s format section already current" % LOG_REL)
+    else:
+        path.write_text(updated, encoding="utf-8")
+        print("  ^ %s format section refreshed (entries untouched)" % LOG_REL)
+    return 0
+
+
 def read_record(existing):
     """(values scaffold last left, keys scaffold still owns) from _scaffold_defaults."""
     record = existing.get(SCAFFOLD_DEFAULTS_KEY)
@@ -232,7 +277,7 @@ def parse_set(pairs):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("mode", choices=["files", "config"])
+    ap.add_argument("mode", choices=["files", "config", "format-block"])
     ap.add_argument("rels", nargs="*", metavar="REL",
                     help="files mode: template-relative paths to install")
     ap.add_argument("--project", required=True, help="Target Godot project root")
@@ -253,6 +298,8 @@ def main():
             print("error: name at least one file to install", file=sys.stderr)
             return 1
         return install_files(plugin_root, project, args.rels)
+    if args.mode == "format-block":
+        return refresh_format_block(plugin_root, project)
     return patch_config(plugin_root, project, parse_set(args.sets))
 
 

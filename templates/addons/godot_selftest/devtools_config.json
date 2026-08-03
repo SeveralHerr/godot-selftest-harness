@@ -17,5 +17,6 @@
   "log_check_block": false,
   "log_check_dated_entry": true,
   "log_check_value": true,
-  "mute": true
+  "mute": true,
+  "godot_bin": ""
 }

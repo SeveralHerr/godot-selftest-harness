@@ -4,10 +4,10 @@ extends RefCounted
 # The DevTools core loads this by path, so the class_name is for convenience only.
 class_name GodotSelftestSceneValidator
 
-# harness-version: 0.7.0
+# harness-version: 0.8.0
 ## Harness revision this file was copied from. Read by the scaffolder to tell a stale
 ## copy from a customized one; bump with .claude-plugin/plugin.json.
-const HARNESS_VERSION: String = "0.7.0"
+const HARNESS_VERSION: String = "0.8.0"
 
 const SEVERITY_ERROR: String = "error"
 const SEVERITY_WARNING: String = "warning"

@@ -1,3 +1,4 @@
+<!-- BEGIN godot-selftest-harness-format -->
 # Devtools / `/verify` Log
 
 Running log of two things per session: whether using the devtools harness was actually
@@ -82,7 +83,7 @@ narrated in a sentence.
 | `status:` | `open` / `fixed` / `wontfix` | `wontfix` needs a reason on the Improvement line. |
 | `fixed-in:` | a harness version | Only on `status: fixed`. Omit otherwise. |
 | `seen:` | an integer | How many times this gap has been hit. **Bump this instead of writing a second entry** — a recurrence is a stronger signal than a new gap, and only a counter makes that visible. |
-| `harness:` | `X.Y.Z` | The installed harness version it was observed against, from `python3 tools/devtools.py harness-version` (or the `harness 0.7.0` line in `lint_project.gd`'s output). Without it, a gap logged before an upgrade can't be told from a regression after one. |
+| `harness:` | `X.Y.Z` | The installed harness version it was observed against, from `python tools/devtools.py harness-version` (`python3` outside Windows — probe by executing, the Store alias lies). Without it, a gap logged before an upgrade can't be told from a regression after one. |
 
 Guidelines that make an entry useful later:
 
@@ -133,12 +134,14 @@ the work.
 Open gaps only help the next project if they reach the harness repo. Pool them with:
 
 ```bash
-python3 tools/upstream_gaps.py log-devtools.md --into /path/to/godot-selftest-harness/log-devtools.md
+# python3 outside Windows; on Windows the bare `python` is the one that runs
+python tools/upstream_gaps.py log-devtools.md --into /path/to/godot-selftest-harness/log-devtools.md
 ```
 
 It appends every `status: open` gap, deduped by id (re-running is a no-op), and bumps
 `seen:` upstream when an id reappears. Nothing is deleted from this file.
 
 ---
+<!-- END godot-selftest-harness-format -->
 
 <!-- Entries below, newest at the bottom. -->

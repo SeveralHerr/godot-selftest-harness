@@ -20,8 +20,16 @@ Usage:
     python3 tools/devtools.py get-state --node "/root/Main/HUD" --property visible --property size
     python3 tools/devtools.py set-state --node "/root/Main/Player" --property health --value 100
     python3 tools/devtools.py step-time --seconds 0.3   # Advance the paused tree
+    python3 tools/devtools.py step-time --seconds 2 --hold move_left
     python3 tools/devtools.py touch press --index 0 --pos 640,360
+    python3 tools/devtools.py key E                     # Raw keyboard event
+    python3 tools/devtools.py input state               # Pressed/strength per action
+    python3 tools/devtools.py tilemap-cells --node /root/Main/TileMap --rect 0,0,16,16
+    python3 tools/devtools.py tilemap-region --node /root/Main/TileMap --atlas 3,1
+    python3 tools/devtools.py scripts-seen              # Script census since launch
+    python3 tools/devtools.py launch --isolated         # Start the game detached
     python3 tools/devtools.py set-feature --touchscreen true
+    python3 tools/devtools.py --json ping               # Any verb, raw reply JSON
     python3 tools/devtools.py list-commands            # Discover all registered verbs
     python3 tools/devtools.py harness-version          # Which harness revision is installed
     python3 tools/devtools.py cmd my_project_verb --args '{"foo": 1}'
@@ -67,18 +75,20 @@ import argparse
 import json
 import os
 import re
+import subprocess
 import sys
+import tempfile
 import time
 import uuid
 from pathlib import Path
 from typing import Optional  # noqa: F401
 
 
-# harness-version: 0.7.0
+# harness-version: 0.8.0
 # Version of the godot-selftest-harness this client was copied from. Compared against
 # the running game's own stamp by the `harness-version` verb, so a half-refreshed
 # install (new client, old autoload) is visible instead of mysterious.
-HARNESS_VERSION = "0.7.0"
+HARNESS_VERSION = "0.8.0"
 
 COMMANDS_FILE = "devtools_commands.json"
 RESULTS_FILE = "devtools_results.json"
@@ -156,6 +166,50 @@ class CrossedReplyError(BridgeError):
 
 class NoReplyError(BridgeError):
     """The command was picked up but no reply ever appeared."""
+
+
+class ForeignInstanceError(BridgeError):
+    """A reply arrived, but from a process that does not own this bus (G-036a).
+
+    The autoload writes user://devtools_owner*.json at startup with its pid; a
+    reply stamped with a different pid means another Godot instance is answering
+    on a bus it no longer (or never) owned - typically a stale instance that
+    predates the current owner, or two instances launched without --session.
+    """
+
+
+class _RawJsonPrinted(Exception):
+    """Control flow for the global --json flag: the raw reply has already been
+    printed by send_command, so the per-command formatter must not run. Carries
+    the exit code (0 on success:true, 1 otherwise)."""
+
+    def __init__(self, code):
+        super().__init__("raw json printed")
+        self.code = code
+
+
+# Set by the global --json flag: print every bus reply as the raw dict
+# (json.dumps, indent=2) instead of the per-command formatted view (G-039).
+_RAW_JSON = False
+
+
+def _owner_file_path(user_data: Path) -> Path:
+    """The bus-identity file for the current session, mirroring the autoload's
+    session splicing (see _write_owner_file in dev_tools.gd)."""
+    s = sanitize_session(_SESSION)
+    name = "devtools_owner.json" if not s else "devtools_owner_%s.json" % s
+    return user_data / name
+
+
+def _read_owner(user_data: Path):
+    """(owner_dict_or_None, path). Never raises: a missing or garbled owner file
+    just means nothing is known about the bus owner."""
+    path = _owner_file_path(user_data)
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None, path
+    return (data if isinstance(data, dict) else None), path
 
 
 def _parse_project_godot(project_file: Path) -> dict:
@@ -316,6 +370,22 @@ def _wait_for_pickup(commands_path: Path, user_data: Path, action: str):
     except OSError:
         pass
 
+    # Say WHO last claimed this bus, if anyone did (G-009). The owner file
+    # outlives its process, so this names "the game that was here", not proof
+    # of a live one - phrased accordingly.
+    owner, owner_path = _read_owner(user_data)
+    owner_note = ""
+    if owner is not None:
+        owner_note = (
+            "\nOwner file {p} says pid {pid} (project {proj!r}, session {sess!r}) "
+            "last claimed this bus; that process has likely exited.".format(
+                p=owner_path.name,
+                pid=owner.get("pid"),
+                proj=owner.get("project", ""),
+                sess=owner.get("session", ""),
+            )
+        )
+
     raise GameNotRunningError(
         "game not running: '{action}' was never picked up "
         "({secs:.1f}s grace, ~{cycles:.0f} of the game's ~100ms poll cycles).\n"
@@ -324,7 +394,7 @@ def _wait_for_pickup(commands_path: Path, user_data: Path, action: str):
         "still sitting there means nothing is polling that directory.\n"
         "Note that polling the WRONG user:// directory looks exactly like a dead "
         "game - set --userdata <path> or GODOT_USERDATA if the game is running.\n"
-        "Pass --no-precheck to skip this check and wait the full timeout.{session}".format(
+        "Pass --no-precheck to skip this check and wait the full timeout.{session}{owner}".format(
             action=action,
             secs=PRECHECK_SECONDS,
             cycles=PRECHECK_SECONDS / 0.1,
@@ -336,6 +406,7 @@ def _wait_for_pickup(commands_path: Path, user_data: Path, action: str):
                 "is writing a different bus." % (_SESSION, _SESSION)
                 if _SESSION else ""
             ),
+            owner=owner_note,
         )
     )
 
@@ -392,6 +463,35 @@ def send_command(project_path: Path, action: str, args: dict = None, timeout: fl
                 continue
 
             results_path.unlink()
+
+            # Bus-identity check (G-036a): a reply from a pid that differs from
+            # the recorded bus owner means a foreign instance answered. Older
+            # game builds carry no pid, and a missing owner file proves nothing;
+            # both are accepted as before.
+            reply_pid = result.get("pid") if isinstance(result, dict) else None
+            if isinstance(reply_pid, int):
+                owner, owner_path = _read_owner(user_data)
+                owner_pid = owner.get("pid") if isinstance(owner, dict) else None
+                if isinstance(owner_pid, int) and owner_pid != reply_pid:
+                    raise ForeignInstanceError(
+                        "Foreign instance on the bus: the reply to '{action}' came "
+                        "from pid {reply_pid}, but {owner_file} says pid {owner_pid} "
+                        "owns this bus.\n"
+                        "Another Godot instance owns this bus; use --session <id> "
+                        "(launch with `-- --devtools-session <id>`) or quit the "
+                        "other instance.".format(
+                            action=action,
+                            reply_pid=reply_pid,
+                            owner_file=owner_path,
+                            owner_pid=owner_pid,
+                        )
+                    )
+
+            if _RAW_JSON:
+                # Global --json (G-039): print the raw reply centrally so every
+                # bus-backed subcommand honors it, then skip the formatter.
+                print(json.dumps(result, indent=2))
+                raise _RawJsonPrinted(0 if result.get("success") else 1)
             return result
         time.sleep(0.1)
 
@@ -548,6 +648,9 @@ def _format_value(value) -> str:
 
 def cmd_get_state(args, project_path: Path):
     """Get node state, optionally filtered to specific properties."""
+    # Normalize up front so every message this function prints echoes the path
+    # that was actually queried, not the raw MSYS-mangled input (G-025).
+    args.node = normalize_node_path(args.node)
     cmd_args = {}
     if args.node:
         cmd_args["node_path"] = args.node
@@ -731,8 +834,70 @@ def cmd_cmd(args, project_path: Path):
         sys.exit(1)
 
 
+def _read_harness_config(project_path: Path) -> dict:
+    """addons/godot_selftest/devtools_config.json as a dict; {} when unreadable."""
+    cfg_path = project_path / "addons" / "godot_selftest" / "devtools_config.json"
+    try:
+        data = json.loads(cfg_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+_REGISTER_COMMAND_RE = re.compile(r'register_command\(\s*"([A-Za-z0-9_]+)"')
+
+
+def _list_commands_offline(args, project_path: Path):
+    """Static parse of verb registrations, no running game needed (G-043).
+
+    Reads register_command("...") calls out of the installed core autoload and
+    the project's extension script (path from the config's extension_script).
+    This is a text scan, not a runtime truth: verbs registered conditionally or
+    under computed names are invisible to it, and last-writer-wins overrides
+    cannot be seen. It answers "what CAN I call", not "what IS registered".
+    """
+    core_path = project_path / "addons" / "godot_selftest" / "dev_tools.gd"
+    generic = []
+    if core_path.is_file():
+        generic = sorted(set(_REGISTER_COMMAND_RE.findall(
+            core_path.read_text(encoding="utf-8"))))
+
+    config = _read_harness_config(project_path)
+    ext_res = str(config.get("extension_script", "") or "res://devtools_ext/commands.gd")
+    ext_path = project_path / ext_res.replace("res://", "")
+    project_verbs = []
+    if ext_path.is_file():
+        project_verbs = sorted(set(_REGISTER_COMMAND_RE.findall(
+            ext_path.read_text(encoding="utf-8"))))
+
+    if args.json:
+        print(json.dumps({
+            "generic": generic,
+            "project": project_verbs,
+            "static_parse": True,
+            "core_script": str(core_path),
+            "extension_script": str(ext_path),
+        }, indent=2))
+        return
+
+    print("Registered commands (STATIC PARSE of the scripts; the running game may differ):")
+    print(f"  generic ({len(generic)}) from {core_path.name}:")
+    for action in generic:
+        print(f"    {action}")
+    if ext_path.is_file():
+        print(f"  project ({len(project_verbs)}) from {ext_res}:")
+        for action in project_verbs:
+            print(f"    {action}")
+    else:
+        print(f"  project: no extension script at {ext_res}")
+
+
 def cmd_list_commands(args, project_path: Path):
     """Discover and print all registered verbs (generic + project extensions)."""
+    if getattr(args, "offline", False):
+        _list_commands_offline(args, project_path)
+        return
+
     result = send_command(project_path, "list_commands")
     if not result["success"]:
         print(f"Failed: {result['message']}", file=sys.stderr)
@@ -913,6 +1078,55 @@ def cmd_input_sequence(args, project_path: Path):
         sys.exit(1)
 
 
+def cmd_key(args, project_path: Path):
+    """Tap a raw keyboard key by OS keycode name (bus verb: input_key, G-049).
+
+    Unlike `input tap`, this dispatches a real InputEventKey (keycode AND
+    physical_keycode set), so game code reading key events directly - rebinding
+    screens, debug keys, text input - actually sees it.
+    """
+    cmd_args = {"key": args.key}
+    if args.count is not None:
+        cmd_args["count"] = args.count
+    if args.hold_frames is not None:
+        cmd_args["hold_frames"] = args.hold_frames
+
+    result = send_command(project_path, "input_key", cmd_args)
+    if result["success"]:
+        print(result.get("message") or f"Tapped key: {args.key}")
+    else:
+        print(f"Failed: {result['message']}", file=sys.stderr)
+        sys.exit(1)
+
+
+def cmd_input_state(args, project_path: Path):
+    """Read the polled pressed/strength state of input actions (G-021)."""
+    cmd_args = {}
+    if args.actions:
+        cmd_args["actions"] = args.actions
+
+    result = send_command(project_path, "input_state", cmd_args)
+    if not result["success"]:
+        print(f"Failed: {result['message']}", file=sys.stderr)
+        sys.exit(1)
+
+    data = result.get("data", {}) or {}
+    states = data.get("actions", {}) or {}
+    if not states:
+        print("No actions to report")
+    else:
+        print(f"Action states ({len(states)}):")
+        for name in sorted(states):
+            state = states[name] or {}
+            label = "PRESSED" if state.get("pressed") else "released"
+            print(f"  {name}: {label} (strength {float(state.get('strength', 0.0)):.2f})")
+
+    unknown = data.get("unknown", []) or []
+    if unknown:
+        print(f"Unknown action(s): {', '.join(str(u) for u in unknown)}", file=sys.stderr)
+        sys.exit(1)
+
+
 # ==================== NODE / TIME CONTROL ====================
 
 
@@ -979,7 +1193,11 @@ def cmd_step_time(args, project_path: Path):
     # Stepping is bounded by how fast the game can run the frames, so give it
     # generous headroom over the requested game-time.
     timeout = max(30.0, args.seconds * 4 + 10)
-    result = send_command(project_path, "step_time", {"seconds": args.seconds}, timeout=timeout)
+    cmd_args = {"seconds": args.seconds}
+    if getattr(args, "hold", None):
+        # G-076: hold an action pressed across the whole step, released at the end.
+        cmd_args["hold"] = args.hold
+    result = send_command(project_path, "step_time", cmd_args, timeout=timeout)
     if not result["success"]:
         print(f"Failed: {result['message']}", file=sys.stderr)
         sys.exit(1)
@@ -987,6 +1205,8 @@ def cmd_step_time(args, project_path: Path):
     print(result.get("message", "") or f"Stepped {args.seconds}s")
     data = result.get("data", {}) or {}
     print(f"  Requested:      {args.seconds}s")
+    if data.get("held_action"):
+        print(f"  Held action:    {data['held_action']} (released at the end)")
     if "physics_seconds" in data:
         print(f"  Physics time:   {float(data['physics_seconds']):.4f}s (exact)")
     if "process_seconds" in data:
@@ -1169,12 +1389,25 @@ def cmd_set_feature(args, project_path: Path):
     Prints what the game reports as the *resulting* state: an override the
     engine refused must not read as success.
     """
+    if getattr(args, "query", False):
+        # Read-only (G-033): report the current flag values without writing.
+        result = send_command(project_path, "set_feature", {"query": True})
+        if not result["success"]:
+            print(f"Failed: {result['message']}", file=sys.stderr)
+            sys.exit(1)
+        data = result.get("data", {}) or {}
+        for key in ("touchscreen_available", "emulate_touch_from_mouse"):
+            if key in data:
+                print(f"{key}: {json.dumps(data[key])}")
+        return
+
     requested = {}
     if args.touchscreen is not None:
         requested["touchscreen"] = args.touchscreen
 
     if not requested:
-        print("Error: Specify a feature: --touchscreen true|false", file=sys.stderr)
+        print("Error: Specify a feature (--touchscreen true|false) or --query to read the current values",
+              file=sys.stderr)
         sys.exit(1)
 
     result = send_command(project_path, "set_feature", requested)
@@ -1295,6 +1528,7 @@ def cmd_ui_snapshot(args, project_path: Path):
 
 def cmd_node_bounds(args, project_path: Path):
     """Get bounds for a specific node."""
+    args.node_path = normalize_node_path(args.node_path)  # G-025
     result = send_command(project_path, "get_node_bounds", {"node_path": args.node_path})
     if not result["success"]:
         print(f"Failed: {result['message']}", file=sys.stderr)
@@ -1311,6 +1545,189 @@ def cmd_node_bounds(args, project_path: Path):
         print(f"  Text:         \"{data['text']}\"")
 
 
+# ==================== LAUNCH / TILEMAP / SCRIPT CENSUS ====================
+
+
+def cmd_launch(args, project_path: Path):
+    """Launch the game detached, logs under .devtools/ (G-057, minimal form).
+
+    Godot binary resolution: --godot flag -> $GODOT_BIN -> the config's
+    `godot_bin` key. stdout/stderr are redirected to files, NEVER
+    subprocess.PIPE - an unread pipe fills and stalls Godot on Windows.
+
+    --isolated generates a session id and a temp userdata dir, exports
+    GODOT_DEVTOOLS_SESSION and GODOT_USERDATA to the spawned process, and prints
+    both so subsequent calls can pass --session/--userdata.
+    """
+    config = _read_harness_config(project_path)
+    godot = args.godot or os.environ.get("GODOT_BIN") or str(config.get("godot_bin", "") or "")
+    if not godot:
+        print("Error: no Godot binary found. Pass --godot PATH, set $GODOT_BIN, or set "
+              '"godot_bin" in addons/godot_selftest/devtools_config.json.', file=sys.stderr)
+        sys.exit(2)
+    godot_path = Path(godot).expanduser()
+    if not godot_path.is_file():
+        print(f"Error: Godot binary not found: {godot_path}", file=sys.stderr)
+        sys.exit(2)
+
+    devtools_dir = project_path / ".devtools"
+    devtools_dir.mkdir(exist_ok=True)
+    out_log = devtools_dir / "launch_stdout.log"
+    err_log = devtools_dir / "launch_stderr.log"
+
+    cmd = [str(godot_path), "--path", str(project_path), "--mute"]
+
+    env = os.environ.copy()
+    session = ""
+    userdata = ""
+    if args.isolated:
+        session = uuid.uuid4().hex[:8]
+        userdata = tempfile.mkdtemp(prefix="devtools_userdata_")
+        env["GODOT_DEVTOOLS_SESSION"] = session
+        env["GODOT_USERDATA"] = userdata
+    elif _SESSION:
+        env["GODOT_DEVTOOLS_SESSION"] = _SESSION
+
+    popen_kwargs = {}
+    if sys.platform == "win32":
+        popen_kwargs["creationflags"] = (
+            subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP)
+    else:
+        popen_kwargs["start_new_session"] = True
+
+    with out_log.open("w", encoding="utf-8") as out_f, \
+            err_log.open("w", encoding="utf-8") as err_f:
+        proc = subprocess.Popen(cmd, stdout=out_f, stderr=err_f, env=env,
+                                cwd=str(project_path), **popen_kwargs)
+
+    print(f"Launched pid {proc.pid}: {' '.join(cmd)}")
+    print(f"  stdout: {out_log}")
+    print(f"  stderr: {err_log}")
+    if args.isolated:
+        print(f"  session:  {session}")
+        print(f"  userdata: {userdata}")
+        print(f"  Subsequent calls: python tools/devtools.py --session {session} "
+              f"--userdata {userdata} <verb>")
+    else:
+        print("  Give it a few seconds, then: python tools/devtools.py ping")
+
+
+def rect_arg(value: str):
+    """Parse an "X,Y,W,H" cell-rect flag into [x, y, w, h] ints."""
+    text = str(value).strip().strip("()[]").strip()
+    parts = [p for p in re.split(r"[,\s]+", text) if p]
+    if len(parts) != 4:
+        raise argparse.ArgumentTypeError(
+            f"expected four comma-separated numbers 'X,Y,W,H' (e.g. 0,0,16,16), got {value!r}")
+    try:
+        return [int(float(p)) for p in parts]
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"all four values must be numbers (e.g. 0,0,16,16), got {value!r}")
+
+
+def cmd_tilemap_cells(args, project_path: Path):
+    """Dump a tilemap's used cells as data (bus verb: tilemap_cells, G-032)."""
+    args.node = normalize_node_path(args.node)  # G-025
+    cmd_args = {"node_path": args.node}
+    if args.layer is not None:
+        cmd_args["layer"] = args.layer
+    if args.rect is not None:
+        cmd_args["rect"] = args.rect
+
+    result = send_command(project_path, "tilemap_cells", cmd_args)
+    if not result["success"]:
+        print(f"Failed: {result['message']}", file=sys.stderr)
+        sys.exit(1)
+
+    data = result.get("data", {}) or {}
+    cells = data.get("cells", []) or []
+    print(f"{data.get('count', len(cells))} used cell(s) on {data.get('node_path', args.node)} "
+          f"(layer {data.get('layer', 0)})")
+    preview_cap = 50
+    for cell in cells[:preview_cap]:
+        atlas = cell.get("atlas", {}) or {}
+        print(f"  ({cell.get('x')}, {cell.get('y')}) source={cell.get('source_id')} "
+              f"atlas=({atlas.get('x')}, {atlas.get('y')})")
+    if len(cells) > preview_cap:
+        print(f"  ... {len(cells) - preview_cap} more (use --json for the full list)")
+    if data.get("truncated"):
+        print("  WARNING: reply truncated by the game - pass --rect to narrow the window.")
+
+
+def cmd_tilemap_region(args, project_path: Path):
+    """Connected components of matching cells (bus verb: tilemap_region, G-065)."""
+    args.node = normalize_node_path(args.node)  # G-025
+    cmd_args = {"node_path": args.node, "atlas": [int(args.atlas[0]), int(args.atlas[1])]}
+    if args.layer is not None:
+        cmd_args["layer"] = args.layer
+    if args.source_id is not None:
+        cmd_args["source_id"] = args.source_id
+
+    result = send_command(project_path, "tilemap_region", cmd_args)
+    if not result["success"]:
+        print(f"Failed: {result['message']}", file=sys.stderr)
+        sys.exit(1)
+
+    data = result.get("data", {}) or {}
+    components = data.get("components", []) or []
+    print(f"{data.get('total', 0)} matching cell(s) in {len(components)} component(s) "
+          f"on {data.get('node_path', args.node)}:")
+    for i, comp in enumerate(components):
+        bounds = comp.get("bounds", {}) or {}
+        print(f"  #{i + 1}: {comp.get('cells')} cells, bounds "
+              f"x={bounds.get('x')} y={bounds.get('y')} w={bounds.get('w')} h={bounds.get('h')}")
+
+
+def cmd_canvas_scale(args, project_path: Path):
+    """Accumulated canvas scale + effective texture filter (bus verb: canvas_scale, G-073/G-075)."""
+    args.node = normalize_node_path(args.node)  # G-025
+    result = send_command(project_path, "canvas_scale", {"node_path": args.node})
+    if not result["success"]:
+        print(f"Failed: {result['message']}", file=sys.stderr)
+        sys.exit(1)
+    data = result.get("data", {}) or {}
+    scale = data.get("accumulated_scale", {}) or {}
+    print(result.get("message", ""))
+    print(f"  accumulated scale: ({scale.get('x')}, {scale.get('y')})  "
+          f"filter: {data.get('effective_filter')} (from {data.get('filter_source')})")
+    for entry in data.get("chain", []) or []:
+        s = entry.get("scale")
+        s_txt = f" scale=({s.get('x')}, {s.get('y')})" if isinstance(s, dict) else ""
+        print(f"    {entry.get('name')} [{entry.get('class')}]{s_txt}")
+
+
+def cmd_set_resolution(args, project_path: Path):
+    """Resize the game window and read back the applied size (bus verb: set_resolution, G-017)."""
+    width, height = int(args.size[0]), int(args.size[1])
+    result = send_command(project_path, "set_resolution",
+                          {"width": width, "height": height})
+    print(result.get("message", ""))
+    if not result["success"]:
+        sys.exit(1)
+    data = result.get("data", {}) or {}
+    rect = data.get("visible_rect", {}) or {}
+    print(f"  visible rect: {rect.get('w')}x{rect.get('h')} at ({rect.get('x')}, {rect.get('y')})")
+
+
+def cmd_scripts_seen(args, project_path: Path):
+    """Every distinct script path that has entered the tree since launch
+    (bus verb: scripts_seen, G-074b/G-068). With --json the FULL reply envelope
+    is printed - tools/verify_ledger.py consumes reply["data"]["scripts"] from
+    a redirect of exactly that output."""
+    global _RAW_JSON
+    if getattr(args, "json", False):
+        _RAW_JSON = True
+
+    result = send_command(project_path, "scripts_seen")
+    # Only reached without --json (raw mode prints and raises in send_command).
+    data = result.get("data", {}) or {}
+    scripts = data.get("scripts", []) or []
+    print(f"Scripts seen since launch ({len(scripts)}):")
+    for script in scripts:
+        print(f"  {script}")
+
+
 def main():
     parser = argparse.ArgumentParser(description="DevTools CLI - interact with running Godot instance")
     parser.add_argument("--project", "-p", help="Path to Godot project", default=".")
@@ -1325,6 +1742,11 @@ def main():
         help="Bus id, so several game instances can share one user:// dir. Must match the "
              "game's `-- --devtools-session <id>`. Default: GODOT_DEVTOOLS_SESSION, else "
              "the shared bus (previous behavior).",
+    )
+    parser.add_argument(
+        "--json", dest="raw_json", action="store_true",
+        help="Print every bus reply as the raw JSON envelope instead of the formatted "
+             "view (G-039). Global: goes BEFORE the subcommand, e.g. `--json ping`.",
     )
 
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -1400,7 +1822,18 @@ def main():
     # list-commands - discover registered verbs
     p = subparsers.add_parser("list-commands", help="List all registered verbs")
     p.add_argument("--json", "-j", action="store_true", help="Output raw JSON")
+    p.add_argument("--offline", action="store_true",
+                   help="No running game: statically parse register_command() names "
+                        "from the installed scripts (labeled generic/project)")
     p.set_defaults(func=cmd_list_commands)
+
+    # launch - start the game detached
+    p = subparsers.add_parser("launch", help="Launch the game detached (logs under .devtools/)")
+    p.add_argument("--godot", help="Godot binary (else $GODOT_BIN, else config godot_bin)")
+    p.add_argument("--isolated", action="store_true",
+                   help="Private bus + userdata: prints the --session/--userdata to pass "
+                        "on subsequent calls")
+    p.set_defaults(func=cmd_launch)
 
     # harness-version - which harness revision is installed
     p = subparsers.add_parser("harness-version",
@@ -1445,6 +1878,21 @@ def main():
     p.add_argument("--timeout", type=float, default=60, help="Sequence timeout in seconds (default: 60)")
     p.set_defaults(func=cmd_input_sequence)
 
+    # input state
+    p = input_sub.add_parser("state", help="Read pressed/strength for actions "
+                                           "(all project actions when none named)")
+    p.add_argument("actions", nargs="*", help="Action names (default: every non-ui_ action)")
+    p.set_defaults(func=cmd_input_state)
+
+    # key - raw keyboard event (top-level; it is not an action)
+    p = subparsers.add_parser("key", help="Tap a raw keyboard key by OS keycode name "
+                                          "(e.g. E, LEFT, SPACE)")
+    p.add_argument("key", help="Key name per OS.find_keycode_from_string, e.g. E, LEFT, Escape")
+    p.add_argument("--count", type=int, help="Number of taps (default: 1)")
+    p.add_argument("--hold-frames", type=int, dest="hold_frames",
+                   help="Frames to hold before release (default: release on the next frame)")
+    p.set_defaults(func=cmd_key)
+
     # ==================== TOUCH SIMULATION ====================
 
     # touch - nested subcommands (InputEventScreenTouch / InputEventScreenDrag)
@@ -1485,6 +1933,8 @@ def main():
     p = subparsers.add_parser("set-feature", help="Override an engine feature probe")
     p.add_argument("--touchscreen", type=bool_arg, metavar="true|false",
                    help="Fake DisplayServer.is_touchscreen_available()")
+    p.add_argument("--query", action="store_true",
+                   help="Read the current flag values without writing anything")
     p.set_defaults(func=cmd_set_feature)
 
     # ==================== NODE / TIME CONTROL ====================
@@ -1510,7 +1960,36 @@ def main():
     p = subparsers.add_parser("step-time", help="Pause the tree and advance it by N game-seconds")
     p.add_argument("--seconds", "-s", type=float, required=True,
                    help="Game-seconds to advance (e.g. 0.05 to sample mid-tween)")
+    p.add_argument("--hold", metavar="ACTION",
+                   help="Action re-asserted pressed on every stepped frame, released at the end")
     p.set_defaults(func=cmd_step_time)
+
+    # tilemap-cells
+    p = subparsers.add_parser("tilemap-cells",
+                              help="Dump a tilemap's used cells (source/atlas ids) as data")
+    p.add_argument("--node", "-n", required=True, help="TileMap or TileMapLayer node path")
+    p.add_argument("--layer", type=int, help="TileMap layer index (default 0; TileMapLayer ignores it)")
+    p.add_argument("--rect", type=rect_arg, metavar="X,Y,W,H",
+                   help="Clip to a cell-coordinate rect, e.g. 0,0,16,16")
+    p.set_defaults(func=cmd_tilemap_cells)
+
+    # tilemap-region
+    p = subparsers.add_parser("tilemap-region",
+                              help="Connected components (4-neighbor) of cells matching an atlas coord")
+    p.add_argument("--node", "-n", required=True, help="TileMap or TileMapLayer node path")
+    p.add_argument("--atlas", type=coord_pair, required=True, metavar="X,Y",
+                   help="Atlas coordinates to match, e.g. 3,1")
+    p.add_argument("--layer", type=int, help="TileMap layer index (default 0; TileMapLayer ignores it)")
+    p.add_argument("--source-id", type=int, dest="source_id",
+                   help="Also require this tile source id (default: any source)")
+    p.set_defaults(func=cmd_tilemap_region)
+
+    # scripts-seen
+    p = subparsers.add_parser("scripts-seen",
+                              help="Every distinct script path that has entered the tree since launch")
+    p.add_argument("--json", "-j", action="store_true",
+                   help="Print the full raw reply (what tools/verify_ledger.py consumes)")
+    p.set_defaults(func=cmd_scripts_seen)
 
     # ==================== UI VALIDATION ====================
 
@@ -1532,15 +2011,31 @@ def main():
     p.set_defaults(func=cmd_ui_snapshot)
 
     # node-bounds
+    # canvas-scale
+    p = subparsers.add_parser("canvas-scale",
+                              help="Accumulated canvas transform scale + effective texture filter of a CanvasItem")
+    p.add_argument("--node", "-n", required=True, help="CanvasItem node path")
+    p.set_defaults(func=cmd_canvas_scale)
+
+    # set-resolution
+    p = subparsers.add_parser("set-resolution",
+                              help="Resize the game window (reads back the applied size)")
+    p.add_argument("--size", type=coord_pair, required=True, metavar="W,H",
+                   help="Target window size, e.g. 1280,720")
+    p.set_defaults(func=cmd_set_resolution)
+
     p = subparsers.add_parser("node-bounds", help="Get bounds for a specific node")
     p.add_argument("node_path", help="Node path (e.g., /root/Main/HUD/TopBar/CurrencyLabel)")
     p.set_defaults(func=cmd_node_bounds)
 
     args = parser.parse_args()
 
-    global _USERDATA_OVERRIDE, _PRECHECK_ENABLED, _SESSION
+    global _USERDATA_OVERRIDE, _PRECHECK_ENABLED, _SESSION, _RAW_JSON
     _USERDATA_OVERRIDE = args.userdata
     _PRECHECK_ENABLED = not args.no_precheck
+    # getattr: subparsers that define their own local --json overwrite the dest
+    # only for their own namespace; the global flag rides on raw_json.
+    _RAW_JSON = bool(getattr(args, "raw_json", False))
     _SESSION = sanitize_session(args.session)
     if args.session and not _SESSION:
         print(f"error: --session {args.session!r} contains no usable characters "
@@ -1556,6 +2051,9 @@ def main():
     project_path = Path(args.project).resolve()
     try:
         args.func(args, project_path)
+    except _RawJsonPrinted as e:
+        # Global --json: send_command already printed the raw envelope.
+        sys.exit(e.code)
     except BridgeError as e:
         # Bridge failures are expected operational states (dead game, crossed
         # replies, hung handler), not bugs: report them, don't traceback.

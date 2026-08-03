@@ -14,20 +14,24 @@ extends Node
 ## extension loads AFTER the generic handlers, a project may override a generic
 ## verb by registering the same action string (last-writer-wins).
 
-# harness-version: 0.7.0
+# harness-version: 0.8.0
 # --- Constants ---
 
 ## Version of the godot-selftest-harness these files were copied from. Reported by the
 ## `harness_version` verb and stamped into every copied tool script, so a gap logged
 ## against a project can name the version it was seen on, and a refresh can tell a
 ## stale file from a customized one. Bump with .claude-plugin/plugin.json.
-const HARNESS_VERSION: String = "0.7.0"
+const HARNESS_VERSION: String = "0.8.0"
 
 ## Default bus filenames. With a session id (see _resolve_session) the id is spliced in
 ## before the extension, so two instances can each own a bus in the same user:// dir.
 const COMMANDS_PATH: String = "user://devtools_commands.json"
 const RESULTS_PATH: String = "user://devtools_results.json"
 const LOG_PATH: String = "user://devtools_log.jsonl"
+## Bus-identity record (G-009): written at _ready with this instance's pid, start
+## time, project name and session, so a client can tell WHO owns the bus it is
+## polling instead of guessing from a silent timeout.
+const OWNER_PATH: String = "user://devtools_owner.json"
 
 ## Command-line flag and environment variable that name this instance's bus.
 const SESSION_ARG: String = "--devtools-session"
@@ -82,11 +86,16 @@ const DEFAULT_CONFIG: Dictionary = {
 var _commands_path: String = COMMANDS_PATH
 var _results_path: String = RESULTS_PATH
 var _log_path: String = LOG_PATH
+var _owner_path: String = OWNER_PATH
 ## Session id, or "" for the shared default bus.
 var _session: String = ""
 var _commands_abs_path: String
 var _results_abs_path: String
 var _log_abs_path: String
+var _owner_abs_path: String
+## Unix time this instance came up. Stamped (with the pid) onto every reply so a
+## client can detect a foreign instance answering on its bus (G-036a).
+var _start_unix: float = 0.0
 var _last_command_check_msec: int = 0
 var _config: Dictionary = {}
 var _handlers: Dictionary = {}
@@ -101,6 +110,16 @@ var _active_touches: Dictionary = {}
 ## Orphan-node count sampled shortly after startup, or -1 before it is captured.
 ## See _capture_orphan_baseline() for why an absolute orphan ceiling is useless.
 var _orphan_baseline: int = -1
+## Process frame at which the orphan baseline was (re)captured, or -1. Lets
+## `performance` report how stale the baseline is (G-058).
+var _orphan_baseline_frame: int = -1
+## The last scale set through set_game_speed this session, or null if never.
+## `performance` reports it so a leftover speed override is visible (G-059).
+var _devtools_set_speed: Variant = null
+## Every distinct script resource_path that has entered the tree since launch
+## (G-074b/G-068): the existing tree is walked once at _ready to seed it, then
+## `node_added` keeps it current. Keys are paths; values are `true`.
+var _scripts_seen: Dictionary = {}
 ## The "id" of the command currently being served, echoed verbatim onto its reply
 ## ("" when the request carried none).
 ##
@@ -123,20 +142,31 @@ func _ready() -> void:
 	# writes and clears. _process_command_line_args() runs much later and is far too
 	# late to influence the paths.
 	_resolve_session()
+	_start_unix = Time.get_unix_time_from_system()
 	_commands_abs_path = ProjectSettings.globalize_path(_commands_path)
 	_results_abs_path = ProjectSettings.globalize_path(_results_path)
 	_log_abs_path = ProjectSettings.globalize_path(_log_path)
+	_owner_abs_path = ProjectSettings.globalize_path(_owner_path)
 
 	_load_config()
 	_register_generic_handlers()
 	_load_extension()
 
 	_clear_stale_files()
+	_write_owner_file()
+
+	# Script census (G-074b): seed from whatever is already in the tree (autoload
+	# order means the main scene is usually not up yet), then track every node
+	# that enters from here on.
+	get_tree().node_added.connect(_on_node_added_track_script)
+	_seed_scripts_seen(get_tree().root)
+
 	_write_log("system", "DevTools initialized", {
 		"commands_path": _commands_abs_path,
 		"results_path": _results_abs_path,
 		"handlers": _handlers.size(),
 		"session": _session,
+		"pid": OS.get_process_id(),
 	})
 
 	_process_command_line_args()
@@ -225,6 +255,7 @@ func _resolve_session() -> void:
 	_commands_path = "user://devtools_commands_%s.json" % clean
 	_results_path = "user://devtools_results_%s.json" % clean
 	_log_path = "user://devtools_log_%s.jsonl" % clean
+	_owner_path = "user://devtools_owner_%s.json" % clean
 
 
 func _load_config() -> void:
@@ -262,6 +293,11 @@ func _register_generic_handlers() -> void:
 	register_command("input_clear", _cmd_input_clear)
 	register_command("input_actions", _cmd_input_actions)
 	register_command("input_sequence", _cmd_input_sequence)
+	register_command("input_key", _cmd_input_key)
+	register_command("input_state", _cmd_input_state)
+	register_command("tilemap_cells", _cmd_tilemap_cells)
+	register_command("tilemap_region", _cmd_tilemap_region)
+	register_command("scripts_seen", _cmd_scripts_seen)
 	register_command("touch_press", _cmd_touch_press)
 	register_command("touch_release", _cmd_touch_release)
 	register_command("touch_drag", _cmd_touch_drag)
@@ -275,6 +311,8 @@ func _register_generic_handlers() -> void:
 	register_command("validate_ui", _cmd_validate_ui)
 	register_command("get_ui_snapshot", _cmd_get_ui_snapshot)
 	register_command("get_node_bounds", _cmd_get_node_bounds)
+	register_command("canvas_scale", _cmd_canvas_scale)
+	register_command("set_resolution", _cmd_set_resolution)
 	register_command("save_ui_baseline", _cmd_save_ui_baseline)
 	register_command("ui_snapshot_diff", _cmd_ui_snapshot_diff)
 	register_command("list_commands", _cmd_list_commands)
@@ -366,8 +404,16 @@ func _write_result(action: String, result: Dictionary) -> void:
 		"action": action,
 		"success": result.get("success", false),
 		"message": result.get("message", ""),
-		"data": result.get("data"),
+		# The wire contract promises data is always a Dictionary. Handlers that
+		# omit it on failure paths (or return null) must not leak that omission
+		# to clients, so it is defaulted centrally here rather than per handler.
+		"data": result.get("data") if result.get("data") is Dictionary else {},
 		"timestamp": Time.get_unix_time_from_system(),
+		# Bus identity (G-009/G-036a/G-038): every reply names the process that
+		# wrote it. The client compares this against the owner file, so a foreign
+		# instance answering on this bus is a loud error, not silent corruption.
+		"pid": OS.get_process_id(),
+		"start_unix": _start_unix,
 	}
 	var status: Dictionary = _collect_status()
 	if not status.is_empty():
@@ -408,7 +454,8 @@ func _process_command_line_args() -> void:
 
 # --- Command Handlers ---
 
-## Wire contract - data keys: timestamp (float), session (String, "" on the default bus).
+## Wire contract - data keys: timestamp (float), session (String, "" on the default
+## bus), pid (int), start_unix (float), scripts_seen (int).
 func _cmd_ping(_args: Dictionary) -> Dictionary:
 	return {
 		"success": true,
@@ -416,6 +463,9 @@ func _cmd_ping(_args: Dictionary) -> Dictionary:
 		"data": {
 			"timestamp": Time.get_unix_time_from_system(),
 			"session": _session,
+			"pid": OS.get_process_id(),
+			"start_unix": _start_unix,
+			"scripts_seen": _scripts_seen.size(),
 		},
 	}
 
@@ -690,6 +740,149 @@ func _read_transform(node: Node) -> Dictionary:
 	return out
 
 
+## Extracts up to `max_count` numeric components from a JSON array ([x, y, ...])
+## or a Dictionary keyed by `keys` ({"x": ..., "y": ...}). Returns an empty Array
+## when the shape does not fit -- callers treat that as "not coercible", never as
+## a zero vector. `min_count` components are required; extras up to `max_count`
+## are taken when present (Color's optional alpha).
+func _numeric_components(value: Variant, keys: Array, min_count: int, max_count: int) -> Array:
+	var out: Array = []
+	if value is Array:
+		var arr: Array = value
+		if arr.size() < min_count or arr.size() > max_count:
+			return []
+		for item: Variant in arr:
+			if not _is_number(item):
+				return []
+			out.append(float(item))
+		return out
+	if value is Dictionary:
+		var dict: Dictionary = value
+		for i: int in range(max_count):
+			var key: String = keys[i]
+			if dict.has(key):
+				if not _is_number(dict[key]):
+					return []
+				out.append(float(dict[key]))
+			elif i < min_count:
+				return []
+			else:
+				break
+		return out
+	return []
+
+
+## Coerces a JSON-decoded argument toward `target_type` (a TYPE_* constant).
+## Returns { "ok": bool, "value": Variant, "reason": String }.
+##
+## JSON can only carry null/bool/number/string/array/dict, so a typed method
+## parameter or property (Vector2, Color, StringName, ...) is unreachable from the
+## bus without this. The rules, in order:
+##   * target TYPE_NIL (untyped) or already the right type -> passed through.
+##   * [x, y] / {"x": .., "y": ..} (and 3-component / r,g,b,a forms) -> Vector2,
+##     Vector2i, Vector3, Vector3i, Color per the target.
+##   * int <-> float <-> bool numeric widening/narrowing.
+##   * String <-> StringName / NodePath, and numbers/bools stringified.
+##   * A JSON Array feeding a Packed*Array parameter goes through type_convert().
+## Anything else is ok:false with a reason naming BOTH types -- type_convert()
+## never fails (it returns the target's default value), so it is deliberately NOT
+## used as a blanket fallback: a silently-defaulted argument is exactly the bug
+## this helper exists to prevent (G-016, G-035).
+func _coerce_arg(value: Variant, target_type: int) -> Dictionary:
+	var from_type: int = typeof(value)
+	if target_type == TYPE_NIL or from_type == target_type:
+		return {"ok": true, "value": value, "reason": ""}
+
+	match target_type:
+		TYPE_VECTOR2, TYPE_VECTOR2I:
+			var comps: Array = _numeric_components(value, ["x", "y"], 2, 2)
+			if comps.size() == 2:
+				if target_type == TYPE_VECTOR2:
+					return {"ok": true, "value": Vector2(comps[0], comps[1]), "reason": ""}
+				return {"ok": true, "value": Vector2i(roundi(comps[0]), roundi(comps[1])), "reason": ""}
+		TYPE_VECTOR3, TYPE_VECTOR3I:
+			var comps: Array = _numeric_components(value, ["x", "y", "z"], 3, 3)
+			if comps.size() == 3:
+				if target_type == TYPE_VECTOR3:
+					return {"ok": true, "value": Vector3(comps[0], comps[1], comps[2]), "reason": ""}
+				return {"ok": true, "value": Vector3i(roundi(comps[0]), roundi(comps[1]), roundi(comps[2])), "reason": ""}
+		TYPE_COLOR:
+			var comps: Array = _numeric_components(value, ["r", "g", "b", "a"], 3, 4)
+			if comps.size() >= 3:
+				var alpha: float = comps[3] if comps.size() >= 4 else 1.0
+				return {"ok": true, "value": Color(comps[0], comps[1], comps[2], alpha), "reason": ""}
+		TYPE_INT:
+			if from_type == TYPE_FLOAT or from_type == TYPE_BOOL:
+				return {"ok": true, "value": int(value), "reason": ""}
+		TYPE_FLOAT:
+			if from_type == TYPE_INT or from_type == TYPE_BOOL:
+				return {"ok": true, "value": float(value), "reason": ""}
+		TYPE_BOOL:
+			if from_type == TYPE_INT or from_type == TYPE_FLOAT:
+				return {"ok": true, "value": bool(value), "reason": ""}
+		TYPE_STRING:
+			if from_type in [TYPE_INT, TYPE_FLOAT, TYPE_BOOL, TYPE_STRING_NAME, TYPE_NODE_PATH]:
+				return {"ok": true, "value": str(value), "reason": ""}
+		TYPE_STRING_NAME:
+			if from_type == TYPE_STRING:
+				return {"ok": true, "value": StringName(value), "reason": ""}
+		TYPE_NODE_PATH:
+			if from_type == TYPE_STRING:
+				return {"ok": true, "value": NodePath(value), "reason": ""}
+		_:
+			# Packed arrays from a plain JSON array: the one family where
+			# type_convert() is trusted, because the source shape is known.
+			if from_type == TYPE_ARRAY and target_type >= TYPE_PACKED_BYTE_ARRAY and target_type <= TYPE_PACKED_COLOR_ARRAY:
+				return {"ok": true, "value": type_convert(value, target_type), "reason": ""}
+
+	return {
+		"ok": false,
+		"value": null,
+		"reason": "cannot convert %s (%s) to %s" % [
+			type_string(from_type), JSON.stringify(_serialize_variant(value)), type_string(target_type),
+		],
+	}
+
+
+## Approximate-equality check for the set_state read-back: float and vector types
+## compare with is_equal_approx so the engine's own storage precision cannot fail
+## a legitimate write; everything else compares exactly.
+func _values_match(a: Variant, b: Variant) -> bool:
+	if typeof(a) != typeof(b):
+		if _is_number(a) and _is_number(b):
+			return is_equal_approx(float(a), float(b))
+		return false
+	match typeof(a):
+		TYPE_FLOAT:
+			return is_equal_approx(a, b)
+		TYPE_VECTOR2, TYPE_VECTOR3, TYPE_VECTOR4, TYPE_COLOR, TYPE_QUATERNION, TYPE_RECT2, TYPE_TRANSFORM2D, TYPE_TRANSFORM3D:
+			return a.is_equal_approx(b)
+		_:
+			return a == b
+
+
+## Resolves a node path, retrying a bare path under /root (G-010): the autoload
+## sits at /root/DevTools, so a relative "Main/Player" would otherwise be looked
+## up under the autoload and fail confusingly. Returns { "node": Node-or-null,
+## "path": String } where `path` is the one that actually resolved.
+func _resolve_node(node_path: String) -> Dictionary:
+	var node: Node = get_node_or_null(node_path)
+	var used: String = node_path
+	if node == null and not node_path.begins_with("/root"):
+		var prefixed: String = "/root/" + node_path.trim_prefix("/")
+		node = get_node_or_null(prefixed)
+		if node != null:
+			used = prefixed
+	return {"node": node, "path": used}
+
+
+## Sets a property. Two guards beyond a raw `node.set` (G-035, G-029):
+##  * The value is coerced toward the property's CURRENT type (JSON cannot carry
+##    a Vector2), unless the current value is null -- then there is nothing to
+##    key off and the value is written as-is.
+##  * The property is READ BACK after the write and compared. `Object.set` on an
+##    unknown property is a silent no-op, and a setter may clamp or reject the
+##    value; either way "set had no effect" is a failure, not a success.
 func _cmd_set_state(args: Dictionary) -> Dictionary:
 	var node_path: String = args.get("node_path", "")
 	if node_path.is_empty():
@@ -704,38 +897,113 @@ func _cmd_set_state(args: Dictionary) -> Dictionary:
 		return {"success": false, "message": "No property specified"}
 
 	var value: Variant = args.get("value")
+	var current: Variant = node.get(property)
+	var coerced: bool = false
+	if value != null and current != null and typeof(value) != typeof(current):
+		var conversion: Dictionary = _coerce_arg(value, typeof(current))
+		if not conversion["ok"]:
+			return {
+				"success": false,
+				"message": "Cannot set %s.%s: %s" % [node_path, property, conversion["reason"]],
+				"data": {"property": property},
+			}
+		value = conversion["value"]
+		coerced = true
+
 	node.set(property, value)
+
+	var read_back: Variant = node.get(property)
+	if not _values_match(read_back, value):
+		return {
+			"success": false,
+			"message": "set had no effect on %s.%s: wrote %s but read back %s (unknown property, or a setter clamped/rejected it)" % [
+				node_path, property,
+				JSON.stringify(_serialize_variant(value)),
+				JSON.stringify(_serialize_variant(read_back)),
+			],
+			"data": {
+				"property": property,
+				"written": _serialize_variant(value),
+				"read_back": _serialize_variant(read_back),
+			},
+		}
 
 	return {
 		"success": true,
 		"message": "Set %s.%s" % [node_path, property],
-		"data": {"property": property, "value": _serialize_variant(node.get(property))},
+		"data": {
+			"property": property,
+			"value": _serialize_variant(read_back),
+			"read_back": _serialize_variant(read_back),
+			"coerced": coerced,
+		},
 	}
 
 
+## Calls a method with its args coerced to the declared parameter types (G-016):
+## the bus carries JSON, so a `func take_vec(v: Vector2)` was previously
+## uncallable -- callv() with an Array where a Vector2 belongs fails, or worse,
+## quietly misbehaves. Types come from get_method_list(); a method absent from it
+## (some built-ins) falls back to the old uncoerced callv with a note in data. A
+## coercion that cannot be done fails the command -- the method is NEVER called
+## with a silently-wrong argument.
 func _cmd_run_method(args: Dictionary) -> Dictionary:
 	var node_path: String = args.get("node_path", "")
 	if node_path.is_empty():
 		return {"success": false, "message": "No node_path provided"}
 
-	var node: Node = get_node_or_null(node_path)
+	var resolved: Dictionary = _resolve_node(node_path)
+	var node: Node = resolved["node"]
 	if node == null:
-		return {"success": false, "message": "Node not found: %s" % node_path}
+		return {"success": false, "message": "Node not found: %s (also tried under /root)" % node_path}
+	var used_path: String = resolved["path"]
 
 	var method: String = args.get("method", "")
 	if method.is_empty():
 		return {"success": false, "message": "No method specified"}
 
 	if not node.has_method(method):
-		return {"success": false, "message": "Node %s has no method: %s" % [node_path, method]}
+		return {"success": false, "message": "Node %s has no method: %s" % [used_path, method]}
 
-	var method_args: Array = args.get("args", [])
+	var raw_args: Variant = args.get("args", [])
+	if not raw_args is Array:
+		return {"success": false, "message": "args must be a JSON array"}
+	var method_args: Array = (raw_args as Array).duplicate()
+
+	var signature: Dictionary = {}
+	for entry: Dictionary in node.get_method_list():
+		if entry.get("name", "") == method:
+			signature = entry
+			break
+
+	var coercion_note: String = ""
+	if signature.is_empty():
+		coercion_note = "method not in get_method_list(); args passed uncoerced"
+	else:
+		var params: Array = signature.get("args", [])
+		for i: int in range(method_args.size()):
+			if i >= params.size():
+				break  # varargs / extra args: leave them alone.
+			var param_type: int = int(params[i].get("type", TYPE_NIL))
+			var conversion: Dictionary = _coerce_arg(method_args[i], param_type)
+			if not conversion["ok"]:
+				return {
+					"success": false,
+					"message": "Argument %d of %s.%s(): %s" % [i, used_path, method, conversion["reason"]],
+					"data": {"node_path": used_path, "method": method, "argument": i},
+				}
+			method_args[i] = conversion["value"]
+
 	var result: Variant = node.callv(method, method_args)
+
+	var data: Dictionary = {"result": _serialize_variant(result), "node_path": used_path}
+	if not coercion_note.is_empty():
+		data["note"] = coercion_note
 
 	return {
 		"success": true,
-		"message": "Called %s.%s()" % [node_path, method],
-		"data": {"result": _serialize_variant(result)},
+		"message": "Called %s.%s()" % [used_path, method],
+		"data": data,
 	}
 
 
@@ -752,6 +1020,7 @@ func _cmd_performance(args: Dictionary) -> Dictionary:
 
 	if bool(args.get("reset_baseline", false)):
 		_orphan_baseline = orphan_nodes
+		_orphan_baseline_frame = int(Engine.get_process_frames())
 		_write_log("system", "Orphan baseline reset", {"orphan_baseline": _orphan_baseline})
 
 	var baseline_captured: bool = _orphan_baseline >= 0
@@ -778,6 +1047,14 @@ func _cmd_performance(args: Dictionary) -> Dictionary:
 		"orphan_growth_max": int(_config.get("orphan_growth_max", 20)),
 		"physics_2d_active_objects": Performance.get_monitor(Performance.PHYSICS_2D_ACTIVE_OBJECTS),
 		"physics_3d_active_objects": Performance.get_monitor(Performance.PHYSICS_3D_ACTIVE_OBJECTS),
+		# Time-scale context (G-058/G-059/G-066): an FPS or growth reading taken
+		# under a leftover speed override is not comparable to one at 1.0, and
+		# nothing used to say which one you had.
+		"time_scale": Engine.time_scale,
+		# The last value set via set_game_speed this session; null if never.
+		"devtools_set_speed": _devtools_set_speed,
+		# Frames since the orphan baseline was captured; -1 before capture.
+		"orphan_baseline_age_frames": (int(Engine.get_process_frames()) - _orphan_baseline_frame) if _orphan_baseline_frame >= 0 else -1,
 	}
 
 	var message: String = "Performance metrics collected"
@@ -810,6 +1087,7 @@ func _capture_orphan_baseline() -> void:
 	for _i: int in range(ORPHAN_BASELINE_FRAMES):
 		await get_tree().process_frame
 	_orphan_baseline = int(Performance.get_monitor(Performance.OBJECT_ORPHAN_NODE_COUNT))
+	_orphan_baseline_frame = int(Engine.get_process_frames())
 	_write_log("system", "Orphan baseline captured", {
 		"orphan_baseline": _orphan_baseline,
 		"frames_waited": ORPHAN_BASELINE_FRAMES,
@@ -961,6 +1239,17 @@ func _cmd_input_release(args: Dictionary) -> Dictionary:
 	}
 
 
+## Press-and-release in one verb. The release is dispatched on the FRAME AFTER
+## the press (or after `seconds`/`hold` of game time), never inside the same
+## frame (G-067): `is_action_just_pressed` and release-triggered handlers only
+## fire when the two events land on different frames, so a same-frame tap tested
+## nothing for that whole class of game code. The reply now comes back AFTER the
+## release, so a release-driven state change is observable on the very next read.
+##
+## data.pressed_during / data.pressed_after report the action's polled state
+## right before and right after the release (G-041): Viewport.is_input_handled()
+## is not reliably readable across the buffered dispatch, so the post-tap pressed
+## state is the honest best-effort signal that the tap registered and cleared.
 func _cmd_input_tap(args: Dictionary) -> Dictionary:
 	var action: String = args.get("action", "")
 	if action.is_empty():
@@ -974,18 +1263,31 @@ func _cmd_input_tap(args: Dictionary) -> Dictionary:
 
 	Input.action_press(action, strength)
 	_dispatch_action_event(action, true, strength)
-	_active_simulated_inputs.append(action)
+	if action not in _active_simulated_inputs:
+		_active_simulated_inputs.append(action)
 
-	get_tree().create_timer(maxf(hold, 0.0)).timeout.connect(func() -> void:
-		Input.action_release(action)
-		_dispatch_action_event(action, false)
-		_active_simulated_inputs.erase(action)
-	)
+	if hold > 0.0:
+		await get_tree().create_timer(maxf(hold, 0.0)).timeout
+	else:
+		await get_tree().process_frame
+
+	var pressed_during: bool = Input.is_action_pressed(action)
+	Input.action_release(action)
+	_dispatch_action_event(action, false)
+	_active_simulated_inputs.erase(action)
+	await get_tree().process_frame
+	var pressed_after: bool = Input.is_action_pressed(action)
 
 	return {
 		"success": true,
-		"message": "Tapped: %s (hold %.2fs)" % [action, hold],
-		"data": {"action": action, "hold": hold, "strength": strength},
+		"message": "Tapped: %s (hold %.2fs, released on a later frame)" % [action, hold],
+		"data": {
+			"action": action,
+			"hold": hold,
+			"strength": strength,
+			"pressed_during": pressed_during,
+			"pressed_after": pressed_after,
+		},
 	}
 
 
@@ -996,6 +1298,117 @@ func _cmd_input_clear(_args: Dictionary) -> Dictionary:
 		"success": true,
 		"message": "Cleared %d simulated inputs and released %d touches" % [cleared.size(), released.size()],
 		"data": {"cleared": cleared, "touches_released": released},
+	}
+
+
+## Dispatches a RAW keyboard event by OS keycode name (G-049): action simulation
+## cannot reach game code that reads `InputEventKey.keycode` directly (rebindable
+## controls, debug keys, text fields). args:
+##   { "key": String (e.g. "E", "LEFT", "SPACE"), "count": int = 1,
+##     "hold_frames": int = 0 }.
+## Both `keycode` AND `physical_keycode` are set on the event, so code matching
+## either sees it. The release always lands on a later frame than the press
+## (after `hold_frames` frames when > 0), for the same reason as input_tap.
+func _cmd_input_key(args: Dictionary) -> Dictionary:
+	var key_name: String = str(args.get("key", ""))
+	if key_name.is_empty():
+		return {"success": false, "message": "No key specified. Pass e.g. {\"key\": \"E\"}."}
+
+	# OS.find_keycode_from_string is picky about casing ("Space", not "SPACE"),
+	# so try the obvious spellings before failing.
+	var keycode: Key = KEY_NONE
+	for candidate: String in [key_name, key_name.capitalize(), key_name.to_upper()]:
+		keycode = OS.find_keycode_from_string(candidate)
+		if keycode != KEY_NONE:
+			break
+	if keycode == KEY_NONE:
+		return {"success": false, "message": "Unknown key name: %s (OS.find_keycode_from_string found nothing)" % key_name}
+
+	var count: int = clampi(int(args.get("count", 1)), 1, 100)
+	var hold_frames: int = clampi(int(args.get("hold_frames", 0)), 0, 600)
+
+	for tap: int in range(count):
+		var press := InputEventKey.new()
+		press.keycode = keycode
+		press.physical_keycode = keycode
+		press.pressed = true
+		Input.parse_input_event(press)
+
+		# Release on a later frame -- a same-frame press+release is invisible to
+		# just_pressed/just_released style handlers (G-067).
+		for _f: int in range(maxi(1, hold_frames)):
+			await get_tree().process_frame
+
+		var release := InputEventKey.new()
+		release.keycode = keycode
+		release.physical_keycode = keycode
+		release.pressed = false
+		Input.parse_input_event(release)
+
+		if tap < count - 1:
+			await get_tree().process_frame
+
+	return {
+		"success": true,
+		"message": "Key %s (keycode %d) tapped %d time%s" % [
+			OS.get_keycode_string(keycode), keycode, count, "" if count == 1 else "s",
+		],
+		"data": {
+			"key": key_name,
+			"keycode": keycode,
+			"keycode_string": OS.get_keycode_string(keycode),
+			"count": count,
+			"hold_frames": hold_frames,
+		},
+	}
+
+
+## Reads the polled state of input actions (G-021): pressed + strength, so a test
+## can assert what the game is CURRENTLY seeing instead of inferring it from
+## whatever the last simulated event should have done. args:
+##   { "actions": Array of names = [] } -- empty means every project action
+## (built-in ui_* actions excluded, exactly as input_actions defaults). Requested
+## names that are not in the InputMap come back in data["unknown"] rather than
+## being silently dropped.
+func _cmd_input_state(args: Dictionary) -> Dictionary:
+	var raw_wanted: Variant = args.get("actions", [])
+	if not raw_wanted is Array:
+		return {"success": false, "message": "args.actions must be an array of action names"}
+	var wanted: Array = raw_wanted
+
+	var states: Dictionary = {}
+	var unknown: Array = []
+
+	if wanted.is_empty():
+		for action: StringName in InputMap.get_actions():
+			var action_str: String = str(action)
+			if action_str.begins_with("ui_"):
+				continue
+			states[action_str] = {
+				"pressed": Input.is_action_pressed(action_str),
+				"strength": Input.get_action_strength(action_str),
+			}
+	else:
+		for entry: Variant in wanted:
+			var action_str: String = str(entry)
+			if not InputMap.has_action(action_str):
+				unknown.append(action_str)
+				continue
+			states[action_str] = {
+				"pressed": Input.is_action_pressed(action_str),
+				"strength": Input.get_action_strength(action_str),
+			}
+
+	var message: String = "%d action state%s read" % [states.size(), "" if states.size() == 1 else "s"]
+	if not unknown.is_empty():
+		message += " -- unknown action%s: %s" % [
+			"" if unknown.size() == 1 else "s", ", ".join(PackedStringArray(unknown)),
+		]
+
+	return {
+		"success": true,
+		"message": message,
+		"data": {"actions": states, "unknown": unknown, "count": states.size()},
 	}
 
 
@@ -1204,6 +1617,20 @@ func _cmd_touch_list(_args: Dictionary) -> Dictionary:
 ##    touch events. That is usually what you want for a touch-UI screenshot, but it
 ##    means the session is no longer a faithful mouse session.
 func _cmd_set_feature(args: Dictionary) -> Dictionary:
+	# {"query": true} returns the current values WITHOUT writing anything (G-033):
+	# there was previously no way to read the flags back, so a test could not
+	# tell a leftover override from a fresh session.
+	if bool(args.get("query", false)):
+		return {
+			"success": true,
+			"message": "Feature flags (read-only query; nothing was written). Supported: touchscreen (bool).",
+			"data": {
+				"query": true,
+				"touchscreen_available": DisplayServer.is_touchscreen_available(),
+				"emulate_touch_from_mouse": Input.is_emulating_touch_from_mouse(),
+			},
+		}
+
 	var applied: Dictionary = {}
 	var unknown: Array = []
 
@@ -1213,6 +1640,8 @@ func _cmd_set_feature(args: Dictionary) -> Dictionary:
 				var want: bool = bool(args[key])
 				Input.set_emulate_touch_from_mouse(want)
 				applied["touchscreen"] = want
+			"query":
+				pass  # Handled above when true; a false query is a no-op key.
 			_:
 				unknown.append(key)
 
@@ -1413,6 +1842,8 @@ func _cmd_set_game_speed(args: Dictionary) -> Dictionary:
 	var prev: float = Engine.time_scale
 	var scale: float = clampf(float(args.get("scale", 1.0)), 0.0, 100.0)
 	Engine.time_scale = scale
+	# Remembered so `performance` can report a leftover override (G-059).
+	_devtools_set_speed = scale
 
 	return {
 		"success": true,
@@ -1464,6 +1895,14 @@ func _cmd_step_time(args: Dictionary) -> Dictionary:
 			],
 		}
 
+	# Optional held action (G-076): "step 2s while move_left is down" used to need
+	# an input_press, a step, and an input_release -- three bus round-trips during
+	# which nothing guaranteed the press survived. The action is re-asserted
+	# pressed on every stepped frame and released at the end.
+	var hold_action: String = str(args.get("hold", ""))
+	if not hold_action.is_empty() and not InputMap.has_action(hold_action):
+		return {"success": false, "message": "Unknown input action for 'hold': %s" % hold_action}
+
 	var ticks_per_second: int = Engine.physics_ticks_per_second
 	var target_physics_frames: int = ceili(seconds * float(ticks_per_second))
 	var previous_scale: float = Engine.time_scale
@@ -1479,6 +1918,12 @@ func _cmd_step_time(args: Dictionary) -> Dictionary:
 	var frames_spent: int = 0
 	var budget_exhausted: bool = false
 
+	if not hold_action.is_empty():
+		Input.action_press(hold_action)
+		_dispatch_action_event(hold_action, true)
+		if hold_action not in _active_simulated_inputs:
+			_active_simulated_inputs.append(hold_action)
+
 	while true:
 		var physics_advanced: int = int(Engine.get_physics_frames()) - start_physics_frames
 		# Wait for BOTH clocks: the physics one so physics-driven state advances the
@@ -1491,6 +1936,15 @@ func _cmd_step_time(args: Dictionary) -> Dictionary:
 		await get_tree().process_frame
 		frames_spent += 1
 		process_seconds += get_process_delta_time()
+		if not hold_action.is_empty():
+			# Re-asserted every frame so nothing (an input_clear, game code
+			# calling action_release) can silently drop the hold mid-step.
+			Input.action_press(hold_action)
+
+	if not hold_action.is_empty():
+		Input.action_release(hold_action)
+		_dispatch_action_event(hold_action, false)
+		_active_simulated_inputs.erase(hold_action)
 
 	var physics_frames: int = int(Engine.get_physics_frames()) - start_physics_frames
 	var process_frames: int = int(Engine.get_process_frames()) - start_process_frames
@@ -1512,6 +1966,7 @@ func _cmd_step_time(args: Dictionary) -> Dictionary:
 		"restored_time_scale": Engine.time_scale,
 		"tree_paused": tree_paused,
 		"budget_exhausted": budget_exhausted,
+		"held_action": hold_action if not hold_action.is_empty() else null,
 	}
 
 	var message: String = "Advanced %.4fs of physics time (%d frames @ %d Hz, exact) and %.4fs of process time (approximate, +/- one frame); requested %.4fs. time_scale pinned to 1.0 and restored to %.3f." % [
@@ -1672,17 +2127,38 @@ func _resolve_safe_area_inset(args: Dictionary) -> Dictionary:
 	return inset
 
 
+## A Control parented under a Node2D with no CanvasLayer in between renders in
+## WORLD coordinates (a diegetic HUD riding a camera, a health bar over an enemy).
+## Screen-position checks are meaningless for it: its "position" is a function of
+## where the player is standing, which is how validate-ui once produced 9 findings
+## that all evaporated on a different save (gap gather:G-018).
+func _is_world_space_control(control: Control) -> bool:
+	var ancestor: Node = control.get_parent()
+	while ancestor != null:
+		if ancestor is CanvasLayer:
+			return false
+		if ancestor is Node2D:
+			return true
+		ancestor = ancestor.get_parent()
+	return false
+
+
 func _validate_ui_recursive(node: Node, vp: Vector2, issues: Array, interactive_controls: Array = [], safe_rect: Rect2 = Rect2(), check_safe_area: bool = false) -> void:
 	if node is Control and _is_effectively_visible(node):
 		var control: Control = node as Control
 		var rect: Rect2 = control.get_global_rect()
 
+		# World-space Controls get only the intrinsic checks (zero size,
+		# transparency); every screen-position check would report where the
+		# camera happens to be, not a layout defect.
+		var world_space: bool = _is_world_space_control(control)
+
 		# Collect interactive controls for overlap detection
-		if (control is Button or control is TextureButton or control is LinkButton) and control.visible:
+		if (control is Button or control is TextureButton or control is LinkButton) and control.visible and not world_space:
 			interactive_controls.append({"path": str(control.get_path()), "rect": rect})
 
 		# Check 1: Viewport overflow
-		if rect.position.x + rect.size.x > vp.x or rect.position.y + rect.size.y > vp.y:
+		if not world_space and (rect.position.x + rect.size.x > vp.x or rect.position.y + rect.size.y > vp.y):
 			issues.append({
 				"severity": "warning",
 				"code": "ui_overflow",
@@ -1736,7 +2212,7 @@ func _validate_ui_recursive(node: Node, vp: Vector2, issues: Array, interactive_
 					})
 
 		# Check 5: Negative position
-		if rect.position.x < 0.0 or rect.position.y < 0.0:
+		if not world_space and (rect.position.x < 0.0 or rect.position.y < 0.0):
 			issues.append({
 				"severity": "warning",
 				"code": "ui_negative_pos",
@@ -1803,7 +2279,7 @@ func _validate_ui_recursive(node: Node, vp: Vector2, issues: Array, interactive_
 		# judged -- a full-bleed background legitimately covers the trimmed edges, and
 		# flagging it would bury the findings that matter. Skipped wholesale when the
 		# inset is all zeros, so an existing project sees no new findings.
-		if check_safe_area and control.visible:
+		if check_safe_area and control.visible and not world_space:
 			var is_interactive: bool = control is Button or control is TextureButton or control is LinkButton
 			var carries_text: bool = not _get_control_text(control).is_empty()
 			if (is_interactive or carries_text) and not safe_rect.encloses(rect):
@@ -1901,6 +2377,118 @@ func _cmd_get_node_bounds(args: Dictionary) -> Dictionary:
 			"in_viewport": rect.position.x >= 0.0 and rect.position.y >= 0.0
 				and rect.position.x + rect.size.x <= vp.x
 				and rect.position.y + rect.size.y <= vp.y,
+		},
+	}
+
+
+## Reports a CanvasItem's ACCUMULATED canvas transform scale -- what the player's
+## eye actually sees after every ancestor's zoom/scale multiplies through -- plus
+## the effective texture filter. One verb for two gaps (gather:G-073 + G-075): a
+## crisp/blurry question is always "what scale is this REALLY drawn at, through
+## WHICH filter", and both answers are invisible to get-state (containers hide
+## position/scale) and to node-bounds (position/size only).
+## args: { "node_path": String }
+func _cmd_canvas_scale(args: Dictionary) -> Dictionary:
+	var node_path: String = args.get("node_path", "")
+	if node_path.is_empty():
+		return {"success": false, "message": "No node_path provided", "data": {}}
+	var resolved: Dictionary = _resolve_node(node_path)
+	var node: Node = resolved["node"]
+	if node == null:
+		return {"success": false, "message": "Node not found: %s" % node_path, "data": {}}
+	if not node is CanvasItem:
+		return {"success": false, "message": "Node is not a CanvasItem (no canvas transform): %s"
+			% node.get_class(), "data": {"class": node.get_class()}}
+
+	var ci: CanvasItem = node as CanvasItem
+	var xform: Transform2D = ci.get_global_transform_with_canvas()
+	var accumulated: Vector2 = xform.get_scale()
+
+	# Per-ancestor contributions, leaf first, so a surprising accumulated scale
+	# can be traced to the ancestor that introduced it.
+	var chain: Array = []
+	var walker: Node = ci
+	while walker is CanvasItem:
+		var entry: Dictionary = {"name": str(walker.name), "class": walker.get_class()}
+		if walker is Node2D:
+			entry["scale"] = {"x": (walker as Node2D).scale.x, "y": (walker as Node2D).scale.y}
+		elif walker is Control:
+			entry["scale"] = {"x": (walker as Control).scale.x, "y": (walker as Control).scale.y}
+		chain.append(entry)
+		walker = walker.get_parent()
+
+	# Effective texture filter: TEXTURE_FILTER_PARENT_NODE delegates upward, so
+	# resolve the chain to the first explicit value, falling back to the project
+	# default when every ancestor inherits.
+	var filter_walker: CanvasItem = ci
+	var filter: int = ci.texture_filter
+	var filter_source: String = str(ci.get_path())
+	while filter == CanvasItem.TEXTURE_FILTER_PARENT_NODE and filter_walker.get_parent() is CanvasItem:
+		filter_walker = filter_walker.get_parent() as CanvasItem
+		filter = filter_walker.texture_filter
+		filter_source = str(filter_walker.get_path())
+	var filter_names: Dictionary = {
+		CanvasItem.TEXTURE_FILTER_NEAREST: "nearest",
+		CanvasItem.TEXTURE_FILTER_LINEAR: "linear",
+		CanvasItem.TEXTURE_FILTER_NEAREST_WITH_MIPMAPS: "nearest_with_mipmaps",
+		CanvasItem.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS: "linear_with_mipmaps",
+		CanvasItem.TEXTURE_FILTER_NEAREST_WITH_MIPMAPS_ANISOTROPIC: "nearest_with_mipmaps_anisotropic",
+		CanvasItem.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS_ANISOTROPIC: "linear_with_mipmaps_anisotropic",
+	}
+	var filter_name: String
+	if filter == CanvasItem.TEXTURE_FILTER_PARENT_NODE:
+		var project_default: int = int(ProjectSettings.get_setting(
+			"rendering/textures/canvas_textures/default_texture_filter", 1))
+		filter_name = "%s (project default)" % {0: "nearest", 1: "linear",
+			2: "linear_with_mipmaps", 3: "nearest_with_mipmaps"}.get(project_default, str(project_default))
+		filter_source = "project setting"
+	else:
+		filter_name = filter_names.get(filter, str(filter))
+
+	return {
+		"success": true,
+		"message": "%s draws at %.3f x %.3f through %s" % [
+			node.name, accumulated.x, accumulated.y, filter_name],
+		"data": {
+			"accumulated_scale": {"x": accumulated.x, "y": accumulated.y},
+			"rotation": xform.get_rotation(),
+			"chain": chain,
+			"effective_filter": filter_name,
+			"filter_source": filter_source,
+		},
+	}
+
+
+## Resizes the game window so anchors and size_changed handlers can be exercised
+## at more than the one resolution the game booted with (gap gather:G-017). The
+## read-back is honest: a headless or tiled environment may clamp or ignore the
+## resize, and that is reported as a failure rather than "Resized".
+## args: { "width": int, "height": int }
+func _cmd_set_resolution(args: Dictionary) -> Dictionary:
+	var width: int = int(args.get("width", 0))
+	var height: int = int(args.get("height", 0))
+	if width <= 0 or height <= 0:
+		return {"success": false, "message": "width and height are required and must be positive",
+			"data": {}}
+	var window: Window = get_window()
+	var before: Vector2i = window.size
+	window.size = Vector2i(width, height)
+	await get_tree().process_frame
+	var after: Vector2i = window.size
+	var visible: Rect2 = get_viewport().get_visible_rect()
+	var applied: bool = after == Vector2i(width, height)
+	return {
+		"success": applied,
+		"message": ("Resized %s -> %s" % [before, after]) if applied
+			else ("Resize not applied: asked %dx%d, window reports %s (headless and tiling WMs may clamp or ignore resizes)"
+				% [width, height, after]),
+		"data": {
+			"before": {"x": before.x, "y": before.y},
+			"after": {"x": after.x, "y": after.y},
+			"visible_rect": {"x": visible.position.x, "y": visible.position.y,
+				"w": visible.size.x, "h": visible.size.y},
+			"content_scale_mode": window.content_scale_mode,
+			"applied": applied,
 		},
 	}
 
@@ -2024,6 +2612,219 @@ func _check_interactive_overlaps(controls: Array) -> Array:
 					"overlap_rect": {"x": intersection.position.x, "y": intersection.position.y, "w": intersection.size.x, "h": intersection.size.y},
 				})
 	return overlaps
+
+
+# --- TileMap Inspection Handlers ---
+
+## Maximum cells a single tilemap_cells reply will carry. A full world layer can
+## be tens of thousands of cells; past this the reply reports truncated:true and
+## the caller should pass a rect.
+const TILEMAP_CELLS_MAX: int = 2000
+
+
+## Builds per-cell accessors for a TileMap (needs the layer index) or a
+## TileMapLayer (ignores it). Returns {} for anything else; callers turn that
+## into the failure message.
+func _tilemap_accessors(node: Node, layer: int) -> Dictionary:
+	if node is TileMapLayer:
+		var tl: TileMapLayer = node as TileMapLayer
+		return {
+			"used": tl.get_used_cells(),
+			"atlas": func(c: Vector2i) -> Vector2i: return tl.get_cell_atlas_coords(c),
+			"source": func(c: Vector2i) -> int: return tl.get_cell_source_id(c),
+		}
+	if node is TileMap:
+		var tm: TileMap = node as TileMap
+		return {
+			"used": tm.get_used_cells(layer),
+			"atlas": func(c: Vector2i) -> Vector2i: return tm.get_cell_atlas_coords(layer, c),
+			"source": func(c: Vector2i) -> int: return tm.get_cell_source_id(layer, c),
+		}
+	return {}
+
+
+## Reads a tilemap's used cells as data instead of pixels (G-032): a screenshot
+## shows ~a screenful of tiles and a human guess at what they are; this returns
+## the actual source/atlas ids, which are the persistence key in most projects.
+## args: { "node_path": String, "layer": int = 0 (TileMap only),
+##         "rect": [x, y, w, h] optional clip in cell coordinates }.
+## Output is capped at TILEMAP_CELLS_MAX cells with data.truncated = true --
+## pass a rect to narrow the window rather than paging.
+func _cmd_tilemap_cells(args: Dictionary) -> Dictionary:
+	var node_path: String = str(args.get("node_path", ""))
+	if node_path.is_empty():
+		return {"success": false, "message": "No node_path provided"}
+	var resolved: Dictionary = _resolve_node(node_path)
+	var node: Node = resolved["node"]
+	if node == null:
+		return {"success": false, "message": "Node not found: %s (also tried under /root)" % node_path}
+
+	var layer: int = int(args.get("layer", 0))
+	var access: Dictionary = _tilemap_accessors(node, layer)
+	if access.is_empty():
+		return {"success": false, "message": "Node %s is a %s, not a TileMap or TileMapLayer" % [resolved["path"], node.get_class()]}
+
+	var clip: Variant = null
+	if args.has("rect"):
+		var comps: Array = _numeric_components(args["rect"], ["x", "y", "w", "h"], 4, 4)
+		if comps.size() != 4:
+			return {"success": false, "message": "'rect' must be [x, y, w, h] in cell coordinates"}
+		clip = Rect2i(roundi(comps[0]), roundi(comps[1]), roundi(comps[2]), roundi(comps[3]))
+
+	var get_atlas: Callable = access["atlas"]
+	var get_source: Callable = access["source"]
+	var cells: Array = []
+	var considered: int = 0
+	var truncated: bool = false
+	for cell: Vector2i in access["used"]:
+		if clip != null and not (clip as Rect2i).has_point(cell):
+			continue
+		considered += 1
+		if cells.size() >= TILEMAP_CELLS_MAX:
+			truncated = true
+			continue
+		var atlas: Vector2i = get_atlas.call(cell)
+		cells.append({
+			"x": cell.x,
+			"y": cell.y,
+			"source_id": get_source.call(cell),
+			"atlas": {"x": atlas.x, "y": atlas.y},
+		})
+
+	return {
+		"success": true,
+		"message": "%d cell%s%s%s" % [
+			considered, "" if considered == 1 else "s",
+			" in rect" if clip != null else "",
+			" (reply truncated at %d; pass a rect)" % TILEMAP_CELLS_MAX if truncated else "",
+		],
+		"data": {
+			"node_path": resolved["path"],
+			"layer": layer,
+			"cells": cells,
+			"count": considered,
+			"truncated": truncated,
+		},
+	}
+
+
+## Flood-fills connected components (4-neighbor) among used cells matching an
+## atlas coordinate (G-065): "is this island one landmass or three" is a
+## structural question a screenshot cannot answer and a cell dump makes the
+## caller re-derive. args: { "node_path": String, "layer": int = 0,
+## "atlas": [x, y], "source_id": int optional (any source when absent) }.
+## data.components is sorted by size, largest first.
+func _cmd_tilemap_region(args: Dictionary) -> Dictionary:
+	var node_path: String = str(args.get("node_path", ""))
+	if node_path.is_empty():
+		return {"success": false, "message": "No node_path provided"}
+	var resolved: Dictionary = _resolve_node(node_path)
+	var node: Node = resolved["node"]
+	if node == null:
+		return {"success": false, "message": "Node not found: %s (also tried under /root)" % node_path}
+
+	var layer: int = int(args.get("layer", 0))
+	var access: Dictionary = _tilemap_accessors(node, layer)
+	if access.is_empty():
+		return {"success": false, "message": "Node %s is a %s, not a TileMap or TileMapLayer" % [resolved["path"], node.get_class()]}
+
+	var atlas_comps: Array = _numeric_components(args.get("atlas"), ["x", "y"], 2, 2)
+	if atlas_comps.size() != 2:
+		return {"success": false, "message": "tilemap_region requires 'atlas' as [x, y]"}
+	var atlas: Vector2i = Vector2i(roundi(atlas_comps[0]), roundi(atlas_comps[1]))
+	var filter_source: bool = args.has("source_id")
+	var source_id: int = int(args.get("source_id", -1))
+
+	var get_atlas: Callable = access["atlas"]
+	var get_source: Callable = access["source"]
+	var matching: Dictionary = {}
+	for cell: Vector2i in access["used"]:
+		if get_atlas.call(cell) != atlas:
+			continue
+		if filter_source and get_source.call(cell) != source_id:
+			continue
+		matching[cell] = true
+
+	var visited: Dictionary = {}
+	var components: Array = []
+	var neighbors: Array = [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1)]
+	for start: Vector2i in matching:
+		if visited.has(start):
+			continue
+		var stack: Array = [start]
+		visited[start] = true
+		var count: int = 0
+		var min_c: Vector2i = start
+		var max_c: Vector2i = start
+		while not stack.is_empty():
+			var cell: Vector2i = stack.pop_back()
+			count += 1
+			min_c = Vector2i(mini(min_c.x, cell.x), mini(min_c.y, cell.y))
+			max_c = Vector2i(maxi(max_c.x, cell.x), maxi(max_c.y, cell.y))
+			for offset: Vector2i in neighbors:
+				var next: Vector2i = cell + offset
+				if matching.has(next) and not visited.has(next):
+					visited[next] = true
+					stack.append(next)
+		components.append({
+			"cells": count,
+			"bounds": {
+				"x": min_c.x,
+				"y": min_c.y,
+				"w": max_c.x - min_c.x + 1,
+				"h": max_c.y - min_c.y + 1,
+			},
+		})
+	components.sort_custom(func(a: Dictionary, b: Dictionary) -> bool: return a["cells"] > b["cells"])
+
+	return {
+		"success": true,
+		"message": "%d matching cell%s in %d component%s" % [
+			matching.size(), "" if matching.size() == 1 else "s",
+			components.size(), "" if components.size() == 1 else "s",
+		],
+		"data": {
+			"node_path": resolved["path"],
+			"layer": layer,
+			"atlas": {"x": atlas.x, "y": atlas.y},
+			"source_id": source_id if filter_source else null,
+			"components": components,
+			"total": matching.size(),
+		},
+	}
+
+
+# --- Script Census (G-074b / G-068) ---
+
+func _track_script(node: Node) -> void:
+	var script: Script = node.get_script() as Script
+	if script != null and not script.resource_path.is_empty():
+		_scripts_seen[script.resource_path] = true
+
+
+func _on_node_added_track_script(node: Node) -> void:
+	_track_script(node)
+
+
+func _seed_scripts_seen(node: Node) -> void:
+	_track_script(node)
+	for child: Node in node.get_children():
+		_seed_scripts_seen(child)
+
+
+## Reports every distinct script resource_path that has been attached to a node
+## in the tree since launch. This is what lets a verify run measure REACH against
+## the whole session rather than one scene-tree snapshot: a node that lived and
+## died between snapshots still counts here.
+## Wire contract - data keys: scripts (sorted Array of String), count (int).
+func _cmd_scripts_seen(_args: Dictionary) -> Dictionary:
+	var scripts: Array = _scripts_seen.keys()
+	scripts.sort()
+	return {
+		"success": true,
+		"message": "%d distinct script%s seen since launch" % [scripts.size(), "" if scripts.size() == 1 else "s"],
+		"data": {"scripts": scripts, "count": scripts.size()},
+	}
 
 
 # --- Utility Functions ---
@@ -2166,8 +2967,30 @@ func _parse_vector2_or_null(value: Variant) -> Variant:
 	return null
 
 
+## Deletes leftovers from a dead instance: a stale command/result file would be
+## answered/consumed as if it were current, and a stale owner file would name a
+## process that no longer exists as the bus owner.
 func _clear_stale_files() -> void:
 	if FileAccess.file_exists(_commands_path):
 		DirAccess.remove_absolute(_commands_abs_path)
 	if FileAccess.file_exists(_results_path):
 		DirAccess.remove_absolute(_results_abs_path)
+	if FileAccess.file_exists(_owner_path):
+		DirAccess.remove_absolute(_owner_abs_path)
+
+
+## Writes the bus-identity record (G-009). The client reads it to say WHO owns a
+## bus -- on a foreign-pid reply (another instance answering) and in the
+## "game not running" precheck message (naming the process that last claimed it).
+func _write_owner_file() -> void:
+	var file: FileAccess = FileAccess.open(_owner_path, FileAccess.WRITE)
+	if file == null:
+		_write_log("error", "Failed to write owner file", {"error": FileAccess.get_open_error()})
+		return
+	file.store_string(JSON.stringify({
+		"pid": OS.get_process_id(),
+		"start_unix": _start_unix,
+		"project": str(ProjectSettings.get_setting("application/config/name", "")),
+		"session": _session,
+	}, "  "))
+	file.close()

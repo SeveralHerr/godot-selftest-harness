@@ -29,6 +29,14 @@ extends SceneTree
 ## is now a runner error naming what it did: `filter 'spawner' selected 0 of 111
 ## discovered test(s)`.
 ##
+## The reverse poisoning is also fixed (G-055): when --file/--filter is active,
+## a test script that fails to LOAD but is OUTSIDE the selection no longer
+## forces exit 2 over a fully passing selected subset. Such files are counted
+## and printed (`Discovery errors: N (unselected; not affecting this run's
+## exit)`) and the exit code is scored over the selected set only. With NO
+## selector active a broken file still exits 2 - a whole-suite run genuinely
+## could not run - and a SELECTED file failing to load stays exit 2 too.
+##
 ## Windows note: the stock Godot .exe is the non-console build and prints nothing
 ## to a PowerShell console, so redirect headless runs to a file and read that back
 ## (e.g. `godot --headless --script res://tools/run_tests.gd > tests.txt 2>&1`).
@@ -56,10 +64,10 @@ extends SceneTree
 ## (res://addons/godot_selftest/devtools_config.json key "test_dir", default
 ## "res://test/unit") for files named test_*.gd.
 
-# harness-version: 0.7.0
+# harness-version: 0.8.0
 ## Harness revision these files were copied from. See lint_project.gd / the
 ## `harness_version` bus verb; bump with .claude-plugin/plugin.json.
-const HARNESS_VERSION: String = "0.7.0"
+const HARNESS_VERSION: String = "0.8.0"
 
 const CONFIG_PATH: String = "res://addons/godot_selftest/devtools_config.json"
 const DEFAULT_TEST_DIR: String = "res://test/unit"
@@ -72,6 +80,8 @@ var _passed: int = 0
 var _failed: int = 0
 var _skipped: int = 0
 var _errors: Array[Dictionary] = []
+## Load failures in scripts a selector excluded (G-055): reported, never scored.
+var _discovery_errors: Array[Dictionary] = []
 var _results: Array[Dictionary] = []
 var _json_output: bool = false
 var _filter: String = ""
@@ -124,7 +134,9 @@ func _initialize() -> void:
 	# quit() is only reached once every test has actually finished.
 	await _run_all_tests(test_scripts)
 
-	if _selected == 0 and _discovered > 0:
+	# Discovery errors alone must not leave a 0-test run looking green: a
+	# selector that matched nothing verifiable is still a broken gate.
+	if _selected == 0 and (_discovered > 0 or not _discovery_errors.is_empty()):
 		_runner_error = true
 		_selection_error = "%s selected 0 of %d discovered test(s)" % [
 			_selector_description(), _discovered,
@@ -230,8 +242,7 @@ func _run_all_tests(test_scripts: Array[String]) -> void:
 		var script: GDScript = load(script_path) as GDScript
 		if script == null:
 			# Not a test failure - the gate itself is broken. See EXIT_RUNNER_ERROR.
-			_errors.append({"script": script_path, "error": "Failed to load script"})
-			_runner_error = true
+			_record_load_failure(script_path, "Failed to load script")
 			continue
 
 		# A script with a parse error still loads as a non-null GDScript, and
@@ -240,14 +251,12 @@ func _run_all_tests(test_scripts: Array[String]) -> void:
 		# "all passed". Guard with can_instantiate(), and instantiate from a
 		# helper so any surviving error only aborts that helper.
 		if not script.can_instantiate():
-			_errors.append({"script": script_path, "error": "Script failed to compile (see stderr)"})
-			_runner_error = true
+			_record_load_failure(script_path, "Script failed to compile (see stderr)")
 			continue
 
 		var test_obj: RefCounted = _instantiate_test(script)
 		if test_obj == null:
-			_errors.append({"script": script_path, "error": "Failed to instantiate"})
-			_runner_error = true
+			_record_load_failure(script_path, "Failed to instantiate")
 			continue
 
 		# Inject assertion helper script reference
@@ -272,6 +281,41 @@ func _run_all_tests(test_scripts: Array[String]) -> void:
 # _run_all_tests free to carry on with the remaining scripts.
 func _instantiate_test(script: GDScript) -> RefCounted:
 	return script.new() as RefCounted
+
+
+## A script that cannot load is a broken gate for whatever it would have run.
+## Whole-suite run (no selector): exit 2 - nothing proves that file's tests
+## pass. Selector active and the file OUTSIDE it: recorded as a discovery
+## error, printed, but never scored - the exit code belongs to the selected
+## set (G-055). A SELECTED file failing to load still poisons the run.
+func _record_load_failure(script_path: String, error: String) -> void:
+	var selector_active: bool = _filter != "" or _file_filter != ""
+	if selector_active and not _script_matches_selectors(script_path):
+		_discovery_errors.append({"script": script_path, "error": error})
+		return
+	_errors.append({"script": script_path, "error": error})
+	_runner_error = true
+
+
+## File-level selection for scripts whose methods cannot be enumerated because
+## they failed to load. --file matches exactly as in _is_selected; --filter can
+## only be compared against the FILENAME - a file that will not compile has no
+## method names to offer. Both active combine with AND, like _is_selected.
+func _script_matches_selectors(script_path: String) -> bool:
+	var file_name: String = script_path.get_file().to_lower()
+	if _file_filter != "":
+		var want: String = _file_filter.to_lower()
+		var matched: bool = (
+			file_name == want
+			or file_name == want + ".gd"
+			or script_path.to_lower().contains(want)
+		)
+		if not matched:
+			return false
+	if _filter != "":
+		if not file_name.contains(_filter.to_lower()):
+			return false
+	return true
 
 
 func _run_single_test(test_obj: RefCounted, method_name: String, script_path: String) -> void:
@@ -327,6 +371,7 @@ func _print_results() -> void:
 			"file": _file_filter,
 			"selection_error": _selection_error,
 			"errors": _errors,
+			"discovery_errors": _discovery_errors,
 			"results": _results,
 			"runner_error": _runner_error,
 			"exit_code": _exit_code(),
@@ -356,6 +401,12 @@ func _print_results() -> void:
 
 	for err: Dictionary in _errors:
 		print("  [ERR]  %s: %s" % [err["script"], err["error"]])
+
+	if not _discovery_errors.is_empty():
+		print("")
+		print("  Discovery errors: %d (unselected; not affecting this run's exit)" % _discovery_errors.size())
+		for derr: Dictionary in _discovery_errors:
+			print("    [SKIP] %s: %s" % [derr["script"], derr["error"]])
 
 	print("")
 	print("-" .repeat(60))
@@ -436,9 +487,9 @@ static func assert_gte(actual: Variant, threshold: Variant, context: String = ""
 	return msg
 
 
-# ============= Headless UI Helpers (static) =============
-# Called by test scripts via the _T reference. Both are documented below; only
-# instantiate_ui() is a coroutine, so it must be awaited:
+# ============= Headless Scene/UI Helpers (static) =============
+# Called by test scripts via the _T reference. instantiate_scene() and
+# instantiate_ui() are coroutines, so they must be awaited:
 #
 #   var ui: Control = await _T.instantiate_ui("res://scenes/hud.tscn", Vector2i(640, 360))
 #   var err: String = _T.assert_eq(ui.size, Vector2(640, 360), "hud fills the viewport")
@@ -448,11 +499,28 @@ static func assert_gte(actual: Variant, threshold: Variant, context: String = ""
 # Why they exist: a test script is a RefCounted and never enters the scene tree,
 # so a Control instantiated inside one has no viewport to anchor against. `size`
 # stays (0, 0), get_global_rect() is empty, and _ready() - and therefore every
-# @onready var - never fires. instantiate_ui() puts the scene into a real
+# @onready var - never fires. instantiate_scene() puts the scene into a real
 # SubViewport of a known size (entering a live tree is what fires _ready() for
 # the whole subtree, so no propagate_notification(NOTIFICATION_READY) hack is
 # needed), then lets the main loop tick so Godot's deferred layout pass actually
 # resolves anchors, offsets, container sorting and minimum sizes.
+#
+# instantiate_scene() hosts ANY root - Node2D, plain Node, Control - so a
+# gameplay scene gets the same treatment: _ready() fires, @onready resolves,
+# groups register with the tree, timers and physics tick when frames advance.
+# instantiate_ui() is the same call under its historical name (kept because
+# existing tests use it); free_ui() tears down either.
+#
+# dispatch_events(viewport, events) pushes InputEvents through the hosted
+# viewport synchronously with NO frame in between - all of them land inside one
+# frame, which is what lets a test distinguish event-scoped handling (one
+# reaction per event) from frame-scoped handling (coalesced until the next
+# process pass). Get the viewport from a hosted node via node.get_viewport().
+#
+# stub_siblings(node, siblings) builds the sibling neighbourhood a script
+# reaches for at _ready() time (get_node("../X")) without loading its real
+# scene; pre-add groups with sib.add_to_group("g") before the call - groups set
+# on a node outside any tree persist and register when the parent is hosted.
 #
 # What headless still cannot do: the run uses the dummy rendering driver, so
 # nothing is ever drawn. Layout is real and assertable - anchors, offsets,
@@ -466,15 +534,16 @@ const UI_SETTLE_FRAMES: int = 2
 const UI_HOST_META: String = "_selftest_ui_host"
 
 
-## Instantiates a UI scene into a real, sized SubViewport and lets the layout
-## resolve. `scene` may be a PackedScene, a res:// path to one, or an already
-## built Node (handy for building a Control tree in code). Returns the scene root,
-## ready to assert on, or null if the scene could not be loaded. Always await it,
-## and always pair it with free_ui().
-static func instantiate_ui(scene: Variant, viewport_size: Vector2i = Vector2i(1152, 648)) -> Node:
+## Instantiates ANY scene - Node2D, plain Node or Control root alike - into a
+## real, sized SubViewport and lets the tree settle. `scene` may be a
+## PackedScene, a res:// path to one, or an already built Node (handy for a
+## tree assembled in code, e.g. the parent from stub_siblings()). Returns the
+## scene root, ready to assert on, or null if the scene could not be loaded.
+## Always await it, and always pair it with free_ui().
+static func instantiate_scene(scene: Variant, viewport_size: Vector2i = Vector2i(1152, 648)) -> Node:
 	var tree: SceneTree = Engine.get_main_loop() as SceneTree
 	if tree == null:
-		push_error("instantiate_ui: no SceneTree main loop available")
+		push_error("instantiate_scene: no SceneTree main loop available")
 		return null
 
 	var node: Node = null
@@ -488,7 +557,7 @@ static func instantiate_ui(scene: Variant, viewport_size: Vector2i = Vector2i(11
 		else:
 			packed = load(str(scene)) as PackedScene
 		if packed == null:
-			push_error("instantiate_ui: could not load a PackedScene from %s" % str(scene))
+			push_error("instantiate_scene: could not load a PackedScene from %s" % str(scene))
 			return null
 		node = packed.instantiate()
 
@@ -506,6 +575,50 @@ static func instantiate_ui(scene: Variant, viewport_size: Vector2i = Vector2i(11
 		await tree.process_frame
 
 	return node
+
+
+## Historical name for instantiate_scene(), kept verbatim for existing tests:
+## identical behavior, identical signature, still a coroutine, still paired
+## with free_ui().
+static func instantiate_ui(scene: Variant, viewport_size: Vector2i = Vector2i(1152, 648)) -> Node:
+	return await instantiate_scene(scene, viewport_size)
+
+
+## Pushes each InputEvent in `events` through viewport.push_input(),
+## synchronously, with NO frame yielded in between: every event lands inside
+## the same frame. Not a coroutine - by the time it returns, every _input /
+## _gui_input / _unhandled_input reaction has already run. Use the hosted
+## SubViewport (node.get_viewport() on anything from instantiate_scene()).
+static func dispatch_events(viewport: Viewport, events: Array) -> void:
+	if viewport == null:
+		push_error("dispatch_events: viewport is null")
+		return
+	for ev: Variant in events:
+		if ev is InputEvent:
+			viewport.push_input(ev)
+		else:
+			push_error("dispatch_events: skipped non-InputEvent entry %s" % str(ev))
+
+
+## Builds the sibling neighbourhood `node` expects at _ready() time without
+## loading its real scene: creates a plain Node parent, adds each
+## {name: Node} entry from `siblings` under that name, then adds `node` LAST,
+## so the siblings already exist when node._ready() fires on hosting. Returns
+## the parent - the CALLER owns and frees it: free_ui(parent) works on any
+## node (Control host or not); parent.free() is equivalent. The parent is NOT
+## added to any tree; pass it to instantiate_scene() when _ready() / @onready
+## must actually run. To populate a group for one test, call
+## sib.add_to_group("X") BEFORE hosting - groups set outside a tree persist
+## and register with the SceneTree on entry.
+static func stub_siblings(node: Node, siblings: Dictionary) -> Node:
+	var parent: Node = Node.new()
+	parent.name = "StubSiblingHost"
+	for sib_name: Variant in siblings:
+		var sib: Node = siblings[sib_name]
+		sib.name = str(sib_name)
+		parent.add_child(sib)
+	parent.add_child(node)
+	return parent
 
 
 ## Tears down a tree returned by instantiate_ui(): removes the host SubViewport

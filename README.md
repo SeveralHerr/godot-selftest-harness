@@ -6,7 +6,7 @@ command line — no manual clicking in the editor.
 
 This project was inspired by
 https://github.com/cleak/tea-leaves and adapts the same runtime-driven testing
-concepts for Godot. It combines three things:I
+concepts for Godot. It combines three things:
 
 1. A **file-based DevTools bridge** — an autoload that reads command files from
    `user://` and writes back results, so any process (a Python CLI, a shell
@@ -28,6 +28,9 @@ only exists at runtime, inside a running scene tree. This harness exposes that
 runtime over a simple file bus and a Python CLI, so you can spawn entities,
 inject input, read node state, snapshot the UI, measure FPS, and assert on all
 of it from scripts — and Claude Code can do the same to check its own changes.
+
+
+> Command blocks say `python`. On systems where only `python3` exists, use that; on Windows, probe by *executing* (`python -c ""`) — the Store's `python3` alias passes `command -v` and then refuses to run.
 
 ## Requirements
 
@@ -141,7 +144,7 @@ Ids are stable and never reused. `status:` is `open`, `fixed` (plus `fixed-in: X
 `wontfix`; a gap whose fix shipped only in part stays **open**. `seen:` is bumped when a
 gap bites again — a `seen: 3` is the strongest signal this file can produce, and three
 separately-worded entries are the weakest. `harness:` records the installed version
-(`python3 tools/devtools.py harness-version`), so a gap logged before an upgrade is
+(`python tools/devtools.py harness-version`), so a gap logged before an upgrade is
 distinguishable from a regression after one.
 
 ### Getting gaps upstream
@@ -152,11 +155,11 @@ ran. `tools/upstream_gaps.py` (installed into every project) is that transport:
 
 ```bash
 # from the project, pushing its open gaps up
-python3 tools/upstream_gaps.py log-devtools.md \
+python tools/upstream_gaps.py log-devtools.md \
     --into /path/to/godot-selftest-harness/log-devtools.md
 
 # from the harness repo, pulling from several projects at once
-python3 tools/upstream_gaps.py ../game-a/log-devtools.md ../game-b/log-devtools.md
+python tools/upstream_gaps.py ../game-a/log-devtools.md ../game-b/log-devtools.md
 ```
 
 It is deliberately boring: no PR, no review step, no filtering by importance. Open gaps
@@ -306,11 +309,12 @@ The core keeps these engine-generic verbs (bus `action` strings, underscored):
 ```
 ping, screenshot, scene_tree, validate_scene, validate_all, get_state,
 set_state, run_method, performance, quit, input_press, input_release,
-input_tap, input_clear, input_actions, input_sequence, set_game_speed,
-wait_frames, step_time, clear_nodes, validate_ui, get_ui_snapshot,
-get_node_bounds, save_ui_baseline, ui_snapshot_diff, list_commands,
-touch_press, touch_release, touch_drag, touch_clear, touch_list, set_feature,
-harness_version
+input_tap, input_clear, input_actions, input_sequence, input_key, input_state,
+set_game_speed, wait_frames, step_time, clear_nodes, validate_ui,
+get_ui_snapshot, get_node_bounds, save_ui_baseline, ui_snapshot_diff,
+list_commands, touch_press, touch_release, touch_drag, touch_clear, touch_list,
+set_feature, tilemap_cells, tilemap_region, scripts_seen, canvas_scale,
+set_resolution, harness_version
 ```
 
 Notable behaviors:
@@ -363,6 +367,48 @@ Notable behaviors:
   — for overlays (a CRT shader, a notch, a rounded corner) that eat the viewport edges
   without any validator knowing. The check is skipped entirely when the inset is
   all-zero, so it adds no findings to an existing project.
+- **`run_method` and `set_state` coerce JSON arguments to the declared types.** JSON
+  cannot carry a `Vector2`, so a `func take_vec(v: Vector2)` used to be uncallable over
+  the bus. `[x, y]` / `{"x": .., "y": ..}` (and 3-component / `r,g,b,a` forms) become
+  `Vector2`/`Vector2i`/`Vector3`/`Vector3i`/`Color` per the declared parameter type
+  (from `get_method_list()`) or the property's current type; int/float/bool/String
+  conversions are handled too. An impossible coercion **fails the command** naming both
+  types — the method is never called with a silently-wrong argument. `run_method` also
+  retries a bare node path under `/root` and echoes the path it used in
+  `data.node_path`. `set_state` **reads the property back** after the write and fails
+  with "set had no effect" (reporting `written` vs `read_back`) when a typo'd property
+  or a clamping setter swallowed the value.
+- **`input_key`** dispatches a raw `InputEventKey` by OS keycode name (`{"key": "E"}`,
+  `"LEFT"`, `"SPACE"`; optional `count`, `hold_frames`) with both `keycode` and
+  `physical_keycode` set — the only way to reach game code that reads key events
+  directly instead of actions. The release always lands on a later frame than the
+  press. **`input_tap`** now does the same (release on the next frame, or after
+  `seconds`), replies only after the release, and reports `pressed_during` /
+  `pressed_after` so a tap that never registered is visible.
+- **`input_state`** returns `{action: {pressed, strength}}` for the named actions
+  (`{"actions": [...]}`) or every non-`ui_` action — the polled state the game is
+  actually seeing, not an inference from the last simulated event.
+- **`step_time`** accepts `{"hold": "<action>"}`: the action is re-asserted pressed on
+  every stepped frame and released at the end (`data.held_action`), collapsing the
+  press/step/release three-round-trip dance.
+- **`tilemap_cells`** returns a TileMap/TileMapLayer's used cells as
+  `[{x, y, source_id, atlas}]` (optionally clipped to `rect: [x,y,w,h]`, capped at 2000
+  with `truncated: true`), and **`tilemap_region`** flood-fills 4-neighbor connected
+  components among cells matching an `atlas: [x,y]` (and optional `source_id`),
+  returning `[{cells, bounds}]` sorted largest-first — structural map questions ("is
+  this island one landmass?") as data instead of a screenshot guess.
+- **`scripts_seen`** returns every distinct script `resource_path` that has entered the
+  tree since launch (seeded from the existing tree, then `node_added`): session-long
+  reach ground truth that survives nodes dying between snapshots. The count also rides
+  on `ping` as `data.scripts_seen`.
+- **`set_feature`** with `{"query": true}` reports the current flag values without
+  writing anything.
+- **Every reply carries `pid` and `start_unix`**, and the autoload writes
+  `user://devtools_owner<-session>.json` (`{pid, start_unix, project, session}`) at
+  startup after clearing stale bus files. The Python client compares the reply's pid
+  against the owner file and raises `ForeignInstanceError` when another instance is
+  answering on the bus; the "game not running" precheck message names who last claimed
+  the bus.
 
 Game-specific verbs from earlier FlexCoins-era builds (`spawn_coin`,
 `spawn_coin_on_catcher`, `get_active_coins`, `set_upgrade_levels`,
@@ -376,22 +422,55 @@ Generic hyphenated subcommands mirror the bus verbs:
 
 ```
 ping, screenshot, scene-tree, validate, validate-all, get-state, set-state,
-run-method, performance, quit, logs, harness-version,
-input <press|release|tap|clear|list|sequence>,
+run-method, performance, quit, logs, harness-version, launch,
+input <press|release|tap|clear|list|sequence|state>, key,
 touch <press|release|drag|clear|list>, set-feature, step-time,
 set-game-speed, wait-frames, clear-nodes, validate-ui, ui-snapshot,
-node-bounds, save-ui-baseline, ui-snapshot-diff
+node-bounds, save-ui-baseline, ui-snapshot-diff, tilemap-cells,
+tilemap-region, scripts-seen, canvas-scale, set-resolution
 ```
 
 Notable flags:
+
+- `canvas-scale --node PATH` — a CanvasItem's ACCUMULATED canvas-transform scale
+  (what the player's eye sees after every ancestor multiplies through) plus the
+  effective texture filter and which node (or project setting) supplied it. The
+  answer to every "why is this sprite blurry / enormous" question in one read;
+  `get-state` cannot see it because containers hide position/scale.
+- `set-resolution --size W,H` — resize the game window and read back what was
+  actually applied; a headless or tiling environment that clamps the resize is
+  reported as a failure, not "Resized".
 
 - `get-state --node PATH --property NAME` — repeatable. Without it a single `Label`
   read returns ~120 keys, which is why every assertion used to be piped through an
   ad-hoc filter. A name that doesn't exist is reported explicitly rather than silently
   omitted, so a typo can't look like a missing value.
-- `performance --reset-baseline` — re-baseline the orphan count (see below).
+- `performance --reset-baseline` — re-baseline the orphan count (see below). The reply
+  also carries `time_scale`, `devtools_set_speed` (the last `set-game-speed` value this
+  session, `null` if never) and `orphan_baseline_age_frames`, so a reading taken under
+  a leftover speed override or a stale baseline says so.
 - `--no-precheck` — global; skip the ~2 s "is the game alive" check and wait the full
   timeout.
+- `--json` — global (before the subcommand, e.g. `--json ping`): print every bus reply
+  as the raw JSON envelope instead of the formatted view.
+- `key NAME [--count N] [--hold-frames N]` — raw keyboard event by OS keycode name
+  (`input_key`).
+- `input state [ACTION ...]` — polled pressed/strength per action (`input_state`).
+- `step-time --seconds N [--hold ACTION]` — hold an action across the whole step.
+- `tilemap-cells --node PATH [--layer N] [--rect X,Y,W,H]` and
+  `tilemap-region --node PATH --atlas X,Y [--layer N] [--source-id N]` — tilemap
+  contents and connected components as data.
+- `scripts-seen [--json]` — the script census; with `--json` the full reply envelope is
+  printed (what `tools/verify_ledger.py` consumes from a redirect).
+- `launch [--godot PATH] [--isolated]` — start the game detached with stdout/stderr
+  under `.devtools/` (never a pipe — an unread pipe stalls Godot on Windows). Binary
+  from `--godot`, `$GODOT_BIN`, or the config's `godot_bin`. `--isolated` exports a
+  fresh `GODOT_DEVTOOLS_SESSION` and `GODOT_USERDATA` and prints the
+  `--session`/`--userdata` to pass on subsequent calls. Prints the PID.
+- `list-commands --offline` — no running game: statically parse `register_command(`
+  names from the installed core and the config's extension script, labeled
+  generic/project (a text scan, not runtime truth).
+- `set-feature --query` — read the current feature-flag values without writing.
 
 Two subcommands make project verbs first-class without touching the CLI:
 
@@ -399,7 +478,7 @@ Two subcommands make project verbs first-class without touching the CLI:
   verbatim, so any project-registered verb is reachable:
 
   ```bash
-  python3 tools/devtools.py cmd spawn_enemy --args '{"count": 3}'
+  python tools/devtools.py cmd spawn_enemy --args '{"count": 3}'
   ```
 
 - `list-commands` — sends `{action: "list_commands"}` and prints the discovered
@@ -424,8 +503,8 @@ has to be forbidden from launching the game, and a single owner does each check 
 godot --path . --mute -- --devtools-session a &
 godot --path . --mute -- --devtools-session b &
 
-python3 tools/devtools.py --session a ping   # DevTools is running (…, session: a)
-python3 tools/devtools.py --session b ping
+python tools/devtools.py --session a ping   # DevTools is running (…, session: a)
+python tools/devtools.py --session b ping
 ```
 
 Game-side the id comes from `-- --devtools-session <id>` or the `GODOT_DEVTOOLS_SESSION`
@@ -441,7 +520,7 @@ give each instance its own userdata directory too:
 
 ```bash
 GODOT_USERDATA=/tmp/run-a godot --path . -- --devtools-session a &
-python3 tools/devtools.py --session a --userdata /tmp/run-a ping
+python tools/devtools.py --session a --userdata /tmp/run-a ping
 ```
 
 or set `application/config/use_custom_user_dir` + `custom_user_dir_name` in a per-worker
@@ -515,9 +594,9 @@ whether that was out of forty runs or four hundred, and only the ratio answers "
 thing earning its keep?"
 
 ```bash
-python3 tools/verify_ledger.py reach  --scene-tree tree.json   # dry run, writes nothing
-python3 tools/verify_ledger.py record --scene-tree tree.json --run run.json
-python3 tools/verify_ledger.py stats
+python tools/verify_ledger.py reach  --scene-tree tree.json   # dry run, writes nothing
+python tools/verify_ledger.py record --scene-tree tree.json --run run.json
+python tools/verify_ledger.py stats
 ```
 
 `record` derives everything it can — timestamp, sha, branch, changed files — and takes

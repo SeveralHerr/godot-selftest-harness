@@ -39,6 +39,7 @@ SHIPPED = [
     "addons/godot_selftest/scene_validator.gd",
     "tools/lint_project.gd",
     "tools/run_tests.gd",
+    "tools/eval.gd",
     "tools/devtools.py",
     "tools/check_devtools_log.py",
     "tools/upstream_gaps.py",
@@ -50,6 +51,16 @@ MIRRORED = {"tools/upstream_gaps.py": "tools/upstream_gaps.py"}
 
 _STAMP_RE = re.compile(r"^#\s*harness-version:\s*(\S+)\s*$", re.M)
 _CONST_RE = re.compile(r"""HARNESS_VERSION(?:\s*:\s*String)?\s*=\s*["'](\S+?)["']""")
+_REGISTER_RE = re.compile(r'register_command\("(\w+)"')
+_ADD_PARSER_RE = re.compile(r'add_parser\(\s*"([a-z][a-z0-9-]*)"')
+
+# Docs that must name every verb (H-007). commands/verify.md is deliberately a
+# curated subset (its primitives table), so it is not on this list.
+DOC_RULES = [
+    # (doc path, which surface it must cover)
+    ("README.md", "both"),                      # the reference manual: bus verbs + CLI
+    ("templates/CLAUDE.harness.md", "cli"),     # the in-project cheat sheet: CLI surface
+]
 
 
 def plugin_version():
@@ -64,6 +75,50 @@ def sha256(path):
     silently match nothing.
     """
     return hashlib.sha256(path.read_bytes().replace(b"\r\n", b"\n")).hexdigest()
+
+
+def _normalize_doc(text):
+    """Flatten table/pipe syntax so `input <press\\|release>` matches `input press`."""
+    return re.sub(r"\s+", " ", re.sub(r"[<>`\\|/]", " ", text))
+
+
+def _doc_has(verb, doc_text_normalized):
+    cands = {verb, verb.replace("_", "-")}
+    if "_" in verb:
+        family, _, sub = verb.partition("_")
+        cands.add("%s %s" % (family, sub))
+    return any(c in doc_text_normalized for c in cands)
+
+
+def check_doc_fanout():
+    """Every verb must appear in the docs that promise to list them (H-007).
+
+    The bus surface comes from register_command() calls in dev_tools.gd; the CLI
+    surface from add_parser() calls in devtools.py. A new verb that misses a doc
+    fails --check, so the tables can no longer silently lag the code.
+    """
+    problems = []
+    bus_verbs = _REGISTER_RE.findall(
+        (REPO / "templates/addons/godot_selftest/dev_tools.gd").read_text(encoding="utf-8"))
+    cli_names = _ADD_PARSER_RE.findall(
+        (REPO / "templates/tools/devtools.py").read_text(encoding="utf-8"))
+
+    if not bus_verbs:
+        problems.append("doc fan-out: found no register_command() calls - regex broken?")
+    if not cli_names:
+        problems.append("doc fan-out: found no add_parser() calls - regex broken?")
+
+    for doc_rel, scope in DOC_RULES:
+        doc = _normalize_doc((REPO / doc_rel).read_text(encoding="utf-8"))
+        wanted = []
+        if scope in ("both", "bus"):
+            wanted += bus_verbs
+        if scope in ("both", "cli"):
+            wanted += cli_names
+        missing = sorted({v for v in wanted if not _doc_has(v, doc)})
+        if missing:
+            problems.append("%s: undocumented verb(s): %s" % (doc_rel, ", ".join(missing)))
+    return problems, len(bus_verbs), len(cli_names)
 
 
 def check():
@@ -105,13 +160,17 @@ def check():
                 problems.append("harness_history.json: %s hash is stale for %s (run --record)"
                                 % (rel, version))
 
+    fanout_problems, n_bus, n_cli = check_doc_fanout()
+    problems.extend(fanout_problems)
+
     if problems:
         print("version check FAILED (%d problem(s)):" % len(problems))
         for p in problems:
             print("  - %s" % p)
         return 1
-    print("version check OK: %s stamped in %d shipped file(s), history recorded."
-          % (version, len(SHIPPED)))
+    print("version check OK: %s stamped in %d shipped file(s), history recorded, "
+          "%d bus verb(s) + %d CLI command(s) documented."
+          % (version, len(SHIPPED), n_bus, n_cli))
     return 0
 
 

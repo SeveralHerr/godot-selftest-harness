@@ -48,12 +48,16 @@ import re
 import sys
 from pathlib import Path
 
-# harness-version: 0.7.0
-HARNESS_VERSION = "0.7.0"
+# harness-version: 0.8.0
+HARNESS_VERSION = "0.8.0"
 
 DEFAULT_DEST = "log-devtools.md"
 
 _GAP_RE = re.compile(r"^- Gap\b")
+# A "no gaps this turn" line is the format's required explicit statement that the
+# harness had nothing missing - it is an absence marker, not a gap, and must never
+# be pooled upstream. Match on the normalized first line of the block.
+_NO_GAP_RE = re.compile(r"^-\s*Gap[^:]*:\s*\**no(\s+new)?\s+gaps?\s+this\s+turn\b", re.IGNORECASE)
 _HEADING_RE = re.compile(r"^##\s+(?P<text>.*)$")
 _FENCE_RE = re.compile(r"^\s*```")
 _ID_LINE_RE = re.compile(r"^(?P<indent>\s*)-\s*\[(?P<id>[^\]]+)\]\s*(?P<fields>.*)$")
@@ -148,7 +152,10 @@ def parse_gaps(text):
                 break
         if not gap["id"]:
             gap["id"] = _auto_id(block)
-        gaps.append(gap)
+        # "no gaps this turn" entries are absence markers required by the log
+        # format; they carry no id and nothing to fix, so they never upstream.
+        if not _NO_GAP_RE.match(block[0]):
+            gaps.append(gap)
         i = j
     return gaps
 

@@ -138,7 +138,7 @@ Same installer, for `res://tools/`:
 ```bash
 "$PY" "${CLAUDE_PLUGIN_ROOT}/tools/scaffold_install.py" files --project "$ROOT" \
   --plugin-root "${CLAUDE_PLUGIN_ROOT}" \
-  tools/lint_project.gd tools/run_tests.gd tools/devtools.py \
+  tools/lint_project.gd tools/run_tests.gd tools/eval.gd tools/devtools.py \
   tools/check_devtools_log.py tools/upstream_gaps.py tools/verify_ledger.py
 chmod +x "$ROOT/tools/devtools.py" 2>/dev/null || true
 ```
@@ -352,15 +352,22 @@ gaps can later be upstreamed into the harness itself.
 
 Three pieces, all idempotent:
 
-**9a. Seed the log** — create it only if absent, so an existing log is never
-truncated:
+**9a. Seed the log, or refresh its Format section** — an existing log's *entries* are
+never touched, but the harness-authored Format section between the
+`<!-- BEGIN godot-selftest-harness-format -->` / `<!-- END godot-selftest-harness-format -->`
+markers is refreshed in place (same mechanism as the `CLAUDE.md` block in step 8), so a
+format change — a new verdict, a new status field — reaches every install instead of being
+frozen at whatever version first seeded the file. A pre-marker log (seeded before 0.8.0)
+has no markers to find; leave it untouched and say so — never guess at where its format
+section ends.
 
 ```bash
 if [ ! -f "$ROOT/log-devtools.md" ]; then
   cp "${CLAUDE_PLUGIN_ROOT}/templates/log-devtools.md" "$ROOT/log-devtools.md"
   echo "Created log-devtools.md"
 else
-  echo "log-devtools.md already exists — left untouched."
+  "$PY" "${CLAUDE_PLUGIN_ROOT}/tools/scaffold_install.py" format-block \
+    --project "$ROOT" --plugin-root "${CLAUDE_PLUGIN_ROOT}"
 fi
 ```
 
@@ -454,24 +461,48 @@ else
 fi
 ```
 
-## Step 11 — Detect the Godot binary
+## Step 11 — Detect the Godot binary and record it
 
-Resolve the Godot binary in this priority order and record it for `/verify`:
+Resolve the Godot binary in this priority order:
 
 1. `$GODOT_BIN` if set and executable.
-2. `/Applications/Godot.app/Contents/MacOS/Godot` (macOS).
-3. `which godot`.
-
-If none is found, **warn** that lint/tests/`/verify` cannot run headless until a
-binary is available, and note that Windows/Linux users likely need to set
-`GODOT_BIN` to their Godot executable path.
+2. `godot_bin` already recorded in `devtools_config.json` (a previous run found it).
+3. `/Applications/Godot.app/Contents/MacOS/Godot` (macOS).
+4. `which godot` / `where godot`.
+5. **Windows well-known locations** — a first-time Windows scaffold used to end here
+   with a warning and a skipped smoke check (gap `gather:G-027`); these globs are why
+   it no longer does:
+   - `~/Documents/Godot_v*_win64.exe` (the zip-download convention)
+   - `/c/Program Files/Godot*/Godot*.exe`
+   - `$LOCALAPPDATA/Programs/Godot/Godot*.exe`
 
 ```bash
-if [ -n "$GODOT_BIN" ] && [ -x "$GODOT_BIN" ]; then GODOT="$GODOT_BIN"
-elif [ -x "/Applications/Godot.app/Contents/MacOS/Godot" ]; then GODOT="/Applications/Godot.app/Contents/MacOS/Godot"
-elif command -v godot >/dev/null 2>&1; then GODOT="$(command -v godot)"
-else GODOT=""; fi
-[ -n "$GODOT" ] && echo "Godot binary: $GODOT" || echo "WARN: no Godot binary found. Set GODOT_BIN."
+GODOT=""
+if [ -n "$GODOT_BIN" ] && [ -x "$GODOT_BIN" ]; then GODOT="$GODOT_BIN"; fi
+if [ -z "$GODOT" ]; then
+  GODOT="$("$PY" -c "import json,sys; print(json.load(open('$ROOT/addons/godot_selftest/devtools_config.json')).get('godot_bin',''))" 2>/dev/null)"
+  [ -x "$GODOT" ] || GODOT=""
+fi
+if [ -z "$GODOT" ] && [ -x "/Applications/Godot.app/Contents/MacOS/Godot" ]; then
+  GODOT="/Applications/Godot.app/Contents/MacOS/Godot"
+fi
+if [ -z "$GODOT" ] && command -v godot >/dev/null 2>&1; then GODOT="$(command -v godot)"; fi
+if [ -z "$GODOT" ]; then
+  for cand in "$HOME"/Documents/Godot_v*_win64.exe \
+              "/c/Program Files/Godot"*/Godot*.exe \
+              "${LOCALAPPDATA:-/c/nonexistent}"/Programs/Godot/Godot*.exe; do
+    [ -x "$cand" ] && GODOT="$cand" && break
+  done
+fi
+if [ -n "$GODOT" ]; then
+  echo "Godot binary: $GODOT"
+  # Record it so /verify and later scaffold runs skip the probe. Uses the config
+  # mechanism from step 7, so a hand-edited godot_bin stays project-owned.
+  "$PY" "${CLAUDE_PLUGIN_ROOT}/tools/scaffold_install.py" config --project "$ROOT" \
+    --plugin-root "${CLAUDE_PLUGIN_ROOT}" --set "godot_bin=$GODOT"
+else
+  echo "WARN: no Godot binary found. Set GODOT_BIN or add godot_bin to devtools_config.json."
+fi
 ```
 
 ## Step 12 — Smoke check
@@ -486,6 +517,15 @@ loads and the core parses:
 Surface any parser errors or load failures verbatim. A clean exit (code 0) plus
 per-scene `OK` / `UIDs: OK` output means the install parses. If it fails, report
 the error and stop before claiming success.
+
+**`.bak` cleanup (gap `gather:G-020`).** Once the smoke check passes, list any `.bak`
+files *this run* created (step 4 reports them as it backs up). For each, check whether
+the backed-up content matches a released version of that file
+(`harness_history.json` via the hash check in `tools/scaffold_install.py` semantics):
+a `.bak` whose content is pristine-by-history protected nothing — offer its deletion
+in the step 13 summary as a safe cleanup. A `.bak` holding real local edits is
+**never** deleted by scaffold; it stays until the user ports the edits and removes it
+themselves. Stale `.bak`s otherwise read as drift on the next refresh.
 
 ## Step 13 — Print next steps
 

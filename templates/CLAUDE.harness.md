@@ -70,7 +70,7 @@ the running game". "Probably still worth it" is not an answer.
 
 The `[G-NNN]` line is required and is what makes the log answerable: ids are stable and
 never reused, `status:` is `open`/`fixed`/`wontfix` (`fixed` adds `fixed-in: X.Y.Z`),
-`harness:` comes from `python3 tools/devtools.py harness-version`. **Hitting a known gap
+`harness:` comes from `python tools/devtools.py harness-version`. **Hitting a known gap
 again bumps its `seen:` count** — don't file a second entry for it. `tools/upstream_gaps.py`
 reads exactly these fields to pool open gaps into the harness repo.
 
@@ -91,11 +91,11 @@ The field worth reading is **reach**: computed by intersecting the diff against 
 loaded the code it claimed to verify rather than asking the run to grade itself. A pass
 on an unreached file is a statement about the diff, not the running game — report it that
 way. Each row also carries the `value` verdict above, so "how often was this overkill?"
-is a query. `python3 tools/verify_ledger.py stats` reads the history back; `reach`
+is a query. `python tools/verify_ledger.py stats` reads the history back; `reach`
 computes reach alone without writing a row. Commit the ledger.
 
-### Command cheat-sheet (`python3 tools/devtools.py <verb>`)
-Launch first: `godot --path . --mute &` then `sleep 5 && python3 tools/devtools.py ping`.
+### Command cheat-sheet (`python tools/devtools.py <verb>`)
+Launch first: `godot --path . --mute &` then `sleep 5 && python tools/devtools.py ping`.
 
 | Verb | Use |
 |---|---|
@@ -105,17 +105,26 @@ Launch first: `godot --path . --mute &` then `sleep 5 && python3 tools/devtools.
 | `set-state --node PATH --property N --value V` | Set raw property (bypasses setters/signals) |
 | `run-method --node PATH --method N --args "[...]"` | Call a method — preferred when a signal should fire |
 | `node-bounds PATH` | Exact position/size (deterministic layout ground truth) |
+| `canvas-scale --node PATH` | Accumulated canvas scale + effective texture filter — the crisp/blurry question as one read |
+| `set-resolution --size W,H` | Resize the window (honest read-back; headless may clamp) |
 | `ui-snapshot` / `ui-snapshot-diff` / `save-ui-baseline` | Structured UI state vs baseline |
 | `validate-all` / `validate-ui` | Scene + UI layout validation (expect 0 issues) |
 | `performance [--reset-baseline]` | FPS vs `fps_min`, orphan **growth** vs `orphan_growth_max` |
-| `input <press\|release\|tap\|clear\|list\|sequence>` | Simulate input actions |
+| `input <press\|release\|tap\|clear\|list\|sequence>` | Simulate input actions. `tap` releases on the NEXT frame and replies after the release, reporting `pressed_during`/`pressed_after` |
+| `input state [ACTION ...]` | Polled pressed/strength per action (all project actions when none named) — what the game is actually seeing |
+| `key NAME [--count N] [--hold-frames N]` | Raw `InputEventKey` by OS keycode name (`E`, `LEFT`, `SPACE`) — for game code reading keys directly instead of actions |
 | `touch <press\|release\|drag\|clear\|list> --index N --pos X,Y` | Real `InputEventScreenTouch`/`Drag` — the only way to exercise multi-touch |
-| `set-feature --touchscreen true` | Makes touch UI show itself on desktop (it hides when no touchscreen is reported). Set it **before** the scene loads |
+| `set-feature --touchscreen true` | Makes touch UI show itself on desktop (it hides when no touchscreen is reported). Set it **before** the scene loads. `--query` reads the flags without writing |
 | `set-game-speed N` / `wait-frames N` | Speed up / advance N physics frames |
-| `step-time --seconds N` | Advance ~N game-seconds with `time_scale` pinned to 1.0. Physics exact; process tweens land ±1 frame — it does not pause and step the tree |
+| `step-time --seconds N [--hold ACTION]` | Advance ~N game-seconds with `time_scale` pinned to 1.0. Physics exact; process tweens land ±1 frame — it does not pause and step the tree. `--hold` keeps an action pressed across the step and releases it at the end |
+| `tilemap-cells --node PATH [--layer N] [--rect X,Y,W,H]` | Used cells with source/atlas ids as data (capped at 2000; pass `--rect`) — not a screenshot guess |
+| `tilemap-region --node PATH --atlas X,Y [--layer N] [--source-id N]` | 4-neighbor connected components of matching cells, largest first — "is this island one landmass?" as data |
+| `scripts-seen [--json]` | Every distinct script path that has entered the tree since launch; `--json` prints the full reply envelope |
+| `launch [--godot PATH] [--isolated]` | Start the game detached, logs under `.devtools/`. `--isolated` prints a fresh `--session`/`--userdata` pair to use on later calls |
 | `clear-nodes --group G` (or `--method`/`--class`) | Free matching nodes |
 | `screenshot` | Visual check only (`sleep 0.5`–`1` after a state change) |
-| `list-commands` | Discover all registered verbs (generic + project) |
+| `list-commands` | Discover all registered verbs (generic + project). `--offline` statically parses the scripts when no game is running |
+| `logs --tail N [--category C]` | Read the game's JSONL debug log directly (no bus call; works on a hung game) |
 | `harness-version` | Installed harness revision (game + client). Read it once per session — it fills the `harness:` field on every gap you log. Exits 1 on a mismatch, which means a half-refreshed install |
 | `cmd <verb> --args '{...}'` | Invoke any project-registered verb |
 

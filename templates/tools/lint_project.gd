@@ -1,8 +1,8 @@
 @tool
 extends SceneTree
 
-# Combined linter: UID check, duplicate resource-id check, and scene
-# configuration warnings for the files under the configured scan_root.
+# Combined linter: UID check, duplicate resource-id check, script compile check,
+# and scene configuration warnings for the files under the configured scan_root.
 #
 # Run headless: godot --headless --path . --script res://tools/lint_project.gd
 # With args:    godot --headless --path . --script res://tools/lint_project.gd -- --all --json
@@ -30,6 +30,28 @@ extends SceneTree
 #   2  the linter could not run: unreadable/invalid config, unopenable scan_root,
 #      missing flag argument, or an unreadable/invalid baseline file
 #
+# Scope rules (applied to every pass):
+#   - A directory containing a .gdignore file is skipped, exactly as Godot skips it.
+#   - Any res://addons/<name>/ directory containing a plugin.cfg is treated as
+#     vendored third-party code and exempted from ALL checks (reported once as
+#     `VENDORED (skipped): addons/<name>`) - unless scan_root points inside it,
+#     which is an explicit request to lint it.
+#
+# Script compile check: every discovered .gd is load()ed, which compiles it
+# without instantiating (a @tool script's static initializers may still run).
+# A script that fails to compile is an ERROR finding, rule `script_parse_failed`:
+# lint green now means every script in scope can at least parse, i.e. the project
+# can boot. If MANY scripts fail at once, suspect a stale global class cache -
+# run `godot --headless --path . --import` before believing the findings.
+#
+# NodePath findings come in three rules:
+#   nodepath_unresolved       ERROR - the path stays inside nodes this .tscn
+#                             declares and lands nowhere: a real dangling path.
+#   nodepath_crosses_instance advisory - the path enters an instanced sub-scene,
+#                             whose internals a static pass cannot see. Reported,
+#                             never counted, not even under --strict.
+#   nodepath_empty            warning - a NodePath-like property left empty.
+#
 # Baseline workflow - two commands, no git shell-out, so it cannot hang:
 #   1. at the merge-base:  godot ... lint_project.gd -- --baseline-write lint_baseline.json
 #   2. on the working tree: godot ... lint_project.gd -- --baseline lint_baseline.json
@@ -40,10 +62,10 @@ extends SceneTree
 # console. Redirect to a file and read it back. Every line this script emits goes
 # to stdout via print(), so one redirect captures the whole report.
 
-# harness-version: 0.7.0
+# harness-version: 0.8.0
 ## Harness revision these files were copied from. Printed in the header of every run so
 ## a lint result, and any gap logged from it, can name the version it was produced on.
-const HARNESS_VERSION: String = "0.7.0"
+const HARNESS_VERSION: String = "0.8.0"
 
 const CONFIG_PATH: String = "res://addons/godot_selftest/devtools_config.json"
 const DEFAULT_SCAN_ROOT: String = "res://"
@@ -57,6 +79,9 @@ const EXIT_LINTER_FAILED: int = 2
 # "advisory" findings are reported but never counted, even under --strict.
 var _findings: Array[Dictionary] = []
 var _ident_re: RegEx = null
+## res://addons/<name> directories holding a plugin.cfg: vendored third-party
+## code, exempt from every pass. Filled once in _initialize().
+var _vendored: Array[String] = []
 
 
 func _initialize() -> void:
@@ -124,6 +149,9 @@ func _initialize() -> void:
 		_abort("scan_root '%s' could not be opened" % scan_root)
 		return
 
+	# Vendored addons are computed before any scan so every pass skips them.
+	_vendored = _detect_vendored_addons(scan_root)
+
 	if all_scenes or scenes.is_empty():
 		scenes = _find_all_scenes(scan_root)
 
@@ -157,7 +185,9 @@ func _initialize() -> void:
 			_check_duplicate_ids(path, results["duplicate_ids"])
 		if not uid_ok:
 			results["uids"]["had_error"] = true
-		_check_missing_uid_sidecars(scan_root, test_dir, uid_ignore, results["uids"])
+		var gd_files := _collect_gd_files(scan_root, test_dir)
+		_check_missing_uid_sidecars(gd_files, uid_ignore, results["uids"])
+		_check_scripts_compile(gd_files, uid_ignore, results)
 
 	# Scene configuration warnings for selected scenes, unless uids-only
 	if not uids_only:
@@ -175,13 +205,25 @@ func _initialize() -> void:
 			var warnings: Array = []
 			if state != null:
 				var node_count := state.get_node_count()
+				# Own paths (get_node_path(i, false)), i.e. ".", "./Child", ... -
+				# the set a NodePath property's target must land in to resolve.
+				# (This pass previously collected PARENT paths and resolved
+				# against them, which flagged perfectly good paths like a root
+				# script's "World/TileMap" - the permanent-false-positive bug
+				# G-052 existed to kill.)
 				var path_set := {}
+				# Own paths of nodes that are instances of another scene. A path
+				# that lands under one of these enters territory this .tscn does
+				# not declare, so it cannot be verified statically.
+				var instance_roots := {}
 				for i in range(node_count):
-					var np: NodePath = state.get_node_path(i, true)
-					path_set[String(np)] = true
+					var own := String(state.get_node_path(i, false))
+					path_set[own] = true
+					if state.get_node_instance(i) != null or state.get_node_instance_placeholder(i) != "":
+						instance_roots[own] = true
 
 				for ni in range(node_count):
-					var node_abs_path := String(state.get_node_path(ni, true))
+					var node_abs_path := String(state.get_node_path(ni, false))
 					var prop_cnt := state.get_node_property_count(ni)
 					for pidx in range(prop_cnt):
 						var p_name := String(state.get_node_property_name(ni, pidx))
@@ -197,10 +239,19 @@ func _initialize() -> void:
 								var resolved: String = _resolve_relative_nodepath(node_abs_path, p_str)
 								var unresolved := (resolved != "") and (not _path_set_has_relaxed(path_set, resolved))
 								if unresolved:
-									var msg := "SceneState: '%s' NodePath unresolved: %s (-> %s)" % [p_name, p_str, resolved]
-									var warn := {"path": node_abs_path, "messages": [msg]}
-									warnings.append(warn)
-									_add_finding(p, "nodepath_unresolved", subject, "warning", msg)
+									if _crosses_instance(resolved, instance_roots):
+										# Advisory: the target lives inside an instanced
+										# sub-scene, which SceneState cannot see into.
+										# Never counted, not even under --strict.
+										var adv_msg := "SceneState: '%s' NodePath %s enters instanced sub-scene (-> %s) - not statically checkable (advisory)" % [p_name, p_str, resolved]
+										warnings.append({"path": node_abs_path, "messages": [adv_msg]})
+										_add_finding(p, "nodepath_crosses_instance", subject, "warning", adv_msg, true)
+									else:
+										# The whole path stays inside nodes this scene
+										# declares and lands nowhere: a real dangling path.
+										var msg := "SceneState: '%s' NodePath unresolved: %s (-> %s) - dangling within this scene" % [p_name, p_str, resolved]
+										warnings.append({"path": node_abs_path, "messages": [msg]})
+										_add_finding(p, "nodepath_unresolved", subject, "error", msg)
 
 			if warnings.size() > 0:
 				results["warnings"]["had_warn"] = true
@@ -232,6 +283,7 @@ func _initialize() -> void:
 		return
 
 	# Output
+	results["vendored"] = _vendored
 	if json:
 		results["harness_version"] = HARNESS_VERSION
 		results["findings"] = _findings
@@ -242,7 +294,17 @@ func _initialize() -> void:
 		# Header first: every lint result is evidence, and evidence that cannot name the
 		# version it came from cannot be told apart from a regression later.
 		print("lint: godot-selftest-harness %s | scan_root %s" % [HARNESS_VERSION, scan_root])
+		for v in _vendored:
+			print("VENDORED (skipped): %s" % String(v).trim_prefix("res://"))
 		if not warnings_only:
+			var sc: Dictionary = results.get("scripts", {"checked": 0, "failed": []})
+			if sc["failed"].is_empty():
+				print("Scripts: %d compiled OK" % int(sc["checked"]))
+			else:
+				for fs in sc["failed"]:
+					print("ERROR: %s: %s" % [fs["path"], fs["message"]])
+				if sc["failed"].size() >= 3:
+					print("hint: many scripts failing together usually means a stale class cache - run `godot --headless --path . --import` and re-lint")
 			# "UIDs: OK" is only printed when BOTH passes are clean. It used to print
 			# while a script sat there with no sidecar at all, which is the report
 			# lying about what it checked.
@@ -384,13 +446,51 @@ func _scan_dir(dir: DirAccess, exts: Array[String]) -> Array[String]:
 		if f == "":
 			break
 		if dir.current_is_dir():
-			if f != ".godot":
-				out += _scan_dir(DirAccess.open(dir.get_current_dir() + "/" + f), exts)
+			var full := _norm_path(dir.get_current_dir() + "/" + f)
+			# Dot-directories (.godot, .git, .claude worktrees...) are invisible
+			# to Godot's importer and must be invisible here too - a worktree
+			# under .claude/ holds a full project copy whose every class_name
+			# would otherwise "hide a global script class" in the compile pass.
+			if not f.begins_with(".") and not _dir_skipped(full):
+				out += _scan_dir(DirAccess.open(full), exts)
 		else:
 			for e in exts:
 				if f.ends_with("." + e):
 					out.append(_norm_path(dir.get_current_dir() + "/" + f))
 	dir.list_dir_end()
+	return out
+
+
+# True for any directory every pass must stay out of: one Godot itself ignores
+# (it contains a .gdignore file) or one holding a vendored addon.
+func _dir_skipped(dir_path: String) -> bool:
+	if FileAccess.file_exists(dir_path + "/.gdignore"):
+		return true
+	var n := _norm_path(dir_path)
+	for v in _vendored:
+		if n == v or n.begins_with(v + "/"):
+			return true
+	return false
+
+
+# Any res://addons/<name>/ directory with a plugin.cfg is vendored third-party
+# code: exempt from all checks, unless scan_root explicitly points inside it.
+func _detect_vendored_addons(scan_root: String) -> Array[String]:
+	var out: Array[String] = []
+	var addons := DirAccess.open("res://addons")
+	if addons == null:
+		return out
+	addons.list_dir_begin()
+	while true:
+		var f := addons.get_next()
+		if f == "":
+			break
+		if addons.current_is_dir() and not f.begins_with("."):
+			var p := "res://addons/" + f
+			if FileAccess.file_exists(p + "/plugin.cfg") and not scan_root.begins_with(p):
+				out.append(p)
+	addons.list_dir_end()
+	out.sort()
 	return out
 
 
@@ -427,13 +527,16 @@ func _check_uid_one(p: String, out) -> bool:
 # project has a sidecar, the engine or the checkout simply does not do this, and
 # flagging every file would be noise rather than a finding - so the check stands
 # down entirely.
-func _check_missing_uid_sidecars(scan_root: String, test_dir: String, ignore: Array, out) -> void:
+func _collect_gd_files(scan_root: String, test_dir: String) -> Array[String]:
 	var gd_files := _scan(scan_root, ["gd"])
 	if test_dir != "" and not test_dir.begins_with(scan_root):
 		for p in _scan(test_dir, ["gd"]):
 			if not gd_files.has(p):
 				gd_files.append(p)
+	return gd_files
 
+
+func _check_missing_uid_sidecars(gd_files: Array[String], ignore: Array, out) -> void:
 	var any_sidecar := false
 	for p in gd_files:
 		if FileAccess.file_exists(p + ".uid"):
@@ -458,6 +561,35 @@ func _is_uid_ignored(path: String, ignore: Array) -> bool:
 		if s != "" and path.begins_with(s):
 			return true
 	return false
+
+
+# --- Script compile check (G-034) ---
+# load() compiles a GDScript without instantiating it. A script that fails to
+# load or compile cannot boot the project, so it is a lint ERROR - this is what
+# makes "lint green" mean "the project can parse everything it ships". Skipped:
+# vendored addons (already out of gd_files) and the addons/ prefixes listed in
+# uid_check_ignore - third-party code is not this project's debt.
+func _check_scripts_compile(gd_files: Array[String], ignore: Array, results: Dictionary) -> void:
+	var checked := 0
+	var failed: Array = []
+	for p in gd_files:
+		if p.begins_with("res://addons/") and _is_uid_ignored(p, ignore):
+			continue
+		checked += 1
+		var res: Resource = load(p)
+		var detail := ""
+		if res == null:
+			detail = "script failed to load (parse error - see stderr)"
+		elif res is GDScript:
+			var gds: GDScript = res
+			# 4.5+ abstract scripts are valid but deliberately non-instantiable.
+			var is_abstract: bool = gds.has_method("is_abstract") and gds.is_abstract()
+			if not gds.can_instantiate() and not is_abstract:
+				detail = "script failed to compile (see stderr)"
+		if detail != "":
+			failed.append({"path": p, "message": detail})
+			_add_finding(p, "script_parse_failed", p, "error", detail)
+	results["scripts"] = {"checked": checked, "failed": failed}
 
 
 # --- Duplicate resource ids ---
@@ -616,7 +748,7 @@ func _find_all_scenes(root_path: String) -> PackedStringArray:
 	while name != "":
 		var full := _norm_path(d.get_current_dir() + "/" + name)
 		if d.current_is_dir():
-			if not name.begins_with("."):
+			if not name.begins_with(".") and not _dir_skipped(full):
 				out.append_array(_find_all_scenes(full))
 		elif name.ends_with(".tscn") or name.ends_with(".scn"):
 			out.append(full)
@@ -625,37 +757,51 @@ func _find_all_scenes(root_path: String) -> PackedStringArray:
 	return out
 
 
+# Resolves `rel` as Node.get_node() would, starting AT the node whose own path
+# is `base_abs` (SceneState convention: "." for the root, "./Child", "./A/B").
+# Returns the target's own path in the same convention, or "" for anything that
+# cannot be checked statically (a walk that escapes the scene root, or an
+# absolute /root/... runtime path) - the caller skips "" rather than flagging it.
 func _resolve_relative_nodepath(base_abs: String, rel: String) -> String:
 	if rel.begins_with("/"):
-		return _normalize_against_root(base_abs, rel.trim_prefix("/"))
-	var base_had_dot := base_abs.begins_with("./")
-	var base_abs_work := base_abs
-	if base_had_dot:
-		base_abs_work = base_abs.substr(2)
-	var base_parts := base_abs_work.split("/")
-	if base_parts.size() > 0:
-		base_parts.remove_at(base_parts.size() - 1)
-	var rel_parts := rel.split("/")
-	for part in rel_parts:
+		return ""
+	# "Path/To/Node:property" - the node part is what must resolve.
+	var colon := rel.find(":")
+	if colon >= 0:
+		rel = rel.substr(0, colon)
+	var parts: PackedStringArray = []
+	if base_abs != "." and base_abs != "":
+		for part in base_abs.split("/"):
+			if part != "." and part != "":
+				parts.append(part)
+	for part in rel.split("/"):
 		if part == "." or part == "":
 			continue
 		elif part == "..":
-			if base_parts.size() == 0:
+			if parts.size() == 0:
 				return ""
-			base_parts.remove_at(base_parts.size() - 1)
+			parts.remove_at(parts.size() - 1)
 		else:
-			base_parts.append(part)
-	var joined := "/".join(base_parts)
-	return _normalize_against_root(base_abs, joined)
+			parts.append(part)
+	if parts.size() == 0:
+		return "."
+	return "./" + "/".join(parts)
 
 
-func _normalize_against_root(base_abs: String, abs_path: String) -> String:
-	if abs_path == "":
-		return ""
-	var base_had_dot := base_abs.begins_with("./") or base_abs == "."
-	if base_had_dot and not abs_path.begins_with("./") and not abs_path.contains("/"):
-		return "./" + abs_path
-	return abs_path
+# True when `resolved` (an own path, "./A/B") lies strictly INSIDE a node that
+# is an instance of another scene. The instance root itself IS declared in this
+# scene, so a path landing exactly on it resolves normally through path_set;
+# only its interior is invisible to a static pass.
+func _crosses_instance(resolved: String, instance_roots: Dictionary) -> bool:
+	for root in instance_roots:
+		var r := String(root)
+		if r == ".":
+			# The scene root is itself an instance (an inherited scene): nothing
+			# the base scene declares is visible here, so no path is checkable.
+			return true
+		if resolved.begins_with(r + "/"):
+			return true
+	return false
 
 
 func _path_set_has_relaxed(path_set: Dictionary, path: String) -> bool:

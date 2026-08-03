@@ -6,33 +6,9 @@ Run the Godot runtime verification workflow. Execute each phase sequentially, st
 
 ## Phase 0: Resolve Godot binary & config
 
-**Resolve the Godot binary once, then use the resolved path everywhere below.** Do NOT hardcode a platform-specific path in the commands.
-
-```bash
-GODOT_BIN="${GODOT_BIN:-}"
-if [ -z "$GODOT_BIN" ] && [ -x "/Applications/Godot.app/Contents/MacOS/Godot" ]; then
-  GODOT_BIN="/Applications/Godot.app/Contents/MacOS/Godot"
-fi
-if [ -z "$GODOT_BIN" ]; then
-  GODOT_BIN="$(command -v godot || true)"
-fi
-if [ -z "$GODOT_BIN" ]; then
-  echo "ERROR: Godot binary not found. Set GODOT_BIN." >&2; exit 1
-fi
-echo "Using Godot: $GODOT_BIN"
-```
-
-Resolution order: `GODOT_BIN` env var → macOS default (`/Applications/Godot.app/Contents/MacOS/Godot`) → `which godot`. Because the shell does not persist between tool calls, re-run this resolution snippet (or inline it) in each Godot invocation below.
-
-Read the config so you know the thresholds and hooks for this project:
-
-```bash
-python3 -c "import json; print(json.dumps(json.load(open('addons/godot_selftest/devtools_config.json')), indent=2))" 2>/dev/null || echo "{}"
-```
-
-Relevant keys: `fps_min` (default 30), `orphan_max` (default 0), `orphan_growth_max`, `mute` (default true), `main_scene`, `entry_hook` `{node_path, method}`, `entry_points` (see Phase 2), and `safe_area_inset`. If the file is missing, assume the defaults above.
-
-**Python interpreter.** Every `python3 ...` below assumes a working `python3`. On Windows, `python3` often resolves to the Microsoft Store *App execution alias* stub, which exists but refuses to run. Probe by executing, not by `command -v`:
+**Python interpreter first.** On Windows, `python3` often resolves to the Microsoft
+Store *App execution alias* stub, which exists but refuses to run. Probe by executing,
+not by `command -v`, and use `"$PY"` in every command below:
 
 ```bash
 PY=""; for c in python3 python py; do "$c" -c "import sys" >/dev/null 2>&1 && { PY="$c"; break; }; done
@@ -40,7 +16,36 @@ PY=""; for c in python3 python py; do "$c" -c "import sys" >/dev/null 2>&1 && { 
 echo "Using Python: $PY"
 ```
 
-Substitute `$PY` for `python3` in every command below.
+**Resolve the Godot binary once, then use the resolved path everywhere below.** Do NOT hardcode a platform-specific path in the commands.
+
+```bash
+GODOT_BIN="${GODOT_BIN:-}"
+if [ -z "$GODOT_BIN" ]; then
+  # Scaffold step 11 records the probed binary here; trust it first.
+  GODOT_BIN="$("$PY" -c "import json; print(json.load(open('addons/godot_selftest/devtools_config.json')).get('godot_bin',''))" 2>/dev/null || true)"
+  [ -x "$GODOT_BIN" ] || GODOT_BIN=""
+fi
+if [ -z "$GODOT_BIN" ] && [ -x "/Applications/Godot.app/Contents/MacOS/Godot" ]; then
+  GODOT_BIN="/Applications/Godot.app/Contents/MacOS/Godot"
+fi
+if [ -z "$GODOT_BIN" ]; then
+  GODOT_BIN="$(command -v godot || true)"
+fi
+if [ -z "$GODOT_BIN" ]; then
+  echo "ERROR: Godot binary not found. Set GODOT_BIN or devtools_config.json godot_bin." >&2; exit 1
+fi
+echo "Using Godot: $GODOT_BIN"
+```
+
+Resolution order: `GODOT_BIN` env var → `godot_bin` in `devtools_config.json` (written by scaffold step 11) → macOS default (`/Applications/Godot.app/Contents/MacOS/Godot`) → `which godot`. Because the shell does not persist between tool calls, re-run this resolution snippet (or inline it) in each Godot invocation below.
+
+Read the config so you know the thresholds and hooks for this project:
+
+```bash
+"$PY" -c "import json; print(json.dumps(json.load(open('addons/godot_selftest/devtools_config.json')), indent=2))" 2>/dev/null || echo "{}"
+```
+
+Relevant keys: `fps_min` (default 30), `orphan_max` (default 0), `orphan_growth_max`, `mute` (default true), `main_scene`, `entry_hook` `{node_path, method}`, `entry_points` (see Phase 2), and `safe_area_inset`. If the file is missing, assume the defaults above.
 
 ### Harness version
 
@@ -50,23 +55,64 @@ Read the installed revision once, up front — Phase 6 needs it for the `harness
 grep -m1 'harness-version:' tools/lint_project.gd   # works without a running game
 ```
 
-Once the game is up (Phase 2), `python3 tools/devtools.py harness-version` reports the addon's version and the client's. A non-zero exit there means the two halves are on different versions — a half-refreshed install — and the fix is to re-run `/scaffold-godot-harness`.
+Once the game is up (Phase 2), `"$PY" tools/devtools.py harness-version` reports the addon's version and the client's. A non-zero exit there means the two halves are on different versions — a half-refreshed install — and the fix is to re-run `/scaffold-godot-harness`.
 
 ### Harness drift check
 
 The installed harness can silently diverge from the plugin's templates — a project may have patched `dev_tools.gd` or `devtools.py` locally, or may be running a version predating fixes it now depends on. Either direction is a real hazard: a local patch is silently reverted by the next `/scaffold-godot-harness`, and a stale install means the pitfalls documented here don't match the code.
 
 ```bash
+# Compare line-ending-normalized: a CRLF checkout (Windows core.autocrlf) makes a raw
+# `cmp` report every installed file as drifted when not one byte of content differs.
+DRIFTED=""
 for f in addons/godot_selftest/dev_tools.gd addons/godot_selftest/scene_validator.gd \
          tools/devtools.py tools/lint_project.gd tools/run_tests.gd \
          tools/check_devtools_log.py tools/upstream_gaps.py tools/verify_ledger.py; do
   src="${CLAUDE_PLUGIN_ROOT}/templates/$f"
   [ -f "$src" ] && [ -f "$f" ] || continue
-  cmp -s "$src" "$f" || echo "DRIFT: $f differs from the plugin template"
+  diff -q <(tr -d '\r' < "$src") <(tr -d '\r' < "$f") >/dev/null || { echo "DRIFT: $f"; DRIFTED="$DRIFTED $f"; }
 done
 ```
 
-Report any drift in the summary, naming which side is ahead (`git log -1 --format=%cd -- <file>` on the project side vs the plugin's version). Do **not** auto-resolve it: if the project is ahead, the fix belongs upstream in the plugin; if the plugin is ahead, re-run `/scaffold-godot-harness`. Drift is a finding, not an error — continue the run.
+For each drifted file, get a **bearing** — which side is ahead — from the release history rather than guessing from mtimes. `harness_history.json` records the LF-normalized sha256 of every shipped file per released version:
+
+```bash
+[ -n "$DRIFTED" ] && "$PY" - $DRIFTED <<'EOF'
+import hashlib, json, os, sys
+hist = json.load(open(os.path.join(os.environ["CLAUDE_PLUGIN_ROOT"], "harness_history.json")))
+vkey = lambda v: tuple(int(x) for x in v.split("."))
+current = max(hist, key=vkey)
+for f in sys.argv[1:]:
+    h = hashlib.sha256(open(f, "rb").read().replace(b"\r\n", b"\n")).hexdigest()
+    versions = sorted((v for v in hist if hist[v].get(f) == h), key=vkey)
+    if not versions:
+        print("%s: hash in NO released version -> project has local edits; port them into devtools_ext or upstream them" % f)
+    elif versions[-1] == current:
+        print("%s: matches current release %s but differs from the template -> plugin is ahead unreleased (mid-release); leave it" % (f, current))
+    else:
+        print("%s: matches %s, current is %s -> stale install; re-run /scaffold-godot-harness" % (f, versions[-1], current))
+EOF
+```
+
+Report any drift in the summary with its bearing line. Do **not** auto-resolve it: if the project is ahead, the fix belongs upstream in the plugin; if the install is stale, re-run `/scaffold-godot-harness`. Drift is a finding, not an error — continue the run.
+
+## Phase 0.5: Triage — how much verification does this diff need?
+
+Classify the diff before running anything. A full runtime pass on a docs edit is where `overkill` rows come from; the fix is to not start one.
+
+```bash
+git status --porcelain --untracked-files=all
+git diff HEAD --stat
+```
+
+| Diff is… | Tier | What runs |
+|---|---|---|
+| (a) Nothing Godot loads: only docs/`.md` outside code, `.beads/`, `log-devtools.md`, CI/git files | **Nothing** | Print "nothing to verify". Write **no** ledger row. Log the Phase 6 entry with `Value: **overkill** — avoided: triaged out at Phase 0.5, no res:// change` and **STOP the run here.** |
+| (b) Only comments/docstrings inside `.gd`/`.tscn` files, or `.md` files in code dirs | **Lint-only** | Phase 1 lint. Skip tests and runtime; say so in the summary. |
+| (c) Only `static func`s or `const` tables that existing unit tests cover | **Headless-only** | Phase 1 (lint + tests). Skip runtime; the Phase 6 entry must **name which tests** stood in for runtime. |
+| Anything else — instance methods, signals, scenes, exports, node paths, config | **Full run** | All phases. |
+
+Rules: when in doubt, full run. Tier (c) requires you to have *checked* the tests exist and exercise the changed functions (`--filter` them in Phase 1), not assumed it. Tiers (b) and (c) still write a ledger row in Phase 5 — use `--no-reach` (there is no session to observe) and `value: overkill` with `cheaper_alternative` naming the tier.
 
 ## Phase 1: Headless Lint & Unit Tests (no game running)
 
@@ -101,6 +147,14 @@ cat tests.log
 
 `run_tests.gd` auto-discovers tests under the configured `test_dir`. Stop if any tests fail.
 
+**If you must run `--import`** (required after adding any new `class_name`), guard `project.godot` first — Godot's import pass sometimes rewrites it, stripping comments and web-renderer overrides. Plain lint/test runs do **not** dirty `project.godot`; only `--import` does, and not every `--import` — which is exactly why the change goes unnoticed:
+
+```bash
+mkdir -p .devtools && cp project.godot .devtools/project.godot.bak
+"$GODOT_BIN" --headless --path . --import > import.log 2>&1; echo "exit=$?"
+diff .devtools/project.godot.bak project.godot >/dev/null || echo "WARNING: --import REWROTE project.godot — diff it before staging; restore comments/overrides it stripped (cp .devtools/project.godot.bak project.godot if the rewrite was pure loss)"
+```
+
 **Narrowing the run.** `--filter NAME` matches a test's method name **or its script filename**; `--file NAME` matches the script path (bare name, filename, or substring). They combine with AND:
 
 ```bash
@@ -118,6 +172,12 @@ Treat exit `2` as "**you verified nothing**" — it is not a test failure and mu
 
 ## Phase 2: Launch Game
 
+**Snapshot the working tree first.** A live editor-less Godot session can still re-serialize files it merely opens (`.tscn`, `.tres`, `project.godot` are the usual suspects), and without a before-picture those edits are indistinguishable from yours at commit time. Phase 5 diffs against this:
+
+```bash
+mkdir -p .devtools && git status --porcelain > .devtools/git-status-before.txt
+```
+
 Launch in the background. Append `--mute` only when `config.mute` is true (it defaults to true):
 
 ```bash
@@ -128,13 +188,13 @@ Launch in the background. Append `--mute` only when `config.mute` is true (it de
 Wait for startup, then confirm connection:
 
 ```bash
-sleep 5 && python3 tools/devtools.py ping
+sleep 5 && "$PY" tools/devtools.py ping
 ```
 
 If ping fails, retry once:
 
 ```bash
-sleep 3 && python3 tools/devtools.py ping
+sleep 3 && "$PY" tools/devtools.py ping
 ```
 
 If it fails twice, check the Godot terminal output for errors and stop. A failed call now returns in ~2s rather than hanging for the full timeout, so the retry is cheap. **Read which of the three failures you got — they have different causes:**
@@ -150,7 +210,7 @@ If it fails twice, check the Godot terminal output for errors and stop. A failed
 After ping succeeds, discover the current root scene rather than assuming any particular one:
 
 ```bash
-python3 tools/devtools.py scene-tree | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('data',d).get('name','?'))"
+"$PY" tools/devtools.py scene-tree | "$PY" -c "import sys,json; d=json.load(sys.stdin); print(d.get('data',d).get('name','?'))"
 ```
 
 Record the root scene name — you will use it to build node paths later (paths are typically `/root/<RootName>/...`).
@@ -161,7 +221,7 @@ Many projects boot into an entry/menu screen that gates input. If `config.entry_
 
 ```bash
 # only if config.entry_hook.node_path and .method are non-empty
-python3 tools/devtools.py run-method --node "<entry_hook.node_path>" --method "<entry_hook.method>" --args "[]"
+"$PY" tools/devtools.py run-method --node "<entry_hook.node_path>" --method "<entry_hook.method>" --args "[]"
 sleep 3
 ```
 
@@ -190,17 +250,17 @@ Note the difference from `entry_hook`: reaching a scene is rarely enough. A boss
 **Baseline the orphan count here.** Scene loads and entry hooks create orphans that have nothing to do with the diff. Once the playable scene is up, re-baseline so Phase 3's performance check measures *your* growth:
 
 ```bash
-python3 tools/devtools.py performance --reset-baseline
+"$PY" tools/devtools.py performance --reset-baseline
 ```
 
 ## Phase 3: Validation
 
 Run in order:
 
-1. `python3 tools/devtools.py validate-all` — 0 issues required
-2. `python3 tools/devtools.py validate-ui` — 0 issues required. If `config.safe_area_inset` is non-zero this also reports `ui_outside_safe_area` for Controls straying under an overlay/notch/rounded corner; with an all-zero inset the check is skipped entirely.
-3. `python3 tools/devtools.py screenshot` — visual verification (add a short `sleep` first if you just changed state)
-4. `python3 tools/devtools.py performance` — FPS must be `>= config.fps_min` (default 30); orphan **growth** since the baseline must be `<= config.orphan_growth_max`
+1. `"$PY" tools/devtools.py validate-all` — 0 issues required
+2. `"$PY" tools/devtools.py validate-ui` — 0 issues required. If `config.safe_area_inset` is non-zero this also reports `ui_outside_safe_area` for Controls straying under an overlay/notch/rounded corner; with an all-zero inset the check is skipped entirely.
+3. `"$PY" tools/devtools.py screenshot` — visual verification (add a short `sleep` first if you just changed state)
+4. `"$PY" tools/devtools.py performance` — FPS must be `>= config.fps_min` (default 30); orphan **growth** since the baseline must be `<= config.orphan_growth_max`
 
    Gate on `orphan_growth`, not the absolute count. A real project reports dozens of orphans on a fresh launch before any test action, so the historical `orphan_max: 0` was unreachable — and a threshold nothing can ever satisfy trains you to skip the check entirely. Growth-since-baseline is the number that actually means "this change leaks". Report the absolute count alongside it for context, and if `orphan_growth` is unavailable (older harness install), say so rather than silently falling back to a check you know is noise.
 
@@ -209,7 +269,8 @@ No game-specific exceptions are baked in. If `validate-ui` reports issues you be
 **Capture a scene-tree snapshot before moving on.** Phase 5 uses it to compute which changed files this run actually reached; it costs one command and cannot be reconstructed after the game exits.
 
 ```bash
-python3 tools/devtools.py scene-tree > .devtools/tree-phase3.json
+mkdir -p .devtools   # first run of a fresh clone has no .devtools/ yet
+"$PY" tools/devtools.py scene-tree > .devtools/tree-phase3.json
 ```
 
 ## Phase 4: Change-Specific Tests (diff-aware, generic)
@@ -248,13 +309,13 @@ between the log and a stream of self-congratulation.
 The core exposes a fixed set of generic verbs; individual projects register their own domain verbs in their DevTools extension. Discover them:
 
 ```bash
-python3 tools/devtools.py list-commands
+"$PY" tools/devtools.py list-commands
 ```
 
 This prints all currently registered action strings. Any verb beyond the generic set (below) is project-specific and can be invoked verbatim:
 
 ```bash
-python3 tools/devtools.py cmd <verb> --args '{"key": value}'
+"$PY" tools/devtools.py cmd <verb> --args '{"key": value}'
 ```
 
 `cmd` sends `{action:<verb>, args:<parsed json>}` to the bus and prints the `{success, message, data}` result. Use this for domain setup/trigger steps that the generic primitives can't express (e.g. a project verb that spawns an entity, resets a session, or sets a batch of levels).
@@ -293,17 +354,17 @@ Also test at least one guard/edge case per behavior (e.g. the effect must NOT ha
 
 ```bash
 # Discover the node's path from the scene tree, then inspect current state
-python3 tools/devtools.py get-state --node "/root/<Root>/Entities/Enemy"
+"$PY" tools/devtools.py get-state --node "/root/<Root>/Entities/Enemy"
 # Precondition: ensure it is alive (prefer run-method if a setter emits a signal)
-python3 tools/devtools.py set-state --node "/root/<Root>/Entities/Enemy" --property is_alive --value true
+"$PY" tools/devtools.py set-state --node "/root/<Root>/Entities/Enemy" --property is_alive --value true
 # Trigger via run-method (emits health_changed, unlike a raw set-state on health)
-python3 tools/devtools.py run-method --node "/root/<Root>/Entities/Enemy" --method apply_damage --args "[30]"
+"$PY" tools/devtools.py run-method --node "/root/<Root>/Entities/Enemy" --method apply_damage --args "[30]"
 # Assert the observable effect
-python3 tools/devtools.py get-state --node "/root/<Root>/Entities/Enemy"   # expect health decreased by 30
+"$PY" tools/devtools.py get-state --node "/root/<Root>/Entities/Enemy"   # expect health decreased by 30
 # Guard case: dead entities must not take damage
-python3 tools/devtools.py set-state --node "/root/<Root>/Entities/Enemy" --property is_alive --value false
-python3 tools/devtools.py run-method --node "/root/<Root>/Entities/Enemy" --method apply_damage --args "[30]"
-python3 tools/devtools.py get-state --node "/root/<Root>/Entities/Enemy"   # expect health unchanged
+"$PY" tools/devtools.py set-state --node "/root/<Root>/Entities/Enemy" --property is_alive --value false
+"$PY" tools/devtools.py run-method --node "/root/<Root>/Entities/Enemy" --method apply_damage --args "[30]"
+"$PY" tools/devtools.py get-state --node "/root/<Root>/Entities/Enemy"   # expect health unchanged
 ```
 
 ### Generic pitfalls (apply regardless of project)
@@ -317,29 +378,40 @@ python3 tools/devtools.py get-state --node "/root/<Root>/Entities/Enemy"   # exp
 
 ## Phase 5: Record the run, then shut down
 
-**Snapshot the tree once more before quitting**, while everything the tests spawned still exists:
+**Capture what the session loaded before quitting** — a tree snapshot while everything the tests spawned still exists, plus the cumulative `scripts-seen` set, which also covers scripts whose nodes lived and died *between* snapshots:
 
 ```bash
-python3 tools/devtools.py scene-tree > .devtools/tree-phase4.json
-python3 tools/devtools.py quit
+"$PY" tools/devtools.py scene-tree > .devtools/tree-phase4.json
+"$PY" tools/devtools.py --json scripts-seen > .devtools/scripts-seen.json
+"$PY" tools/devtools.py quit
+```
+
+**Check what the engine touched.** Diff the current git status against the Phase 2 snapshot; any file changed now that is **not** in your session's edit set is engine re-serialization (`.tscn`, `.tres`, `project.godot` are the usual suspects) — report those separately as "engine-touched (re-serialization)", and do not stage them blindly with your work:
+
+```bash
+git status --porcelain > .devtools/git-status-after.txt
+diff .devtools/git-status-before.txt .devtools/git-status-after.txt || true
 ```
 
 **Read reach before you judge the run** — it decides between `warranted` and `insufficient`, and it is a fact rather than an impression:
 
 ```bash
-python3 tools/verify_ledger.py reach \
+"$PY" tools/verify_ledger.py reach \
   --scene-tree .devtools/tree-phase3.json \
-  --scene-tree .devtools/tree-phase4.json
+  --scene-tree .devtools/tree-phase4.json \
+  --scripts-seen .devtools/scripts-seen.json
 ```
 
-Then append this run to the ledger. Write the results you have into a JSON object and hand it over; everything else — timestamp, sha, branch, changed files, and reach — is derived, not asked for:
+It prints **two denominators**: `worktree` (this session's edits — the honest per-session number) and `branch` (everything since the merge base, which dilutes as the branch grows). Judge the run on the worktree line.
+
+Then append this run to the ledger. **Writing `run.json` and running `record` are one step, not two — if you wrote `run.json` you MUST run `record` in the same breath**, in the same command block; a summary written from a `run.json` that never reached the ledger is a row lost forever. Write the results you have into a JSON object and hand it over; everything else — timestamp, sha, branch, changed files, and reach — is derived, not asked for:
 
 ```bash
 cat > .devtools/run.json <<'EOF'
 {"verdict": "pass",
  "lint":  {"exit": 0, "new": 0, "pre_existing": 7},
  "tests": {"exit": 0, "total": 111, "failed": 0},
- "runtime": {"launched": true, "scene": "<root scene>", "entry_point": "<what fired, or null>",
+ "runtime": {"launched": true, "scene": "<root scene>",
              "fps": 58.2, "orphan_growth": 3, "orphan_growth_exceeded": false},
  "checks": [{"name": "<Phase 4 test name>", "result": "pass"}],
  "duration_s": 94,
@@ -347,25 +419,29 @@ cat > .devtools/run.json <<'EOF'
  "value": "warranted",
  "cheaper_alternative": "<what would have given the same confidence for less, or 'nothing'>"}
 EOF
-
-python3 tools/verify_ledger.py record \
+"$PY" tools/verify_ledger.py record \
   --scene-tree .devtools/tree-phase3.json \
   --scene-tree .devtools/tree-phase4.json \
+  --scripts-seen .devtools/scripts-seen.json \
   --run .devtools/run.json
 ```
 
 `value` is `warranted`, `overkill`, `insufficient`, or `inconclusive` — the same verdict Phase 6 writes up in prose, recorded here as an enum so it is countable. `record` downgrades a `warranted` whose changed files were never loaded, and says so on stderr. Leaving `cheaper_alternative` blank also draws a warning: it is the field that can say the harness was the wrong tool, and therefore the easiest one to skip.
 
-`verdict` is `pass`, `fail`, or **`aborted`** — the last one whenever a runner exited `2` or the game never came up. An aborted run verified nothing, and the ledger counts it separately for exactly the reason the exit-code contract exists: it must never be filed as a pass.
+`verdict` is `pass`, `fail`, **`aborted`** (a runner exited `2` or the game never came up — never file it as a pass), or **`partial`** — which `record` sets itself, downgrading a reported `pass` whenever any check in `checks` has `"result": "blocked"`: a check that could not run is not a check that passed. Mark checks you could not execute as `blocked` rather than omitting them.
 
-The command prints which changed files the run reached, and names the ones it did not. **Carry that line into the Pass/Fail Summary verbatim.** A green run on a file nothing touched is a statement about the diff, not about the running game, and it is the one failure this workflow cannot otherwise see — the summary says "all checks passed" either way.
+Each check is `{"name": ..., "result": "pass"|"fail"|"blocked"}`.
+
+`record` **refuses to run with unknown reach**: no readable `--scene-tree` and no readable `--scripts-seen` is exit 1, telling you to re-capture before quitting or pass `--scripts-seen`. For a genuinely aborted run (the game never came up, so there is nothing to capture) pass `--no-reach`, which records `reach: null` on purpose — the escape hatch is explicit so a null reach is always a choice, never a default.
+
+The command prints which changed files the run reached, and names the ones it did not — including the worktree/branch split and any files credited as `implicit` (autoloads and the DevTools extension run in every session but own no node a snapshot can see). **Carry the worktree reach line into the Pass/Fail Summary verbatim.** A green run on a file nothing touched is a statement about the diff, not about the running game, and it is the one failure this workflow cannot otherwise see — the summary says "all checks passed" either way.
 
 Both `checks` and `verdict` are self-reported; reach is computed from the snapshots. If they disagree — every check passing on a file the snapshots say was never loaded — believe the snapshots and say so.
 
 To read the accumulated history at any time:
 
 ```bash
-python3 tools/verify_ledger.py stats
+"$PY" tools/verify_ledger.py stats
 ```
 
 Commit `.devtools/verify-runs.jsonl` along with the change. It is the only record of how often this harness was load-bearing, and its value is entirely in being long. The `tree-*.json` and `run.json` scratch files are inputs, not records — leave them out of the commit.
@@ -412,7 +488,7 @@ The `[G-NNN]` status line is required — it is what lets a later reader tell an
 | `[G-NNN]` | Next unused id in this file. **Stable, never reused.** |
 | `status:` | `open`, `fixed` (add `fixed-in: X.Y.Z`), or `wontfix` (say why on the Improvement line). |
 | `seen:` | Bump the **existing** entry when a known gap bites again; do not file a second one. |
-| `harness:` | The installed version, from `python3 tools/devtools.py harness-version`. Read it once at the start of the run — a gap that can't be tied to a version can't be told from a regression later. |
+| `harness:` | The installed version, from `"$PY" tools/devtools.py harness-version`. Read it once at the start of the run — a gap that can't be tied to a version can't be told from a regression later. |
 
 Before writing a new gap, scan the file for one that already describes it. A `seen: 3` is the strongest signal this log can produce; three separately-worded entries are the weakest. When a gap you find here is already closed by the installed version, mark it `status: fixed | fixed-in: <version>` instead of leaving it to be re-upstreamed.
 
@@ -421,7 +497,7 @@ This is not bookkeeping. Every capability the harness has beyond its first versi
 Open gaps only become fixes once they reach the harness repo, which is a one-liner:
 
 ```bash
-python3 tools/upstream_gaps.py log-devtools.md --into /path/to/godot-selftest-harness/log-devtools.md
+"$PY" tools/upstream_gaps.py log-devtools.md --into /path/to/godot-selftest-harness/log-devtools.md
 ```
 
 Distinguish this from the Self-Improvement section below: that one proposes edits to `/verify` itself and needs user approval. Phase 6 is an unconditional write to the project's log, no approval needed.
@@ -468,4 +544,4 @@ For each issue, present a recommendation in this format:
 
 Report results as a table: Godot binary used, harness drift (Phase 0) if any, config thresholds (fps_min / orphan_growth_max), lint status, unit test status, live scene name (and which entry point fired), validate-all, validate-ui, performance (FPS + orphan growth vs baseline), and each change-specific test (name + what it verified + pass/fail). List the project verbs discovered via `list-commands` that you used. Also check the Godot terminal output for GDScript runtime errors or warnings.
 
-**Include the reach line from Phase 5**, naming any changed file the run did not reach. Do not report a run as verified when its changed files were never loaded — say which ones were covered at runtime and which were only read. If all checks pass *and* the changed files were reached, the commit is safe to proceed; if checks pass but reach was partial, say so plainly and let the user decide.
+**Include the worktree reach line from Phase 5** (the per-session denominator; report the branch ratio alongside it, labeled as such), naming any changed file the run did not reach. Do not report a run as verified when its changed files were never loaded — say which ones were covered at runtime and which were only read. If all checks pass *and* the changed files were reached, the commit is safe to proceed; if checks pass but reach was partial, say so plainly and let the user decide.

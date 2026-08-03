@@ -13,10 +13,25 @@ would otherwise write down.
 **The field that matters is `reached`.** `verify.md` already tells a run to say so when
 a changed script has no reachable entry point, but that confession lands in a chat
 transcript and evaporates. Here it is computed instead of claimed: the scene-tree
-snapshot carries each node's `script` and `scene_file` (harness 0.6.0+), so reach is a
-set intersection against the diff rather than a self-assessment by the thing being
-measured. A green run that never reached the changed code is the failure mode this
-whole harness exists to make visible, and it is invisible in a pass/fail summary.
+snapshot carries each node's `script` and `scene_file` (harness 0.6.0+), and the
+`scripts-seen` bridge verb (0.8.0+) accumulates every script ever attached to any node,
+so reach is a set intersection against the diff rather than a self-assessment by the
+thing being measured. A green run that never reached the changed code is the failure
+mode this whole harness exists to make visible, and it is invisible in a pass/fail
+summary.
+
+**Two denominators.** "Changed" used to be one set: worktree edits unioned with the
+branch's commits. The union is kept (old rows stay comparable), but the two are now
+also computed apart: the *worktree* ratio is the honest per-session number — what this
+session edited and whether this run loaded it — while the *branch* ratio dilutes one
+run's contribution as the branch accumulates commits nobody expects a single run to
+re-exercise.
+
+**Implicit reach.** Autoload scripts (from `project.godot` `[autoload]`) and the
+DevTools `extension_script` run in every launched session but own no persistent node a
+snapshot can see. A changed file in that set that was not otherwise observed lands in
+`reached_implicit` — credited as running, kept out of `unreached`, and deliberately not
+folded into `reached`, which stays what was *observed*.
 
 **The other half is whether it was worth running at all.** Reach says the harness did
 something; it cannot say the something was needed. A log that only records gaps can only
@@ -34,8 +49,8 @@ field objective. It makes it harder to inflate without noticing.
 
 Three subcommands:
 
-    python3 tools/verify_ledger.py reach  --scene-tree tree.json
-    python3 tools/verify_ledger.py record --scene-tree tree.json --run run.json
+    python3 tools/verify_ledger.py reach  --scene-tree tree.json --scripts-seen seen.json
+    python3 tools/verify_ledger.py record --scene-tree tree.json --scripts-seen seen.json --run run.json
     python3 tools/verify_ledger.py stats
 
 `record` derives the mechanical fields itself (timestamp, sha, branch, changed files,
@@ -43,6 +58,12 @@ reach) and takes only the run-specific ones it cannot know — runner exit codes
 Phase 4 checks, duration, and the value reflection — as a JSON object from `--run` (or
 stdin). Trust boundary: anything derivable is derived, so a run can misreport its own
 checks but cannot misreport whether it touched the diff.
+
+`record` **refuses** to write a row with unknown reach: with no readable `--scene-tree`
+and no readable `--scripts-seen` it exits 1 and says what to pass, because a silently
+null reach is the well-formed-zeros failure this file exists to prevent. `--no-reach`
+is the deliberate escape hatch for aborted runs — it writes `reach: null` on purpose,
+so the failure mode is a choice, not a default.
 
 `reach` computes reach without writing a row, because the verdict depends on it: a run
 that never loaded the changed file is `insufficient` however well its checks went, and
@@ -65,8 +86,8 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
-# harness-version: 0.7.0
-HARNESS_VERSION = "0.7.0"
+# harness-version: 0.8.0
+HARNESS_VERSION = "0.8.0"
 
 LEDGER_PATH = Path(".devtools") / "verify-runs.jsonl"
 
@@ -108,25 +129,32 @@ def _norm(path):
     return p
 
 
-def changed_files(root):
-    """Files this run could plausibly have been verifying.
+def changed_worktree(root):
+    """Uncommitted working-tree changes - what *this session* plausibly edited.
 
-    Union of the uncommitted working tree and commits on this branch not on the base -
-    the same rule `check_devtools_log.py` uses, for the same reason: the change and the
-    thing that records it often land in different commits.
+    None when git itself is unavailable (not a repo): reach is then not computable,
+    and says so, rather than being an empty set that scores as a clean sweep.
     """
-    changed = set()
-
     status = _git(root, "status", "--porcelain", "--untracked-files=all")
     if status is None:
-        return None  # not a git repo -> reach is not computable, and says so
+        return None
+    changed = set()
     for line in status.splitlines():
         path = line[3:].strip()
         if " -> " in path:  # renames: "old -> new"
             path = path.split(" -> ", 1)[1]
         if path:
             changed.add(_norm(path.strip('"')))
+    return changed
 
+
+def changed_branch(root):
+    """Commits on this branch not on the base - the branch's accumulated diff.
+
+    Empty set (not None) when no base ref resolves: "nothing beyond base" is a fact,
+    unlike git being absent altogether.
+    """
+    changed = set()
     base = None
     for ref in ("origin/main", "main", "origin/master", "master"):
         merge_base = _git(root, "merge-base", "HEAD", ref)
@@ -137,7 +165,6 @@ def changed_files(root):
         diff = _git(root, "diff", "--name-only", base, "HEAD")
         if diff:
             changed.update(_norm(p) for p in (l.strip() for l in diff.splitlines()) if p)
-
     return changed
 
 
@@ -180,15 +207,118 @@ def load_snapshots(paths):
     return seen if ok else None
 
 
-def compute_reach(changed, snapshot_paths):
-    """(reached, unreached, skipped) over the changed files reach can speak to."""
+def load_scripts_seen(paths):
+    """Union of script paths from `devtools.py scripts-seen` captures.
+
+    The bridge verb accumulates every script resource_path ever attached to any node
+    (initial walk + node_added hook), which catches the case snapshots structurally
+    miss: a script whose node lived and died between captures. Accepts the full reply
+    envelope ({"success":..., "data": {"scripts": [...]}}), a bare {"scripts": [...]},
+    or a bare list. None when nothing could be read - same distinction as snapshots.
+    """
+    seen = set()
+    ok = False
+    for path in paths or []:
+        try:
+            raw = json.loads(Path(path).read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            print("verify_ledger: unreadable scripts-seen capture %s (%s)" % (path, exc),
+                  file=sys.stderr)
+            continue
+        scripts = None
+        if isinstance(raw, dict):
+            data = raw.get("data") if isinstance(raw.get("data"), dict) else raw
+            if isinstance(data.get("scripts"), list):
+                scripts = data["scripts"]
+        elif isinstance(raw, list):
+            scripts = raw
+        if scripts is None:
+            print("verify_ledger: %s has no 'scripts' list - ignored" % path,
+                  file=sys.stderr)
+            continue
+        ok = True
+        seen.update(_norm(s) for s in scripts if s)
+    return seen if ok else None
+
+
+def implicit_scripts(root):
+    """Code that runs in any launched session but owns no persistent node.
+
+    Two known sources: autoload scripts declared in project.godot's `[autoload]`
+    section (values like `"*res://path.gd"` - the `*` marks singleton enablement), and
+    the DevTools `extension_script` from devtools_config.json, which the bridge loads
+    on startup. A changed file here *did* run; the snapshot just cannot testify to it,
+    so it is credited as `reached_implicit` rather than counted unreached - and never
+    folded into `reached`, which stays strictly what was observed.
+    """
+    out = set()
+    try:
+        lines = (root / "project.godot").read_text(
+            encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        lines = []
+    in_autoload = False
+    for line in lines:
+        s = line.strip()
+        if s.startswith("["):
+            in_autoload = (s == "[autoload]")
+            continue
+        if in_autoload and "=" in s and not s.startswith(";"):
+            val = s.split("=", 1)[1].strip().strip('"')
+            if val.startswith("*"):
+                val = val[1:]
+            if val:
+                out.add(_norm(val))
+    try:
+        cfg = json.loads((root / "addons" / "godot_selftest" /
+                          "devtools_config.json").read_text(encoding="utf-8"))
+        ext = cfg.get("extension_script") or ""
+    except (OSError, ValueError):
+        ext = ""
+    if ext:
+        out.add(_norm(ext))
+    return out
+
+
+def split_reach(changed, observed, implicit, root):
+    """Classify one changed-set against what the run observed.
+
+    Returns a dict of sorted lists:
+      reached          - observed at runtime (snapshot or scripts-seen)
+      reached_implicit - not observed, but autoload/extension code that runs in any
+                         launched session; excluded from unreached, not added to reached
+      unreached        - reachable-suffix files the run never loaded
+      not_applicable   - files reach cannot speak to (wrong suffix, or deleted)
+      deleted          - subset of not_applicable: in the diff but gone from disk;
+                         a deleted file can never be loaded, so counting it unreached
+                         would manufacture a permanent miss
+    When observed is None the three observation-dependent lists are None.
+    """
     candidates = sorted(p for p in changed if Path(p).suffix.lower() in REACHABLE_SUFFIXES)
     skipped = sorted(p for p in changed if Path(p).suffix.lower() not in REACHABLE_SUFFIXES)
-    if snapshot_paths is None:
-        return None, None, skipped
-    reached = [p for p in candidates if p in snapshot_paths]
-    unreached = [p for p in candidates if p not in snapshot_paths]
-    return reached, unreached, skipped
+    deleted = sorted(p for p in candidates if not (root / p).exists())
+    live = [p for p in candidates if p not in set(deleted)]
+    result = {
+        "reached": None,
+        "reached_implicit": None,
+        "unreached": None,
+        "not_applicable": sorted(skipped + deleted),
+        "deleted": deleted,
+    }
+    if observed is None:
+        return result
+    result["reached"] = [p for p in live if p in observed]
+    result["reached_implicit"] = [p for p in live
+                                  if p not in observed and p in implicit]
+    result["unreached"] = [p for p in live
+                           if p not in observed and p not in implicit]
+    return result
+
+
+def _sub_reach(split):
+    """The per-denominator object stored on the row: same keys, no nesting."""
+    return {k: split[k] for k in
+            ("reached", "reached_implicit", "unreached", "not_applicable", "deleted")}
 
 
 # The four verdicts a run can carry. `warranted` needs a named claim, `overkill` means
@@ -238,6 +368,15 @@ def _load_run(args):
         return None
 
 
+def _observed(args):
+    """Union of everything the run demonstrably loaded; None if nothing was readable."""
+    snapshot = load_snapshots(args.scene_tree)
+    scripts = load_scripts_seen(getattr(args, "scripts_seen", None))
+    if snapshot is None and scripts is None:
+        return None
+    return (snapshot or set()) | (scripts or set())
+
+
 def cmd_record(args, root):
     run = _load_run(args)
     if run is None:
@@ -246,16 +385,57 @@ def cmd_record(args, root):
         print("verify_ledger: run payload must be a JSON object", file=sys.stderr)
         return 1
 
-    changed = changed_files(root)
-    snapshot = load_snapshots(args.scene_tree)
-    reached, unreached, skipped = compute_reach(changed or set(), snapshot)
+    worktree = changed_worktree(root)
+    branch_set = changed_branch(root)
+    union = None if worktree is None else (worktree | branch_set)
+    implicit = implicit_scripts(root)
+
+    observed = _observed(args)
+    if observed is None and not args.no_reach:
+        print("verify_ledger: refusing to record with unknown reach - no readable "
+              "--scene-tree and no readable --scripts-seen were given. Re-run "
+              "`devtools.py scene-tree` and/or `devtools.py --json scripts-seen` "
+              "before quitting the game, or pass --scripts-seen with a saved capture. "
+              "If the run genuinely aborted before the game came up, pass --no-reach "
+              "to record reach as null on purpose.", file=sys.stderr)
+        return 1
+
+    if args.no_reach and observed is None:
+        reach_obj = None
+        u = split_reach(set(), None, implicit, root)  # keeps _reconcile inputs as None
+    else:
+        u = split_reach(union or set(), observed, implicit, root)
+        w = split_reach(worktree if worktree is not None else set(),
+                        observed, implicit, root)
+        b = split_reach(branch_set, observed, implicit, root)
+        reach_obj = _sub_reach(u)
+        reach_obj["worktree"] = _sub_reach(w)
+        reach_obj["branch"] = _sub_reach(b)
 
     sha = _git(root, "rev-parse", "--short", "HEAD")
     branch = _git(root, "rev-parse", "--abbrev-ref", "HEAD")
 
     checks = run.get("checks") or []
-    value, note = _reconcile_value(run.get("value"), reached, unreached, checks)
+    value, note = _reconcile_value(run.get("value"), u["reached"], u["unreached"],
+                                   checks)
     cheaper = (run.get("cheaper_alternative") or "").strip()
+
+    # A blocked check is one the run could not execute at all - and a run that could
+    # not execute one of its own checks did not fully pass, whatever the others said.
+    verdict = run.get("verdict", "unknown")
+    blocked = [str(c.get("name") or "?") for c in checks
+               if isinstance(c, dict) and c.get("result") == "blocked"]
+    if blocked and verdict == "pass":
+        verdict = "partial"
+        print("verify_ledger: verdict downgraded pass -> partial: blocked check(s) "
+              "%s - a check that could not run is not a check that passed"
+              % ", ".join(blocked), file=sys.stderr)
+
+    # `entry_point` was recorded inside `runtime` by 0.6.0-0.7.0 rows and never read
+    # by anything; drop it from new rows (old rows are never rewritten).
+    runtime = run.get("runtime")
+    if isinstance(runtime, dict) and "entry_point" in runtime:
+        runtime = {k: v for k, v in runtime.items() if k != "entry_point"}
 
     row = {
         "ts": datetime.datetime.now(datetime.timezone.utc)
@@ -263,11 +443,11 @@ def cmd_record(args, root):
         "harness": run.get("harness") or HARNESS_VERSION,
         "sha": (sha or "").strip() or None,
         "branch": (branch or "").strip() or None,
-        "changed": sorted(changed) if changed is not None else None,
-        "verdict": run.get("verdict", "unknown"),
+        "changed": sorted(union) if union is not None else None,
+        "verdict": verdict,
         "lint": run.get("lint"),
         "tests": run.get("tests"),
-        "runtime": run.get("runtime"),
+        "runtime": runtime,
         "checks": checks,
         "duration_s": run.get("duration_s"),
         # Was the harness worth running here, and what would have been cheaper? Both are
@@ -277,14 +457,10 @@ def cmd_record(args, root):
         "value_reported": run.get("value"),
         "cheaper_alternative": cheaper or None,
         "expected": (run.get("expected") or "").strip() or None,
-        "reach": {
-            # null (not []) when no snapshot was supplied: "we could not tell" is a
-            # different fact from "it reached nothing", and conflating them is exactly
-            # the well-formed-zeros failure this harness is built to avoid.
-            "reached": reached,
-            "unreached": unreached,
-            "not_applicable": skipped,
-        },
+        # null only via the explicit --no-reach escape hatch (aborted runs). The
+        # top-level lists are computed over worktree|branch so old readers keep
+        # working; `worktree` and `branch` are the same split per denominator.
+        "reach": reach_obj,
     }
 
     path = root / LEDGER_PATH
@@ -293,7 +469,7 @@ def cmd_record(args, root):
         fh.write(json.dumps(row, sort_keys=True) + "\n")
 
     print("verify_ledger: recorded %s run, value=%s - %s"
-          % (row["verdict"], value, _reach_line(reached, unreached)))
+          % (row["verdict"], value, _reach_line(u)))
     if note:
         print("verify_ledger: %s" % note, file=sys.stderr)
     if not cheaper:
@@ -303,11 +479,16 @@ def cmd_record(args, root):
     return 0
 
 
-def _reach_line(reached, unreached):
-    if reached is None:
-        return "reach not computed (no scene-tree snapshot)"
-    total = len(reached) + len(unreached)
+def _reach_line(split):
+    if split is None or split.get("reached") is None:
+        return "reach not computed (no scene-tree / scripts-seen capture)"
+    reached = split["reached"]
+    implicit = split.get("reached_implicit") or []
+    unreached = split.get("unreached") or []
+    total = len(reached) + len(implicit) + len(unreached)
     detail = "reached %d/%d changed file(s)" % (len(reached), total)
+    if implicit:
+        detail += " (+%d implicit: %s)" % (len(implicit), ", ".join(implicit))
     if unreached:
         detail += "; NOT reached: " + ", ".join(unreached)
     return detail
@@ -320,13 +501,28 @@ def cmd_reach(args, root):
     file is `insufficient` however well its checks went - so reach has to be readable
     before the row is written, not only after.
     """
-    changed = changed_files(root)
-    snapshot = load_snapshots(args.scene_tree)
-    reached, unreached, skipped = compute_reach(changed or set(), snapshot)
-    print(_reach_line(reached, unreached))
-    if skipped:
-        print("not applicable (reach cannot speak to these): " + ", ".join(skipped))
-    if reached is not None and not reached and unreached:
+    worktree = changed_worktree(root)
+    branch_set = changed_branch(root)
+    union = (worktree or set()) | branch_set
+    implicit = implicit_scripts(root)
+    observed = _observed(args)
+
+    u = split_reach(union, observed, implicit, root)
+    w = split_reach(worktree if worktree is not None else set(),
+                    observed, implicit, root)
+    b = split_reach(branch_set, observed, implicit, root)
+
+    print("worktree (this session's edits - the honest number): " + _reach_line(w))
+    print("branch   (all commits since base - dilutes as the branch grows): "
+          + _reach_line(b))
+    if u["not_applicable"]:
+        print("not applicable (reach cannot speak to these): "
+              + ", ".join(u["not_applicable"]))
+    if u["deleted"]:
+        print("deleted (in the diff, gone from disk - never counted unreached): "
+              + ", ".join(u["deleted"]))
+    if u["reached"] is not None and not u["reached"] \
+            and not (u["reached_implicit"] or []) and u["unreached"]:
         print("\nNo changed file was loaded at runtime. Phase 6 verdict is "
               "`insufficient`, not `warranted`, even if every check passed.")
     return 0
@@ -366,6 +562,9 @@ def cmd_stats(args, root):
     cheaper = []
     overkill_seconds = 0.0
     reached_n = unreached_n = 0
+    implicit_n = 0
+    wt_reached = wt_denom = 0        # worktree denominator (0.8.0+ rows)
+    br_reached = br_denom = 0        # branch denominator (0.8.0+ rows)
     per_version = defaultdict(lambda: [0, 0])
     runtime_findings = 0
     static_only_findings = 0
@@ -388,9 +587,22 @@ def cmd_stats(args, root):
         else:
             reached_n += len(r)
             unreached_n += len(u or [])
+            implicit_n += len(reach.get("reached_implicit") or [])
             slot = per_version[row.get("harness") or "?"]
             slot[0] += len(r)
             slot[1] += len(r) + len(u or [])
+            for sub, acc in (("worktree", "wt"), ("branch", "br")):
+                d = reach.get(sub) or {}
+                sr = d.get("reached")
+                if sr is None:
+                    continue
+                su = len(d.get("unreached") or [])
+                if acc == "wt":
+                    wt_reached += len(sr)
+                    wt_denom += len(sr) + su
+                else:
+                    br_reached += len(sr)
+                    br_denom += len(sr) + su
 
         failed_checks = [c for c in (row.get("checks") or [])
                          if c.get("result") == "fail"]
@@ -415,6 +627,16 @@ def cmd_stats(args, root):
     denom = reached_n + unreached_n
     print("reach: %s of changed reachable files exercised at runtime (%d/%d)"
           % (_pct(reached_n, denom), reached_n, denom))
+    if wt_denom or br_denom:
+        print("       worktree: %s (%d/%d) - the honest per-session number: what "
+              "each session edited vs what its run loaded"
+              % (_pct(wt_reached, wt_denom), wt_reached, wt_denom))
+        print("       branch:   %s (%d/%d) - dilutes as branches grow; old commits "
+              "drag it down through no fault of any one run"
+              % (_pct(br_reached, br_denom), br_reached, br_denom))
+    if implicit_n:
+        print("       %d file(s) credited implicitly (autoload/extension - runs in "
+              "every session, invisible to snapshots)" % implicit_n)
     if no_snapshot:
         print("       %d run(s) recorded no snapshot - reach unknown, not counted" % no_snapshot)
 
@@ -454,6 +676,10 @@ def cmd_stats(args, root):
     aborted = verdicts.get("aborted", 0)
     if aborted:
         print("\n%d run(s) verified nothing (exit 2). Those are not passes." % aborted)
+    partial = verdicts.get("partial", 0)
+    if partial:
+        print("\n%d run(s) recorded partial - a blocked check capped a would-be pass. "
+              "A blocked check is unexecuted, not green." % partial)
     if denom and reached_n < denom:
         print("\nThe %d unreached file(s) are the harness's blind spot - a green /verify "
               "on those was a statement about the diff, not the running game."
@@ -465,15 +691,22 @@ def main():
     parser = argparse.ArgumentParser(
         description="Append-only ledger of /verify runs, and stats over it.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=__doc__.split("Two subcommands:")[-1],
+        epilog=__doc__.split("Three subcommands:")[-1],
     )
     sub = parser.add_subparsers(dest="command")
 
     p = sub.add_parser("record", help="Append one run to the ledger")
     p.add_argument("--scene-tree", metavar="FILE", action="append",
                    help="A `devtools.py scene-tree` capture. Repeatable; reach is the "
-                        "union across captures. Without any, reach is recorded as "
-                        "unknown rather than guessed.")
+                        "union across captures.")
+    p.add_argument("--scripts-seen", metavar="FILE", action="append",
+                   help="A `devtools.py --json scripts-seen` capture (full reply or "
+                        "bare {\"scripts\": [...]}). Repeatable; unioned with the "
+                        "scene-tree captures.")
+    p.add_argument("--no-reach", action="store_true",
+                   help="Record reach as null ON PURPOSE (aborted runs: the game "
+                        "never came up). Without this flag, record refuses to write "
+                        "a row when no capture is readable.")
     p.add_argument("--run", metavar="FILE",
                    help="JSON object of this run's results. Default: read stdin.")
     p.set_defaults(func=cmd_record)
@@ -481,6 +714,8 @@ def main():
     p = sub.add_parser("reach", help="Compute reach without recording a run")
     p.add_argument("--scene-tree", metavar="FILE", action="append",
                    help="A `devtools.py scene-tree` capture. Repeatable.")
+    p.add_argument("--scripts-seen", metavar="FILE", action="append",
+                   help="A `devtools.py --json scripts-seen` capture. Repeatable.")
     p.set_defaults(func=cmd_reach)
 
     p = sub.add_parser("stats", help="Aggregate the ledger")
