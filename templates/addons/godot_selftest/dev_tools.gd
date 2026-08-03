@@ -1895,7 +1895,7 @@ func _cmd_step_time(args: Dictionary) -> Dictionary:
 			],
 		}
 
-	# Optional held action (G-076): "step 2s while move_left is down" used to need
+	# Optional held action (G-084): "step 2s while move_left is down" used to need
 	# an input_press, a step, and an input_release -- three bus round-trips during
 	# which nothing guaranteed the press survived. The action is re-asserted
 	# pressed on every stepped frame and released at the end.

@@ -1358,7 +1358,7 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   player 4px where 2.5s of wall-clock `input press` + `sleep` moved it ~55px. The docs only
   promise the clock advances, but the practical effect is that "press, step-time, read"
   silently asserts nothing about held-input behavior.
-  - [gather:G-076] status: fixed | fixed-in: 0.8.0 | seen: 1 | harness: 0.7.0 | source: gather 2026-08-02
+  - [gather:G-084] status: fixed | fixed-in: 0.8.0 | seen: 1 | harness: 0.7.0 | source: gather 2026-08-02
   - Improvement: `step-time --hold <action>` that re-asserts the action's pressed state on
     every stepped frame, and a `held_actions` field in the reply so the caller can see
     whether anything was sustained.
@@ -1367,7 +1367,7 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   2026-08-02T04:58:57Z records `{"name": "crafting recipe cards rendered", "result":
   "blocked"}` and still `"verdict": "pass"`. A check that could not run is being scored as
   if it had passed.
-  - [gather:G-077] status: fixed | fixed-in: 0.8.0 | seen: 1 | harness: 0.7.0 | source: gather 2026-08-02
+  - [gather:G-085] status: fixed | fixed-in: 0.8.0 | seen: 1 | harness: 0.7.0 | source: gather 2026-08-02
   - Improvement: `verify_ledger.py record` should refuse `verdict: pass` when any check is
     `blocked` (downgrade to `aborted` or a new `partial`), so the summary can't claim more
     than the run demonstrated.
@@ -1376,7 +1376,7 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   false "already fixed"** — recorded 2026-08-01: stashing `input_manager.gd` alone made the
   bug not reproduce because the rest of the causal chain was still applied. Nothing in the
   /verify workflow warns that an A/B must carry the whole diff.
-  - [gather:G-078] status: open | seen: 1 | harness: 0.7.0 | source: gather 2026-08-02
+  - [gather:G-086] status: open | seen: 1 | harness: 0.7.0 | source: gather 2026-08-02
   - Improvement: a Phase 4 note (and checklist line) for A/B testing: stash/restore the
     full changed-file set from Phase 0's diff, never a hand-picked subset.
 
@@ -1384,7 +1384,7 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   2026-08-02: at `set-game-speed 0.08` the XP splash "looked enormous" purely because a
   stacking tween was stretched eight-fold. Good for draw-order questions, misleading for
   scale questions; nothing documents the distinction.
-  - [gather:G-079] status: open | seen: 1 | harness: 0.7.0 | source: gather 2026-08-02
+  - [gather:G-087] status: open | seen: 1 | harness: 0.7.0 | source: gather 2026-08-02
   - Improvement: one paragraph in the verify skill's screenshot guidance: use slow-mo for
     ordering/occlusion, use `canvas-scale`-style reads (see G-073/G-075) for size claims.
 
@@ -1392,7 +1392,7 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   2026-08-02) narrowed it by hand: running the test suite does not dirty `project.godot`;
   only `--import` does, and not every import. That scoping lives nowhere actionable, so
   every agent re-derives when a dirty `project.godot` is self-inflicted.
-  - [gather:G-080] status: fixed | fixed-in: 0.8.0 | seen: 1 | harness: 0.7.0 | source: gather 2026-08-02
+  - [gather:G-088] status: fixed | fixed-in: 0.8.0 | seen: 1 | harness: 0.7.0 | source: gather 2026-08-02
   - Improvement: document the blast radius next to the `--import` instruction in
     CLAUDE.harness.md, and have the verify skill snapshot/restore `project.godot` around
     any `--import` it performs (pairs with G-028).
@@ -1402,7 +1402,7 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   200-seed headless sweep after two live runs both reported "every island connects"
   (2026-08-01), and the entry concluded the sweep "should have come before the launch, not
   after". The lesson exists only as prose.
-  - [gather:G-081] status: open | seen: 1 | harness: 0.7.0 | source: gather 2026-08-02
+  - [gather:G-089] status: open | seen: 1 | harness: 0.7.0 | source: gather 2026-08-02
   - Improvement: a documented sweep pattern in the verify skill (Phase 1.5: "if the diff
     touches procedural generation, run the relevant `test_*` sweep with a seed count from
     config before launching"), plus a `sweep_hints` config key mapping path globs to test
@@ -1456,7 +1456,7 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
     payload actions (the top-level verbs already get this), or fix the header comment.
 
 - Gap: **a fresh git worktree cannot run ANY harness validation before `--import`, and
-  `--import` is barred by its project.godot rewrite (G-028/G-080)** — first lint run in
+  `--import` is barred by its project.godot rewrite (G-028/G-088)** — first lint run in
   the never-imported worktree produced 1108 SCRIPT ERRORs ("Identifier "Types" not
   declared…" for every global class) yet still `exit 0`, and the runner then printed
   `[PASS]` for tests whose first line had errored (`Invalid call. Nonexistent function

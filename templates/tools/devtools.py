@@ -1195,7 +1195,7 @@ def cmd_step_time(args, project_path: Path):
     timeout = max(30.0, args.seconds * 4 + 10)
     cmd_args = {"seconds": args.seconds}
     if getattr(args, "hold", None):
-        # G-076: hold an action pressed across the whole step, released at the end.
+        # G-084: hold an action pressed across the whole step, released at the end.
         cmd_args["hold"] = args.hold
     result = send_command(project_path, "step_time", cmd_args, timeout=timeout)
     if not result["success"]:

@@ -299,7 +299,7 @@ def contract_rows():
         ("input_state", {}, True, "G-021: polled pressed/strength, all project actions"),
         ("input_state", {"actions": ["ui_accept"]}, True, ""),
         ("step_time", {"seconds": 0.1, "hold": "ui_accept"}, True,
-         "G-076: action held across the step, released at the end"),
+         "G-084: action held across the step, released at the end"),
         ("tilemap_cells", {"node_path": "/root/Main/Cells"}, True, "G-032: cells as data"),
         ("tilemap_cells", {"node_path": "/root/Main/Cells", "rect": [0, 0, 3, 3]}, True,
          "rect clip in cell coordinates"),
