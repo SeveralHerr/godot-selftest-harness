@@ -44,6 +44,24 @@ extends SceneTree
 # can boot. If MANY scripts fail at once, suspect a stale global class cache -
 # run `godot --headless --path . --import` before believing the findings.
 #
+# Global class cache check: every top-level `class_name` in the scanned scripts is
+# compared against res://.godot/global_script_class_cache.cfg. Two rules:
+#   class_cache_stale    ERROR - a class is declared but the cache does not know
+#                        it. This is what produces a flood of `Could not find type
+#                        "X" in the current scope` parse errors in files nobody
+#                        touched, so it prints FIRST, above the compile results it
+#                        explains. Fix: godot --headless --path . --import
+#   class_cache_missing  advisory - no cache file at all (a fresh clone that has
+#                        never been imported). Reported once, not once per class:
+#                        that is one condition, not N findings.
+#
+# String-literal reference check, rule `string_ref_unresolved`: the name inside
+# has_method("x") / has_signal("x") / emit_signal("x") / call("x") /
+# call_deferred("x") / connect("x", ...) is flagged when no `func x` and no
+# `signal x` exists anywhere in the project and ClassDB knows no such engine
+# member. Advisory - a text scan cannot see a name built at runtime, so it must
+# never gate a run.
+#
 # NodePath findings come in three rules:
 #   nodepath_unresolved       ERROR - the path stays inside nodes this .tscn
 #                             declares and lands nowhere: a real dangling path.
@@ -70,6 +88,31 @@ const HARNESS_VERSION: String = "0.8.0"
 const CONFIG_PATH: String = "res://addons/godot_selftest/devtools_config.json"
 const DEFAULT_SCAN_ROOT: String = "res://"
 const DEFAULT_TEST_DIR: String = "res://test/unit"
+
+## Where the editor records every registered global class. Written through
+## ConfigFile as a single root-section key:
+##   list=Array[Dictionary]([{"base": &"Node", "class": &"Foo", "icon": "",
+##   "language": &"GDScript", "path": "res://foo.gd"}, ...])
+const CLASS_CACHE_PATH: String = "res://.godot/global_script_class_cache.cfg"
+
+## The one command that rebuilds the class cache. Named in every finding about it,
+## because the whole point of the check is that the fix travels with the symptom.
+const IMPORT_HINT: String = "run `godot --headless --path . --import`"
+
+## GDScript-level names ClassDB does not necessarily carry: script virtuals the
+## engine calls by name, and the iterator protocol. Belt and braces on top of the
+## ClassDB lookup in _engine_member_names() - a virtual missing from the method
+## list would otherwise be a permanent false positive in every project.
+const EXTRA_ENGINE_NAMES: Array[String] = [
+	"_init", "_ready", "_process", "_physics_process", "_enter_tree", "_exit_tree",
+	"_input", "_unhandled_input", "_unhandled_key_input", "_shortcut_input",
+	"_gui_input", "_draw", "_notification", "_to_string", "_get", "_set",
+	"_get_property_list", "_property_can_revert", "_property_get_revert",
+	"_validate_property", "_integrate_forces", "_get_configuration_warnings",
+	"_can_drop_data", "_drop_data", "_get_drag_data", "_make_custom_tooltip",
+	"_has_point", "_structured_text_parser", "_get_minimum_size",
+	"_iter_init", "_iter_next", "_iter_get",
+]
 
 const EXIT_OK: int = 0
 const EXIT_LINT_ERRORS: int = 1
@@ -187,7 +230,12 @@ func _initialize() -> void:
 			results["uids"]["had_error"] = true
 		var gd_files := _collect_gd_files(scan_root, test_dir)
 		_check_missing_uid_sidecars(gd_files, uid_ignore, results["uids"])
+		# Before the compile pass on purpose: a stale class cache is the CAUSE of
+		# the parse-error cascade that pass reports, and a cause diagnosed after
+		# its own symptoms is a cause nobody reads.
+		_check_class_cache(gd_files, uid_ignore, results)
 		_check_scripts_compile(gd_files, uid_ignore, results)
+		_check_string_refs(scan_root, gd_files, uid_ignore, results)
 
 	# Scene configuration warnings for selected scenes, unless uids-only
 	if not uids_only:
@@ -297,6 +345,12 @@ func _initialize() -> void:
 		for v in _vendored:
 			print("VENDORED (skipped): %s" % String(v).trim_prefix("res://"))
 		if not warnings_only:
+			# Class cache above everything else: when it is stale it is the single
+			# cause of every parse error printed below it, and burying the cause
+			# under 135 lines of its own symptoms is the whole gap.
+			var cc: Dictionary = results.get("class_cache", {})
+			for cline in cc.get("messages", []):
+				print(str(cline))
 			var sc: Dictionary = results.get("scripts", {"checked": 0, "failed": []})
 			if sc["failed"].is_empty():
 				print("Scripts: %d compiled OK" % int(sc["checked"]))
@@ -317,6 +371,9 @@ func _initialize() -> void:
 					print("WARN: %s: %s" % [s.path, s.message])
 			for d in results["duplicate_ids"]:
 				print("ERROR: %s: %s" % [d.path, d.message])
+			var sr: Dictionary = results.get("string_refs", {})
+			for u in sr.get("unresolved", []):
+				print("ADVISORY: %s: %s" % [u["file"], u["message"]])
 		if not uids_only:
 			for r in results["warnings"]["by_scene"]:
 				if "error" in r:
@@ -590,6 +647,269 @@ func _check_scripts_compile(gd_files: Array[String], ignore: Array, results: Dic
 			failed.append({"path": p, "message": detail})
 			_add_finding(p, "script_parse_failed", p, "error", detail)
 	results["scripts"] = {"checked": checked, "failed": failed}
+
+
+# --- Global class cache check (G-090) ---
+# A `class_name` the engine has not registered yet costs one Parse Error per
+# *referencing* file, not one per missing class: a single absent entry produced
+# 135 `Could not find type "X" in the current scope` lines and a test-runner
+# exit 2, in files nobody had touched. The case that bites is *receiving* a
+# class_name over a pull, rebase or branch switch - you added nothing, so nothing
+# in the output suggests re-importing.
+#
+# Both halves of the comparison are already in hand here: the scanned scripts
+# hold the declarations, .godot/global_script_class_cache.cfg holds what the
+# engine knows. Same skip rules as the compile pass, so a vendored or ignored
+# addon is not this project's debt.
+func _check_class_cache(gd_files: Array[String], ignore: Array, results: Dictionary) -> void:
+	# GDScript allows at most one top-level `class_name` per file, and it must sit
+	# at column 0 - so an anchored search() (not search_all) is exact, and `class
+	# Foo:` inner classes and commented-out lines can never match.
+	var decl_re := RegEx.new()
+	decl_re.compile("(?m)^class_name[ \\t]+([A-Za-z_][A-Za-z0-9_]*)")
+	var declared: Array[Dictionary] = []
+	for p in gd_files:
+		if p.begins_with("res://addons/") and _is_uid_ignored(p, ignore):
+			continue
+		var m := decl_re.search(FileAccess.get_file_as_string(p))
+		if m != null:
+			declared.append({"class": m.get_string(1), "path": p})
+
+	var state := {"declared": declared.size(), "state": "ok", "missing": [], "messages": []}
+	results["class_cache"] = state
+	if declared.is_empty():
+		state["state"] = "no_classes"
+		return
+
+	# A project that has never been imported is a DIFFERENT condition from a stale
+	# one, and it is one condition - so it gets one advisory line, not one finding
+	# per declared class. Advisory because a fresh clone is not a defect.
+	if not FileAccess.file_exists(CLASS_CACHE_PATH):
+		state["state"] = "absent"
+		var absent_msg := "no %s - this project has never been imported, so not one of its %d `class_name` declarations is registered; %s before believing any parse error below (advisory)" % [CLASS_CACHE_PATH, declared.size(), IMPORT_HINT]
+		state["messages"].append("ADVISORY: %s" % absent_msg)
+		_add_finding(CLASS_CACHE_PATH, "class_cache_missing", "", "warning", absent_msg, true)
+		return
+
+	var cached := _read_class_cache()
+	# Cache present but empty while classes are declared: same single cause, same
+	# single line. Fatal, unlike the absent case - the engine WILL fail to resolve.
+	if cached.is_empty():
+		state["state"] = "empty"
+		var empty_msg := "stale class cache: %s registers no classes at all while this project declares %d - %s" % [CLASS_CACHE_PATH, declared.size(), IMPORT_HINT]
+		state["messages"].append("ERROR: %s" % empty_msg)
+		_add_finding(CLASS_CACHE_PATH, "class_cache_stale", "", "error", empty_msg)
+		return
+
+	for d in declared:
+		var cls: String = d["class"]
+		if cached.has(cls):
+			continue
+		var msg := "stale class cache: \"%s\" is declared in %s but absent from .godot/global_script_class_cache.cfg - %s" % [cls, d["path"], IMPORT_HINT]
+		state["missing"].append({"class": cls, "path": d["path"], "message": msg})
+		state["messages"].append("ERROR: %s" % msg)
+		# ERROR, not advisory: this is the condition that produced 135 bogus parse
+		# errors, and a run that reports it must not exit 0.
+		_add_finding(d["path"], "class_cache_stale", cls, "error", msg)
+	if state["missing"].is_empty():
+		state["messages"].append("Class cache: %d class_name declaration(s) registered" % declared.size())
+	else:
+		state["state"] = "stale"
+
+
+## Class names the engine currently has registered, as a key set.
+## ConfigFile reads the editor's own format directly; the text fallback exists so
+## a truncated or half-written cache degrades into a partial answer instead of
+## turning a diagnostic into a linter abort.
+func _read_class_cache() -> Dictionary:
+	var out := {}
+	var cf := ConfigFile.new()
+	if cf.load(CLASS_CACHE_PATH) == OK:
+		var list: Variant = cf.get_value("", "list", [])
+		if typeof(list) == TYPE_ARRAY:
+			for e in list:
+				if typeof(e) == TYPE_DICTIONARY and e.has("class"):
+					out[String(e["class"])] = true
+	if not out.is_empty():
+		return out
+	var text := FileAccess.get_file_as_string(CLASS_CACHE_PATH)
+	if text == "":
+		return out
+	var re := RegEx.new()
+	re.compile("\"class\"[ \\t]*:[ \\t]*&?\"([A-Za-z_][A-Za-z0-9_]*)\"")
+	for m in re.search_all(text):
+		out[m.get_string(1)] = true
+	return out
+
+
+# --- Unresolved string-literal references (G-098) ---
+# An orchestrator pinned a panel API in prose: one agent wrote has_method("open"),
+# another implemented `func set_open(bool)`. Nothing in lint, the type system or
+# the tests connects a string literal in one file to a function name in another,
+# so the seam held green until the game ran.
+#
+# This is the _find_orphans scan pointed the other way: instead of declarations
+# nobody references, references that declare nowhere. Always on (not behind
+# --find-orphans) because the entire failure mode is that nobody knew to look.
+#
+# Severity is ADVISORY, deliberately, and the honest reason is `call`: a Callable
+# invoked as `cb.call("player")` passes a data string, not a method name, and no
+# text scan can tell that from `obj.call("player")`. A noisy new ERROR would teach
+# projects to stop reading lint output, which is worse than the gap; an advisory
+# that names a real broken seam costs one line.
+#
+# Residual false-positive sources, after comment stripping and the ClassDB lookup:
+#   - `call("literal")` on a Callable, as above - the one that cannot be fixed.
+#   - members of a GDExtension or C# class. ClassDB carries a GDExtension class
+#     only once the extension is loaded, which a `--script` run may not do.
+#   - built-in Variant-type methods (Array.append, String.split, Callable.bind),
+#     which live outside ClassDB entirely.
+# Names built by concatenation or held in variables simply do not match: no
+# finding, no crash, and no claim that they were checked.
+#
+# Skipped as call SITES (never as declaration sources): the uid_check_ignore
+# prefixes, because a harness or third-party runner probing for an optional hook
+# by name is not this project's debt, and `*.example.gd`, which is reference
+# material that names verbs the reading project is expected not to have yet.
+func _check_string_refs(scan_root: String, gd_files: Array[String], ignore: Array, results: Dictionary) -> void:
+	# call_deferred before call so the longer verb wins the alternation; the
+	# lookbehind keeps `my_call(` and `is_connected(` out; the required CLOSING
+	# quote is what stops `connect("ws://host")` matching as the name `ws`.
+	var call_re := RegEx.new()
+	call_re.compile("(?<![A-Za-z0-9_])(has_method|has_signal|emit_signal|call_deferred|call|connect)[ \\t]*\\([ \\t]*\"([A-Za-z_][A-Za-z0-9_]*)\"")
+
+	var candidates: Array[Dictionary] = []
+	var seen := {}
+	for p in gd_files:
+		if _is_uid_ignored(p, ignore) or p.get_file().ends_with(".example.gd"):
+			continue
+		var text := _strip_comments(FileAccess.get_file_as_string(p))
+		if text == "":
+			continue
+		for m in call_re.search_all(text):
+			var key := "%s|%s" % [p, m.get_string(2)]
+			if seen.has(key):
+				continue
+			seen[key] = true
+			candidates.append({"file": p, "verb": m.get_string(1), "name": m.get_string(2)})
+
+	results["string_refs"] = {"checked": candidates.size(), "unresolved": []}
+	if candidates.is_empty():
+		return
+
+	var declared := _declared_member_names(scan_root, gd_files)
+	# Enumerating ClassDB is only worth its cost once something has already failed
+	# to resolve against project code, which on a healthy project is never.
+	var engine := {}
+	var engine_built := false
+	for c in candidates:
+		var member: String = c["name"]
+		if declared.has(member):
+			continue
+		if not engine_built:
+			engine = _engine_member_names()
+			engine_built = true
+		if engine.has(member):
+			continue
+		var msg := "unresolved string reference: %s(\"%s\") - no `func %s` or `signal %s` exists anywhere in the project and ClassDB knows no such engine member; check the spelling, or the contract between the two files (advisory)" % [c["verb"], member, member, member]
+		results["string_refs"]["unresolved"].append({"file": c["file"], "name": member, "verb": c["verb"], "message": msg})
+		_add_finding(c["file"], "string_ref_unresolved", member, "warning", msg, true)
+
+
+## `text` with GDScript comments removed, so a documented example such as
+## `# has_method("x")` in a header block is not read as a call site. Scanned per
+## line and per character so a `#` inside a string literal survives; a line that
+## opens a `"""` block leaves the quote state unbalanced, which only means its own
+## trailing comment is not stripped - never that live code is.
+func _strip_comments(text: String) -> String:
+	var out: PackedStringArray = []
+	for line in text.split("\n"):
+		var quote := ""
+		var cut := -1
+		var i := 0
+		while i < line.length():
+			var ch := line[i]
+			if quote != "":
+				if ch == "\\":
+					i += 2
+					continue
+				if ch == quote:
+					quote = ""
+			elif ch == "\"" or ch == "'":
+				quote = ch
+			elif ch == "#":
+				cut = i
+				break
+			i += 1
+		out.append(line.substr(0, cut) if cut >= 0 else line)
+	return "\n".join(out)
+
+
+## Every `func x(` and `signal x` declared anywhere the project ships, as a key
+## set. Over-matching is the safe direction here (it only suppresses findings), so
+## no attempt is made to exclude comments or strings.
+func _declared_member_names(scan_root: String, gd_files: Array[String]) -> Dictionary:
+	var files := {}
+	for p in gd_files:
+		files[p] = true
+	for p in _scan_declaration_sources(scan_root):
+		files[p] = true
+
+	var func_re := RegEx.new()
+	# No ^ anchor: catches `static func`, inner-class methods at any indent, and
+	# an inline annotation such as `@rpc("any_peer") func sync_state():`.
+	func_re.compile("(?<![A-Za-z0-9_])func[ \\t]+([A-Za-z_][A-Za-z0-9_]*)[ \\t]*\\(")
+	var signal_re := RegEx.new()
+	signal_re.compile("(?m)^[ \\t]*signal[ \\t]+([A-Za-z_][A-Za-z0-9_]*)")
+
+	var out := {}
+	for fp in files:
+		var text := FileAccess.get_file_as_string(String(fp))
+		if text == "":
+			continue
+		for m in func_re.search_all(text):
+			out[m.get_string(1)] = true
+		for m2 in signal_re.search_all(text):
+			out[m2.get_string(1)] = true
+	return out
+
+
+## Recursive .gd walk honouring .gdignore and dot-directories but NOT the
+## vendored-addon exemption: a vendored addon is exempt from being reported ON,
+## not from being a legitimate place for a signal the project connects by name.
+func _scan_declaration_sources(root: String) -> Array[String]:
+	var out: Array[String] = []
+	var d := DirAccess.open(root)
+	if d == null:
+		return out
+	d.list_dir_begin()
+	while true:
+		var f := d.get_next()
+		if f == "":
+			break
+		var full := _norm_path(d.get_current_dir() + "/" + f)
+		if d.current_is_dir():
+			if not f.begins_with(".") and not FileAccess.file_exists(full + "/.gdignore"):
+				out += _scan_declaration_sources(full)
+		elif f.ends_with(".gd"):
+			out.append(full)
+	d.list_dir_end()
+	return out
+
+
+## Union of every method and signal name ClassDB carries, across every class.
+## no_inheritance=true keeps this to each class's own members - the union over all
+## classes is still the complete set, at a fraction of the allocations.
+func _engine_member_names() -> Dictionary:
+	var out := {}
+	for c in ClassDB.get_class_list():
+		for m in ClassDB.class_get_method_list(c, true):
+			out[String(m.get("name", ""))] = true
+		for s in ClassDB.class_get_signal_list(c, true):
+			out[String(s.get("name", ""))] = true
+	for n in EXTRA_ENGINE_NAMES:
+		out[n] = true
+	return out
 
 
 # --- Duplicate resource ids ---

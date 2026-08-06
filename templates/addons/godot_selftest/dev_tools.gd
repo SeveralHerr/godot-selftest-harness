@@ -36,6 +36,23 @@ const OWNER_PATH: String = "user://devtools_owner.json"
 ## Command-line flag and environment variable that name this instance's bus.
 const SESSION_ARG: String = "--devtools-session"
 const SESSION_ENV: String = "GODOT_DEVTOOLS_SESSION"
+
+## Absolute directory to put the bus files in, replacing user://. Godot has no
+## command line switch for user:// and honours no GODOT_USERDATA, so `launch
+## --isolated` used to print a temp dir the game would never write to and then a
+## follow-up command that could not work -- which reads as success and cost three
+## sessions before it was believed (gather:G-091, G-111, G-115). The bus is the
+## part that actually has to be isolated for two instances to coexist, and the bus
+## is entirely ours, so this moves it. Saves and screenshots still go to the real
+## user:// -- see _cmd_ping's bus_dir field, which reports exactly what was used.
+const BUSDIR_ARG: String = "--devtools-busdir"
+const BUSDIR_ENV: String = "GODOT_DEVTOOLS_BUSDIR"
+
+## Breadcrumb naming the verb currently being served, written before dispatch and
+## left behind if the process dies inside a handler (gather:G-103). A project verb
+## took the game down and the only evidence was the last line of the log, which
+## says what STARTED, not that it never finished.
+const LAST_COMMAND_PATH: String = "user://devtools_last_command.json"
 const CONFIG_PATH: String = "res://addons/godot_selftest/devtools_config.json"
 
 ## Frames to let elapse after _ready() before sampling the orphan-node baseline, so
@@ -76,6 +93,11 @@ const DEFAULT_CONFIG: Dictionary = {
 	"main_scene": "",
 	"entry_hook": {"node_path": "", "method": ""},
 	"mute": true,
+	# Read by tools/verify_ledger.py, not by this core. Maps a script that reach can
+	# never observe -- a RefCounted or Resource that is never any node's script -- to
+	# the observed script(s) that vouch for it. Credited in a bucket of its own, so an
+	# alias can never be mistaken for an observation. {} means "claim nothing".
+	"reach_aliases": {},
 }
 
 # --- Variables ---
@@ -87,12 +109,16 @@ var _commands_path: String = COMMANDS_PATH
 var _results_path: String = RESULTS_PATH
 var _log_path: String = LOG_PATH
 var _owner_path: String = OWNER_PATH
+var _last_command_path: String = LAST_COMMAND_PATH
 ## Session id, or "" for the shared default bus.
 var _session: String = ""
+## Absolute directory the bus files live in, or "" when they live in user://.
+var _bus_dir: String = ""
 var _commands_abs_path: String
 var _results_abs_path: String
 var _log_abs_path: String
 var _owner_abs_path: String
+var _last_command_abs_path: String
 ## Unix time this instance came up. Stamped (with the pid) onto every reply so a
 ## client can detect a foreign instance answering on its bus (G-036a).
 var _start_unix: float = 0.0
@@ -142,11 +168,14 @@ func _ready() -> void:
 	# writes and clears. _process_command_line_args() runs much later and is far too
 	# late to influence the paths.
 	_resolve_session()
+	_resolve_bus_dir()
+	_build_bus_paths()
 	_start_unix = Time.get_unix_time_from_system()
 	_commands_abs_path = ProjectSettings.globalize_path(_commands_path)
 	_results_abs_path = ProjectSettings.globalize_path(_results_path)
 	_log_abs_path = ProjectSettings.globalize_path(_log_path)
 	_owner_abs_path = ProjectSettings.globalize_path(_owner_path)
+	_last_command_abs_path = ProjectSettings.globalize_path(_last_command_path)
 
 	_load_config()
 	_register_generic_handlers()
@@ -252,10 +281,66 @@ func _resolve_session() -> void:
 		return
 
 	_session = clean
-	_commands_path = "user://devtools_commands_%s.json" % clean
-	_results_path = "user://devtools_results_%s.json" % clean
-	_log_path = "user://devtools_log_%s.jsonl" % clean
-	_owner_path = "user://devtools_owner_%s.json" % clean
+
+
+## Resolves an absolute directory to put the bus files in, from
+## `--devtools-busdir <path>` (after a bare `--`) or GODOT_DEVTOOLS_BUSDIR, the
+## flag winning. Empty -- the default -- keeps every bus file in user://, which is
+## exactly the old behavior.
+##
+## This exists because `launch --isolated` promised isolation it could not give.
+## Godot resolves user:// inside the engine and has no switch for it, so the temp
+## dir the client printed stayed empty forever while the game happily wrote to the
+## shared default bus; the follow-up command the client printed then failed with
+## `game not running`, which reads as a dead game rather than as a broken flag
+## (gather:G-091, G-111, G-115). The bus files are ours, so we can honour a
+## directory for them even though we cannot move user:// itself.
+##
+## A directory that cannot be created is IGNORED with a log line rather than
+## silently half-applied: half-applied isolation is what made this a three-session
+## bug. _cmd_ping reports the directory actually in use so a client can verify
+## rather than assume.
+func _resolve_bus_dir() -> void:
+	var raw: String = ""
+	var args: PackedStringArray = OS.get_cmdline_user_args()
+	for i: int in args.size():
+		if args[i] == BUSDIR_ARG and i + 1 < args.size():
+			raw = args[i + 1]
+			break
+	if raw.is_empty():
+		raw = OS.get_environment(BUSDIR_ENV)
+	raw = raw.strip_edges()
+	if raw.is_empty():
+		return
+
+	if not DirAccess.dir_exists_absolute(raw):
+		var err: int = DirAccess.make_dir_recursive_absolute(raw)
+		if err != OK:
+			_write_log("error", "Bus directory unusable; falling back to user://", {
+				"bus_dir": raw, "error": err,
+			})
+			return
+
+	_bus_dir = raw
+
+
+## Builds the four bus paths from the session id and the bus directory. Called
+## once, after both are resolved and before anything reads or writes them.
+func _build_bus_paths() -> void:
+	var suffix: String = "" if _session.is_empty() else "_%s" % _session
+	var names: Dictionary = {
+		"commands": "devtools_commands%s.json" % suffix,
+		"results": "devtools_results%s.json" % suffix,
+		"log": "devtools_log%s.jsonl" % suffix,
+		"owner": "devtools_owner%s.json" % suffix,
+		"last": "devtools_last_command%s.json" % suffix,
+	}
+	var base: String = _bus_dir if not _bus_dir.is_empty() else "user://"
+	_commands_path = base.path_join(names["commands"])
+	_results_path = base.path_join(names["results"])
+	_log_path = base.path_join(names["log"])
+	_owner_path = base.path_join(names["owner"])
+	_last_command_path = base.path_join(names["last"])
 
 
 func _load_config() -> void:
@@ -317,6 +402,10 @@ func _register_generic_handlers() -> void:
 	register_command("ui_snapshot_diff", _cmd_ui_snapshot_diff)
 	register_command("list_commands", _cmd_list_commands)
 	register_command("harness_version", _cmd_harness_version)
+	register_command("find_nodes", _cmd_find_nodes)
+	register_command("press", _cmd_press)
+	register_command("raycast", _cmd_raycast)
+	register_command("sample_pixels", _cmd_sample_pixels)
 
 
 func _load_extension() -> void:
@@ -385,9 +474,11 @@ func _check_for_commands() -> void:
 		return
 
 	_write_log("command", "Executing: %s" % action, args)
+	_write_breadcrumb(action, args, request_id)
 
 	var handler: Callable = _handlers[action]
 	var result: Dictionary = await handler.call(args)
+	_clear_breadcrumb()
 	# A command that arrived while this one was awaiting (step_time, input_tap, a
 	# long project verb) would have moved _current_request_id. Restore ours so this
 	# reply carries the id of the request it actually answers.
@@ -426,6 +517,34 @@ func _write_result(action: String, result: Dictionary) -> void:
 	file.close()
 
 
+## Records the verb about to be dispatched, and deletes the record once it returns.
+## A file left behind therefore means exactly one thing: the process died INSIDE
+## that handler.
+##
+## The log already says what started, which is not the same claim -- a project verb
+## took the game down and the log's last line (`[command] Executing: give_item`)
+## was indistinguishable from a verb that was merely still running, so "the game
+## died during X" had to be inferred rather than read (gather:G-103). Args are
+## included because the argument is usually the reason.
+func _write_breadcrumb(action: String, args: Dictionary, request_id: String) -> void:
+	var file: FileAccess = FileAccess.open(_last_command_path, FileAccess.WRITE)
+	if file == null:
+		return
+	file.store_string(JSON.stringify({
+		"action": action,
+		"args": _serialize_variant(args),
+		"id": request_id,
+		"pid": OS.get_process_id(),
+		"started_unix": Time.get_unix_time_from_system(),
+	}, "  "))
+	file.close()
+
+
+func _clear_breadcrumb() -> void:
+	if FileAccess.file_exists(_last_command_path):
+		DirAccess.remove_absolute(_last_command_abs_path)
+
+
 ## Never let a broken provider take the bridge down: a status hook that errors would
 ## otherwise poison every reply, including the ones you would use to diagnose it.
 func _collect_status() -> Dictionary:
@@ -455,7 +574,15 @@ func _process_command_line_args() -> void:
 # --- Command Handlers ---
 
 ## Wire contract - data keys: timestamp (float), session (String, "" on the default
-## bus), pid (int), start_unix (float), scripts_seen (int).
+## bus), pid (int), start_unix (float), scripts_seen (int), bus_dir (String, the
+## absolute directory the bus files are in), user_dir (String, where user:// really
+## points).
+##
+## bus_dir and user_dir are reported separately and always, because `--isolated`
+## previously claimed an isolation it did not have and nothing could contradict it
+## (gather:G-115). When they differ, the bus is isolated and saves/screenshots are
+## not; when they match, nothing is isolated. Either way it is now a read rather
+## than an assumption.
 func _cmd_ping(_args: Dictionary) -> Dictionary:
 	return {
 		"success": true,
@@ -466,6 +593,8 @@ func _cmd_ping(_args: Dictionary) -> Dictionary:
 			"pid": OS.get_process_id(),
 			"start_unix": _start_unix,
 			"scripts_seen": _scripts_seen.size(),
+			"bus_dir": _bus_dir if not _bus_dir.is_empty() else ProjectSettings.globalize_path("user://"),
+			"user_dir": ProjectSettings.globalize_path("user://"),
 		},
 	}
 
@@ -634,9 +763,11 @@ func _cmd_get_state(args: Dictionary) -> Dictionary:
 	if node_path.is_empty():
 		return {"success": false, "message": "No node_path provided"}
 
-	var node: Node = get_node_or_null(node_path)
+	var resolved: Dictionary = _resolve_node(node_path)
+	var node: Node = resolved["node"]
 	if node == null:
 		return {"success": false, "message": "Node not found: %s" % node_path}
+	node_path = resolved["path"]
 
 	var wanted: Array = []
 	var raw_wanted: Variant = args.get("properties", [])
@@ -664,6 +795,17 @@ func _cmd_get_state(args: Dictionary) -> Dictionary:
 			if prop_name == "transform":
 				# Always served below, from the node itself.
 				continue
+			if prop_name.contains("."):
+				# A dotted path walks into Resources and Dictionaries, which is
+				# where "which picture / which item / what colour" actually lives
+				# (gather:G-110, gather:G-117). A failed walk is reported in
+				# `missing` with its reason, never silently omitted.
+				var walk: Dictionary = _resolve_property_path(node, prop_name)
+				if walk["ok"]:
+					filtered[prop_name] = _serialize_variant(walk["value"])
+				else:
+					missing.append("%s (%s)" % [prop_name, walk["reason"]])
+				continue
 			if state.has(prop_name):
 				filtered[prop_name] = state[prop_name]
 			elif prop_name in node:
@@ -690,6 +832,100 @@ func _cmd_get_state(args: Dictionary) -> Dictionary:
 		"message": message,
 		"data": data,
 	}
+
+
+## Walks a dotted property path from `root`, e.g. "texture.region",
+## "slot_data.item.name", "texture.atlas.resource_path". Returns
+## { "ok": bool, "value": Variant, "reason": String }.
+##
+## Why: `--property texture` answered `<AtlasTexture#-92233719...>` -- an object
+## id -- and WHICH picture a Sprite2D shows lives in `texture.region`, one hop
+## down. There is no node path for a sub-resource, so no generic verb could reach
+## it and every Resource-shaped question needed a bespoke project verb
+## (gather:G-110, gather:G-117). Every inventory slot, every pickup, every
+## StyleBox colour and Shape2D extent sits exactly one or two hops past what
+## get_state could say.
+##
+## Each hop must land on an Object (Resource, Node, ...) or a Dictionary; a hop
+## off a plain value fails with a reason naming the segment that ran out, rather
+## than returning null and letting the caller read that as "the value is null".
+func _resolve_property_path(root: Variant, path: String) -> Dictionary:
+	var segments: PackedStringArray = path.split(".", false)
+	if segments.is_empty():
+		return {"ok": false, "value": null, "reason": "empty property path"}
+
+	var current: Variant = root
+	var walked: Array[String] = []
+	for segment: String in segments:
+		if current == null:
+			return {
+				"ok": false, "value": null,
+				"reason": "%s is null, so .%s has nothing to read from" % [
+					".".join(walked) if not walked.is_empty() else "the node", segment,
+				],
+			}
+		if current is Dictionary:
+			var dict: Dictionary = current
+			if not dict.has(segment):
+				return {
+					"ok": false, "value": null,
+					"reason": "no key %s in %s (keys: %s)" % [
+						segment, ".".join(walked), ", ".join(PackedStringArray(dict.keys())),
+					],
+				}
+			current = dict[segment]
+		elif current is Object:
+			var obj: Object = current
+			if not (segment in obj):
+				return {
+					"ok": false, "value": null,
+					"reason": "%s (%s) has no property %s" % [
+						".".join(walked) if not walked.is_empty() else "the node",
+						obj.get_class(), segment,
+					],
+				}
+			current = obj.get(segment)
+		else:
+			return {
+				"ok": false, "value": null,
+				"reason": "%s is a %s, not an object -- cannot read .%s off it" % [
+					".".join(walked), type_string(typeof(current)), segment,
+				],
+			}
+		walked.append(segment)
+
+	return {"ok": true, "value": current, "reason": ""}
+
+
+## Resolves a node path segment by segment, matching child names literally.
+##
+## Godot auto-names an unnamed Control `@Label@249`, `scene-tree` prints exactly
+## that, and feeding the printed path straight back answered `Node not found` --
+## so a node the snapshot had just listed was unaddressable, and its auto-named
+## ancestors along with it (gather:G-108). Round-tripping a path the harness
+## itself printed must never 404, so when get_node_or_null() fails we descend
+## manually with get_node_or_null(NodePath(name)) per child, comparing names as
+## plain strings.
+##
+## Returns the Node, or null when a segment genuinely does not exist.
+func _find_node_by_literal_names(node_path: String) -> Node:
+	var trimmed: String = node_path.strip_edges()
+	if not trimmed.begins_with("/root"):
+		return null
+	var segments: PackedStringArray = trimmed.substr(1).split("/", false)
+	var current: Node = get_tree().root
+	# segments[0] is "root" itself.
+	for i: int in range(1, segments.size()):
+		var wanted: String = segments[i]
+		var found: Node = null
+		for child: Node in current.get_children():
+			if String(child.name) == wanted:
+				found = child
+				break
+		if found == null:
+			return null
+		current = found
+	return current
 
 
 ## Reads a node's live transform directly off the object, bypassing
@@ -747,6 +983,25 @@ func _read_transform(node: Node) -> Dictionary:
 ## are taken when present (Color's optional alpha).
 func _numeric_components(value: Variant, keys: Array, min_count: int, max_count: int) -> Array:
 	var out: Array = []
+	# A String spelling of the same tuple: "x,y", "(x, y)", "[x,y]". The CLI cannot
+	# always hand us a JSON array -- argparse eats a leading "-" -- and the error a
+	# caller used to get named the target type without naming a syntax that produces
+	# it, so the working form was found by guessing (gather:G-137). Accepted here so
+	# every consumer of _coerce_arg (set_state, run_method, project verbs) gains it
+	# at once rather than one call site at a time.
+	if value is String:
+		var text: String = (value as String).strip_edges().lstrip("([").rstrip(")]")
+		if text.is_empty():
+			return []
+		var parts: PackedStringArray = text.split(",", false)
+		if parts.size() < min_count or parts.size() > max_count:
+			return []
+		for part: String in parts:
+			var token: String = part.strip_edges()
+			if not token.is_valid_float():
+				return []
+			out.append(token.to_float())
+		return out
 	if value is Array:
 		var arr: Array = value
 		if arr.size() < min_count or arr.size() > max_count:
@@ -835,11 +1090,24 @@ func _coerce_arg(value: Variant, target_type: int) -> Dictionary:
 			if from_type == TYPE_ARRAY and target_type >= TYPE_PACKED_BYTE_ARRAY and target_type <= TYPE_PACKED_COLOR_ARRAY:
 				return {"ok": true, "value": type_convert(value, target_type), "reason": ""}
 
+	# Name a syntax that WOULD have worked, not just the type that did not. The
+	# rejected-type-only message sent callers guessing through three spellings of a
+	# Vector2 before finding the one the bus accepts (gather:G-137).
+	var accepted: String = ""
+	match target_type:
+		TYPE_VECTOR2, TYPE_VECTOR2I:
+			accepted = ' -- accepted forms: [x, y] | {"x": .., "y": ..} | "x,y" | "(x,y)"'
+		TYPE_VECTOR3, TYPE_VECTOR3I:
+			accepted = ' -- accepted forms: [x, y, z] | {"x": .., "y": .., "z": ..} | "x,y,z"'
+		TYPE_COLOR:
+			accepted = ' -- accepted forms: [r, g, b] | [r, g, b, a] | {"r": .., "g": .., "b": ..} | "r,g,b,a"'
+
 	return {
 		"ok": false,
 		"value": null,
-		"reason": "cannot convert %s (%s) to %s" % [
+		"reason": "cannot convert %s (%s) to %s%s" % [
 			type_string(from_type), JSON.stringify(_serialize_variant(value)), type_string(target_type),
+			accepted,
 		],
 	}
 
@@ -873,6 +1141,13 @@ func _resolve_node(node_path: String) -> Dictionary:
 		node = get_node_or_null(prefixed)
 		if node != null:
 			used = prefixed
+	if node == null:
+		# Last resort: literal per-segment descent, which addresses the @Name@id
+		# names Godot auto-assigns and scene-tree prints (gather:G-108).
+		var literal_path: String = used if used.begins_with("/root") else "/root/" + node_path.trim_prefix("/")
+		node = _find_node_by_literal_names(literal_path)
+		if node != null:
+			used = literal_path
 	return {"node": node, "path": used}
 
 
@@ -996,7 +1271,25 @@ func _cmd_run_method(args: Dictionary) -> Dictionary:
 
 	var result: Variant = node.callv(method, method_args)
 
-	var data: Dictionary = {"result": _serialize_variant(result), "node_path": used_path}
+	# `result: null` on its own is ambiguous: a `-> void` that ran perfectly and a
+	# `-> int` that aborted on a runtime error both land here as null, and GDScript
+	# gives the caller no exception to tell them apart (gather:G-096). What IS
+	# knowable is what the method DECLARED it returns, so say that and let the
+	# client phrase the difference. declared_return is a type_string(); "Nil" for a
+	# `-> void` or an untyped func, "" when the method is absent from
+	# get_method_list() and nothing can be claimed.
+	var declared_return: String = ""
+	if not signature.is_empty():
+		var ret: Dictionary = signature.get("return", {})
+		declared_return = type_string(int(ret.get("type", TYPE_NIL)))
+
+	var data: Dictionary = {
+		"result": _serialize_variant(result),
+		"node_path": used_path,
+		"method": method,
+		"returned_null": result == null,
+		"declared_return": declared_return,
+	}
 	if not coercion_note.is_empty():
 		data["note"] = coercion_note
 
@@ -1157,15 +1450,42 @@ func _cmd_clear_nodes(args: Dictionary) -> Dictionary:
 	var matches: Array[Node] = []
 	_collect_matching_nodes(scene, group, method, cls, matches)
 
+	# `via_method` calls the game's own removal path instead of queue_free().
+	#
+	# queue_free() is always the WRONG way to remove a node whose removal has game
+	# meaning: freeing an enemy skips its death path, so nothing drops, no xp is
+	# paid, the run counter never increments and the boss's own `died` connection
+	# never fires -- a test built on clear_nodes proves the nodes are gone and
+	# nothing else (gather:G-123). Naming a method keeps this verb generic: the
+	# harness still knows nothing about health or damage, only that the project has
+	# a method it would rather have called.
+	var via: String = args.get("via_method", "")
+	var via_args: Array = args.get("via_args", []) if args.get("via_args") is Array else []
+
 	var cleared: int = 0
+	var skipped: Array = []
 	for node: Node in matches:
-		node.queue_free()
+		if via.is_empty():
+			node.queue_free()
+			cleared += 1
+			continue
+		if not node.has_method(via):
+			skipped.append(str(node.get_path()))
+			continue
+		node.callv(via, via_args)
 		cleared += 1
 
+	var how: String = "queue_free()" if via.is_empty() else "%s()" % via
+	var message: String = "Cleared %d nodes via %s (group='%s', method='%s', class='%s')" % [
+		cleared, how, group, method, cls]
+	if not skipped.is_empty():
+		message += " -- %d matched but have no %s(): %s" % [
+			skipped.size(), via, ", ".join(PackedStringArray(skipped))]
+
 	return {
-		"success": true,
-		"message": "Cleared %d nodes (group='%s', method='%s', class='%s')" % [cleared, group, method, cls],
-		"data": {"count": cleared},
+		"success": skipped.is_empty(),
+		"message": message,
+		"data": {"count": cleared, "via": via, "skipped": skipped},
 	}
 
 
@@ -1174,6 +1494,12 @@ func _collect_matching_nodes(node: Node, group: String, method: String, cls: Str
 		if _node_matches(child, group, method, cls):
 			matches.append(child)
 		_collect_matching_nodes(child, group, method, cls, matches)
+
+
+func _collect_all_nodes(node: Node, out: Array[Node]) -> void:
+	for child: Node in node.get_children():
+		out.append(child)
+		_collect_all_nodes(child, out)
 
 
 func _node_matches(node: Node, group: String, method: String, cls: String) -> bool:
@@ -2342,43 +2668,112 @@ func _snapshot_ui_recursive(node: Node, vp: Vector2, elements: Array) -> void:
 		_snapshot_ui_recursive(child, vp, elements)
 
 
+## Screen-space rect for ANY CanvasItem, not just a Control.
+##
+## `node-bounds .../Sprite2D` used to answer `Node is not a Control`, so every
+## visual check on a game object meant reconstructing the camera transform by
+## hand -- `(world - player) * zoom + viewport/2`, three devtools calls and an
+## assumption that the camera is centred on the player (gather:G-120). A
+## CanvasItem already knows its own answer:
+## get_global_transform_with_canvas() is the same transform the renderer uses,
+## so it accounts for the camera, every ancestor's scale, and the CanvasLayer.
+##
+## For a Control the rect is its own get_global_rect(). For any other CanvasItem
+## the rect is derived from the canvas transform, sized from whatever the node
+## can report (a Sprite2D's texture rect, a CollisionShape2D's shape) and
+## degenerate (w=h=0) when it can report nothing -- an origin point is still a
+## useful answer to "where on screen is this", and a zero size says plainly that
+## the extent is unknown rather than inventing one.
+## data keys: name, type, path, global_rect{x,y,w,h}, visible, modulate_a, text,
+## in_viewport, size_source.
 func _cmd_get_node_bounds(args: Dictionary) -> Dictionary:
 	var node_path: String = args.get("node_path", "")
 	if node_path.is_empty():
 		return {"success": false, "message": "No node_path provided"}
 
-	var node: Node = get_node_or_null(node_path)
+	var resolved: Dictionary = _resolve_node(node_path)
+	var node: Node = resolved["node"]
 	if node == null:
 		return {"success": false, "message": "Node not found: %s" % node_path}
 
-	if not node is Control:
-		return {"success": false, "message": "Node is not a Control: %s" % node_path}
+	if not node is CanvasItem:
+		return {
+			"success": false,
+			"message": "Node is not a CanvasItem, so it has no screen rect: %s (%s)" % [
+				node_path, node.get_class()],
+			"data": {"class": node.get_class()},
+		}
 
-	var control: Control = node as Control
+	var item: CanvasItem = node as CanvasItem
 	var vp: Vector2 = Vector2(get_tree().root.size)
-	var rect: Rect2 = control.get_global_rect()
+	var rect: Rect2
+	var size_source: String
+
+	if item is Control:
+		rect = (item as Control).get_global_rect()
+		size_source = "Control.get_global_rect"
+	else:
+		var xform: Transform2D = item.get_global_transform_with_canvas()
+		var local: Rect2 = _local_draw_rect(item)
+		rect = xform * local
+		size_source = "canvas transform x %s" % _local_draw_rect_source(item)
 
 	return {
 		"success": true,
-		"message": "Bounds for %s" % control.name,
+		"message": "Bounds for %s" % item.name,
 		"data": {
-			"name": str(control.name),
-			"type": control.get_class(),
-			"path": str(control.get_path()),
+			"name": str(item.name),
+			"type": item.get_class(),
+			"path": str(item.get_path()),
 			"global_rect": {
 				"x": rect.position.x,
 				"y": rect.position.y,
 				"w": rect.size.x,
 				"h": rect.size.y,
 			},
-			"visible": _is_effectively_visible(control),
-			"modulate_a": _get_effective_alpha(control),
-			"text": _get_control_text(control),
+			"visible": _is_effectively_visible(item),
+			"modulate_a": _get_effective_alpha(item),
+			"text": _get_control_text(item as Control) if item is Control else "",
 			"in_viewport": rect.position.x >= 0.0 and rect.position.y >= 0.0
 				and rect.position.x + rect.size.x <= vp.x
 				and rect.position.y + rect.size.y <= vp.y,
+			"size_source": size_source,
 		},
 	}
+
+
+## Best-effort local-space extent of a non-Control CanvasItem. Rect2() (a zero
+## size at the origin) when nothing can be claimed -- see _cmd_get_node_bounds.
+func _local_draw_rect(item: CanvasItem) -> Rect2:
+	if item is Sprite2D:
+		var sprite: Sprite2D = item as Sprite2D
+		if sprite.texture != null:
+			var size: Vector2 = sprite.texture.get_size()
+			if sprite.region_enabled:
+				size = sprite.region_rect.size
+			size *= Vector2(1.0 / maxf(1.0, float(sprite.hframes)), 1.0 / maxf(1.0, float(sprite.vframes)))
+			var origin: Vector2 = -size * 0.5 if sprite.centered else Vector2.ZERO
+			return Rect2(origin + sprite.offset, size)
+	elif item is CollisionShape2D:
+		var shape: Shape2D = (item as CollisionShape2D).shape
+		if shape != null:
+			return shape.get_rect() if shape.has_method("get_rect") else Rect2()
+	elif item is TileMapLayer:
+		var layer: TileMapLayer = item as TileMapLayer
+		var used: Rect2i = layer.get_used_rect()
+		var cell: Vector2i = layer.tile_set.tile_size if layer.tile_set != null else Vector2i.ONE
+		return Rect2(Vector2(used.position * cell), Vector2(used.size * cell))
+	return Rect2()
+
+
+func _local_draw_rect_source(item: CanvasItem) -> String:
+	if item is Sprite2D:
+		return "Sprite2D texture rect"
+	if item is CollisionShape2D:
+		return "CollisionShape2D shape rect"
+	if item is TileMapLayer:
+		return "TileMapLayer used rect"
+	return "origin only (this class reports no extent)"
 
 
 ## Reports a CanvasItem's ACCUMULATED canvas transform scale -- what the player's
@@ -2445,16 +2840,35 @@ func _cmd_canvas_scale(args: Dictionary) -> Dictionary:
 	else:
 		filter_name = filter_names.get(filter, str(filter))
 
+	# Which canvas this node renders into. A CanvasModulate tints exactly ONE
+	# canvas, so "will that tint reach this node" is a question about CanvasLayer
+	# ancestry -- and answering it used to mean grepping the .tscn for every
+	# `type="CanvasLayer"` and hand-walking parents, because scene-tree reports
+	# script and scene_file and nothing about canvases (gather:G-105). This walk
+	# was already here to accumulate scale; it just never said what it passed.
+	var layer_node: CanvasLayer = null
+	var layer_walker: Node = ci
+	while layer_walker != null:
+		if layer_walker is CanvasLayer:
+			layer_node = layer_walker as CanvasLayer
+			break
+		layer_walker = layer_walker.get_parent()
+
 	return {
 		"success": true,
-		"message": "%s draws at %.3f x %.3f through %s" % [
-			node.name, accumulated.x, accumulated.y, filter_name],
+		"message": "%s draws at %.3f x %.3f through %s (canvas layer %d)" % [
+			node.name, accumulated.x, accumulated.y, filter_name,
+			layer_node.layer if layer_node != null else 0],
 		"data": {
 			"accumulated_scale": {"x": accumulated.x, "y": accumulated.y},
 			"rotation": xform.get_rotation(),
 			"chain": chain,
 			"effective_filter": filter_name,
 			"filter_source": filter_source,
+			# 0 and "" mean the root canvas (the default viewport canvas), which is
+			# a real answer, not a missing one.
+			"canvas_layer": layer_node.layer if layer_node != null else 0,
+			"canvas_layer_path": str(layer_node.get_path()) if layer_node != null else "",
 		},
 	}
 
@@ -2829,6 +3243,329 @@ func _cmd_scripts_seen(_args: Dictionary) -> Dictionary:
 
 # --- Utility Functions ---
 
+# --- Query / interaction primitives ---
+
+## Finds nodes by class, group and property predicates, returning their paths.
+##
+## Why a read and not just clear_nodes: a boss among an EnemySpawner's children is
+## `@CharacterBody2D@385`, `@CharacterBody2D@388`, ... and nothing in a scene-tree
+## snapshot says which one is the Elite. Identifying it cost one get_state round
+## trip per child -- six calls, twice -- and by the time the loop finished the
+## engine had rotated the auto-names, so a path that answered 20 seconds earlier
+## 404'd (gather:G-109). clear_nodes already does exactly this matching internally
+## in order to FREE nodes; exposing the same predicate as a read costs little.
+##
+## args: { "class": String, "group": String, "method": String,
+##         "where": Dictionary (property -> expected value, dotted paths allowed),
+##         "properties": Array[String] (extra properties to report per hit),
+##         "root": String (subtree to search, default the whole tree),
+##         "limit": int (default 200) }
+## data keys: nodes (Array of {path, name, type, properties}), count, truncated.
+func _cmd_find_nodes(args: Dictionary) -> Dictionary:
+	var root: Node = get_tree().root
+	var root_path: String = args.get("root", "")
+	if not root_path.is_empty():
+		var resolved: Dictionary = _resolve_node(root_path)
+		if resolved["node"] == null:
+			return {"success": false, "message": "Root node not found: %s" % root_path}
+		root = resolved["node"]
+
+	var cls: String = args.get("class", "")
+	var group: String = args.get("group", "")
+	var method: String = args.get("method", "")
+	var where: Dictionary = args.get("where", {}) if args.get("where") is Dictionary else {}
+	var report: Array = args.get("properties", []) if args.get("properties") is Array else []
+	var limit: int = int(args.get("limit", 200))
+
+	var candidates: Array[Node] = []
+	if cls.is_empty() and group.is_empty() and method.is_empty():
+		# `where` alone is a legitimate query ("every node whose type is Elite"),
+		# and _collect_matching_nodes matches nothing when every selector is empty
+		# -- it is written for clear_nodes, where an empty selector must refuse.
+		_collect_all_nodes(root, candidates)
+	else:
+		_collect_matching_nodes(root, group, method, cls, candidates)
+
+	var hits: Array = []
+	var truncated: bool = false
+	for node: Node in candidates:
+		if not _matches_where(node, where):
+			continue
+		if hits.size() >= limit:
+			truncated = true
+			break
+		var props: Dictionary = {}
+		for entry: Variant in report:
+			var name: String = str(entry)
+			var walk: Dictionary = _resolve_property_path(node, name)
+			props[name] = _serialize_variant(walk["value"]) if walk["ok"] else null
+		hits.append({
+			"path": str(node.get_path()),
+			"name": str(node.name),
+			"type": node.get_class(),
+			"properties": props,
+		})
+
+	return {
+		"success": true,
+		"message": "%d node(s) matched" % hits.size(),
+		"data": {"nodes": hits, "count": hits.size(), "truncated": truncated},
+	}
+
+
+## Every key in `where` must equal the node's value at that (possibly dotted)
+## property path. A property the node does not have is a NON-match, never an
+## error: the predicate is applied across a heterogeneous subtree by design.
+func _matches_where(node: Node, where: Dictionary) -> bool:
+	for key: Variant in where:
+		var walk: Dictionary = _resolve_property_path(node, str(key))
+		if not walk["ok"]:
+			return false
+		if not _values_match(walk["value"], where[key]):
+			# Compare through the serialized form too, so a JSON string can match
+			# a StringName / enum-backed value without the caller knowing which.
+			if str(_serialize_variant(walk["value"])) != str(where[key]):
+				return false
+	return true
+
+
+## Emits `pressed` on the nearest BaseButton at or under a node path.
+##
+## Every panel added through the harness was previously verified one layer below
+## what ships: the callables (`_on_set_weather`, `_on_strike`) were driven through
+## run_method, which proves the ACTIONS and not the BUTTONS -- a mis-wired
+## `pressed.connect` shipped green (gather:G-119). This presses the button the way
+## a finger does.
+##
+## args: { "node_path": String, "toggle": bool (for a toggle_mode button, the
+##         pressed state to set before emitting) }
+## data keys: node_path, type, disabled, button_pressed.
+func _cmd_press(args: Dictionary) -> Dictionary:
+	var node_path: String = args.get("node_path", "")
+	if node_path.is_empty():
+		return {"success": false, "message": "No node_path provided"}
+	var resolved: Dictionary = _resolve_node(node_path)
+	var node: Node = resolved["node"]
+	if node == null:
+		return {"success": false, "message": "Node not found: %s" % node_path}
+
+	var button: BaseButton = node as BaseButton
+	if button == null:
+		# One level of convenience: a container path is what scene-tree gives you.
+		for child: Node in node.get_children():
+			if child is BaseButton:
+				button = child as BaseButton
+				break
+	if button == null:
+		return {
+			"success": false,
+			"message": "No BaseButton at or directly under %s (%s)" % [
+				resolved["path"], node.get_class()],
+			"data": {"node_path": resolved["path"], "type": node.get_class()},
+		}
+
+	if button.disabled:
+		# A disabled button ignores a real press too. Refusing is the honest
+		# answer; silently emitting would manufacture a state no player can reach.
+		return {
+			"success": false,
+			"message": "%s is disabled; a real press would do nothing either" % button.get_path(),
+			"data": {"node_path": str(button.get_path()), "type": button.get_class(),
+				"disabled": true, "button_pressed": button.button_pressed},
+		}
+
+	if button.toggle_mode and args.has("toggle"):
+		button.button_pressed = bool(args["toggle"])
+	button.emit_signal("pressed")
+
+	return {
+		"success": true,
+		"message": "Pressed %s" % button.get_path(),
+		"data": {
+			"node_path": str(button.get_path()),
+			"type": button.get_class(),
+			"disabled": false,
+			"button_pressed": button.button_pressed,
+		},
+	}
+
+
+## Casts a ray through the 2D physics space and reports what it hit.
+##
+## The harness could say what tiles are where (tilemap_cells) and where a node is
+## (node_bounds), but nothing could say what a given collision_mask would actually
+## HIT -- which is the only form the question takes once a project has more than
+## one physics layer. Every project that needed it wrote its own `los_probe`
+## (gather:G-136). Note the engine's own sharp edge, which this verb inherits and
+## the message names: a ray STARTING INSIDE a shape reports nothing, so five
+## bisecting probes can all come back `clear` while a wall sits between them.
+##
+## args: { "from": [x,y], "to": [x,y], "mask": int (default all layers),
+##         "areas": bool (also hit Area2Ds, default false),
+##         "exclude": Array[String] of node paths }
+## data keys: clear (bool), collider (String path or ""), collider_class,
+## position {x,y}, normal {x,y}, mask, mask_names (Array).
+func _cmd_raycast(args: Dictionary) -> Dictionary:
+	var from: Variant = _parse_vector2_or_null(args.get("from"))
+	var to: Variant = _parse_vector2_or_null(args.get("to"))
+	if from == null or to == null:
+		return {"success": false, "message": "raycast needs from and to as [x, y] (or {\"x\":..,\"y\":..})"}
+
+	var world: World2D = get_tree().root.world_2d
+	if world == null:
+		return {"success": false, "message": "No World2D (is this a headless run with no 2D space?)"}
+
+	var params: PhysicsRayQueryParameters2D = PhysicsRayQueryParameters2D.create(from, to)
+	params.collision_mask = int(args.get("mask", 0xFFFFFFFF))
+	params.collide_with_areas = bool(args.get("areas", false))
+	params.collide_with_bodies = true
+
+	var excluded: Array[RID] = []
+	for entry: Variant in (args.get("exclude", []) if args.get("exclude") is Array else []):
+		var found: Dictionary = _resolve_node(str(entry))
+		var node: Node = found["node"]
+		if node != null and node is CollisionObject2D:
+			excluded.append((node as CollisionObject2D).get_rid())
+	params.exclude = excluded
+
+	var hit: Dictionary = world.direct_space_state.intersect_ray(params)
+	var mask_names: Array = _layer_names_for_mask(params.collision_mask)
+
+	if hit.is_empty():
+		return {
+			"success": true,
+			"message": ("clear from (%.1f, %.1f) to (%.1f, %.1f) on mask %d [%s] -- note that a ray "
+				+ "STARTING INSIDE a shape reports nothing") % [
+				from.x, from.y, to.x, to.y, params.collision_mask, ", ".join(PackedStringArray(mask_names))],
+			"data": {
+				"clear": true, "collider": "", "collider_class": "",
+				"position": {}, "normal": {},
+				"mask": params.collision_mask, "mask_names": mask_names,
+			},
+		}
+
+	var collider: Variant = hit.get("collider")
+	var collider_path: String = str((collider as Node).get_path()) if collider is Node else ""
+	var point: Vector2 = hit.get("position", Vector2.ZERO)
+	var normal: Vector2 = hit.get("normal", Vector2.ZERO)
+	return {
+		"success": true,
+		"message": "blocked by %s at (%.1f, %.1f)" % [
+			collider_path if not collider_path.is_empty() else "an unnamed collider",
+			point.x, point.y],
+		"data": {
+			"clear": false,
+			"collider": collider_path,
+			"collider_class": (collider as Object).get_class() if collider is Object else "",
+			"position": {"x": point.x, "y": point.y},
+			"normal": {"x": normal.x, "y": normal.y},
+			"mask": params.collision_mask,
+			"mask_names": mask_names,
+		},
+	}
+
+
+## Resolves a 2D collision mask to the project's own layer names, because the
+## whole class of bug here is a number nobody can read. Unnamed layers report as
+## "layer_N" so a bit is never silently dropped from the list.
+func _layer_names_for_mask(mask: int) -> Array:
+	var names: Array = []
+	for bit: int in range(32):
+		if mask & (1 << bit) == 0:
+			continue
+		var setting: String = "layer_names/2d_physics/layer_%d" % (bit + 1)
+		var name: String = str(ProjectSettings.get_setting(setting, ""))
+		names.append(name if not name.is_empty() else "layer_%d" % (bit + 1))
+	return names
+
+
+## Reads back pixels from the rendered frame so a colour claim is assertable.
+##
+## Confirming "this sprite renders blue" previously meant writing a zlib/PNG
+## reader inline -- ~30 lines of scanline defiltering that every visual assertion
+## would have to carry (gather:G-121). The viewport texture is already in hand;
+## this is the same capture path `screenshot` uses, summarised instead of saved.
+##
+## args: { "rect": [x, y, w, h] (default the whole viewport) }
+## data keys: rect{x,y,w,h}, pixels (int), mean{r,g,b}, brightest{r,g,b},
+## darkest{r,g,b}, dominant{r,g,b} (the most common colour after quantising to
+## 5 bits per channel), dominant_share (0..1).
+func _cmd_sample_pixels(args: Dictionary) -> Dictionary:
+	var viewport: Viewport = get_viewport()
+	var texture: ViewportTexture = viewport.get_texture() if viewport != null else null
+	if texture == null:
+		return {"success": false, "message": "No viewport texture (headless run with no rendering?)"}
+	var image: Image = texture.get_image()
+	if image == null:
+		return {"success": false, "message": "Viewport produced no image (headless run with no rendering?)"}
+
+	var full: Rect2i = Rect2i(0, 0, image.get_width(), image.get_height())
+	var rect: Rect2i = full
+	var raw_rect: Variant = args.get("rect")
+	if raw_rect is Array and (raw_rect as Array).size() == 4:
+		var a: Array = raw_rect
+		rect = Rect2i(int(a[0]), int(a[1]), int(a[2]), int(a[3]))
+	rect = rect.intersection(full)
+	if rect.size.x <= 0 or rect.size.y <= 0:
+		return {
+			"success": false,
+			"message": "rect %s does not overlap the %dx%d viewport" % [
+				str(raw_rect), full.size.x, full.size.y],
+		}
+
+	var total: Vector3 = Vector3.ZERO
+	var brightest: Color = Color(0, 0, 0)
+	var darkest: Color = Color(1, 1, 1)
+	var best_lum: float = -1.0
+	var worst_lum: float = 2.0
+	var buckets: Dictionary = {}
+	var count: int = 0
+	for y: int in range(rect.position.y, rect.position.y + rect.size.y):
+		for x: int in range(rect.position.x, rect.position.x + rect.size.x):
+			var c: Color = image.get_pixel(x, y)
+			total += Vector3(c.r, c.g, c.b)
+			count += 1
+			var lum: float = c.get_luminance()
+			if lum > best_lum:
+				best_lum = lum
+				brightest = c
+			if lum < worst_lum:
+				worst_lum = lum
+				darkest = c
+			var key: int = (int(c.r * 31.0) << 10) | (int(c.g * 31.0) << 5) | int(c.b * 31.0)
+			buckets[key] = int(buckets.get(key, 0)) + 1
+
+	var mean: Vector3 = total / maxf(1.0, float(count))
+	var top_key: int = -1
+	var top_count: int = 0
+	for key: Variant in buckets:
+		if int(buckets[key]) > top_count:
+			top_count = int(buckets[key])
+			top_key = int(key)
+	var dominant: Color = Color(
+		float((top_key >> 10) & 31) / 31.0,
+		float((top_key >> 5) & 31) / 31.0,
+		float(top_key & 31) / 31.0) if top_key >= 0 else Color(0, 0, 0)
+
+	return {
+		"success": true,
+		"message": "%d px in (%d, %d, %d, %d): mean #%s, dominant #%s (%.0f%%)" % [
+			count, rect.position.x, rect.position.y, rect.size.x, rect.size.y,
+			Color(mean.x, mean.y, mean.z).to_html(false), dominant.to_html(false),
+			100.0 * float(top_count) / maxf(1.0, float(count))],
+		"data": {
+			"rect": {"x": rect.position.x, "y": rect.position.y,
+				"w": rect.size.x, "h": rect.size.y},
+			"pixels": count,
+			"mean": {"r": mean.x, "g": mean.y, "b": mean.z},
+			"brightest": {"r": brightest.r, "g": brightest.g, "b": brightest.b},
+			"darkest": {"r": darkest.r, "g": darkest.g, "b": darkest.b},
+			"dominant": {"r": dominant.r, "g": dominant.g, "b": dominant.b},
+			"dominant_share": float(top_count) / maxf(1.0, float(count)),
+		},
+	}
+
+
 func _load_validator() -> GDScript:
 	var validator_path: String = _config.get("validator_script", "")
 	if validator_path.is_empty() or not ResourceLoader.exists(validator_path):
@@ -2977,6 +3714,9 @@ func _clear_stale_files() -> void:
 		DirAccess.remove_absolute(_results_abs_path)
 	if FileAccess.file_exists(_owner_path):
 		DirAccess.remove_absolute(_owner_abs_path)
+	# NOT the breadcrumb: a leftover from a crashed predecessor is evidence, and
+	# the client reads it after a launch precisely to explain the crash. It is
+	# stamped with the dead pid, so it cannot be mistaken for this instance's.
 
 
 ## Writes the bus-identity record (G-009). The client reads it to say WHO owns a
@@ -2992,5 +3732,6 @@ func _write_owner_file() -> void:
 		"start_unix": _start_unix,
 		"project": str(ProjectSettings.get_setting("application/config/name", "")),
 		"session": _session,
+		"bus_dir": _bus_dir if not _bus_dir.is_empty() else ProjectSettings.globalize_path("user://"),
 	}, "  "))
 	file.close()

@@ -200,3 +200,6 @@ This protocol applies when ending a Beads implementation workflow. It is subordi
 - Do not commit or push without clear authority from the active profile or the current user request.
 - If a required sync or push is blocked, stop and report the exact command and error.
 <!-- END BEADS INTEGRATION -->
+
+
+ After a session, reflect on it's the output and suggest concrete imrpovements for the repo. 

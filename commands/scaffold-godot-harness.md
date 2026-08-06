@@ -139,7 +139,8 @@ Same installer, for `res://tools/`:
 "$PY" "${CLAUDE_PLUGIN_ROOT}/tools/scaffold_install.py" files --project "$ROOT" \
   --plugin-root "${CLAUDE_PLUGIN_ROOT}" \
   tools/lint_project.gd tools/run_tests.gd tools/eval.gd tools/devtools.py \
-  tools/check_devtools_log.py tools/upstream_gaps.py tools/verify_ledger.py
+  tools/check_devtools_log.py tools/upstream_gaps.py tools/verify_ledger.py \
+  tools/import_check.py
 chmod +x "$ROOT/tools/devtools.py" 2>/dev/null || true
 ```
 
@@ -249,6 +250,7 @@ Detect:
   "test_dir": "res://test/unit",
   "scan_root": "res://",
   "uid_check_ignore": ["res://addons/", "res://tools/"],
+  "reach_aliases": {},
   "fps_min": 30,
   "orphan_max": 0,
   "orphan_growth_max": 20,
@@ -644,7 +646,9 @@ sequence → performance → quit).
   `run_tests.gd` (headless unit test runner), `devtools.py` (Python CLI client),
   `check_devtools_log.py` (the `Stop`-hook logging reminder), `upstream_gaps.py`
   (pools this project's open gaps into the harness repo's log), `verify_ledger.py`
-  (records what each `/verify` run reached; `stats` reads the history back).
+  (records what each `/verify` run reached; `stats` reads the history back), and
+  `import_check.py` (runs `--import` and fails on the parse errors Godot prints
+  while still exiting 0).
 - `res://devtools_ext/commands.gd` — your project's command registry extension
   (plus `commands.example.gd` for reference).
 - `res://test/unit/` and `res://test/sequences/` — a seed unit test and a smoke

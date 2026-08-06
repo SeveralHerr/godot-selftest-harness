@@ -19,8 +19,9 @@ extends SceneTree
 ##   1  one or more tests failed
 ##   2  the runner itself could not run, i.e. NOTHING WAS VERIFIED - test_dir is
 ##      missing, a test script failed to load / instantiate, no test scripts were
-##      discovered at all, or a --filter/--file selected zero of the discovered
-##      tests. Treat this as a broken gate, not as a test failure.
+##      discovered at all, the discovered scripts held no test_* methods, or a
+##      --filter/--file selected zero of the discovered tests. Treat this as a
+##      broken gate, not as a test failure.
 ##
 ## That last case used to exit 0. A filter matching nothing skipped the entire
 ## suite and printed `Total: 0 | Passed: 0 | Failed: 0`, which is byte-identical
@@ -36,6 +37,14 @@ extends SceneTree
 ## exit)`) and the exit code is scored over the selected set only. With NO
 ## selector active a broken file still exits 2 - a whole-suite run genuinely
 ## could not run - and a SELECTED file failing to load stays exit 2 too.
+##
+## Every run states its denominator, selector or not (G-135):
+##   Selected: 38 of 662 discovered  (file 'test_player_combat')
+##   Selected: 662 of 662 discovered  (no selector)
+## The bare run used to print only `Total: 662 | ...`, which is the same fact with
+## nothing to compare it against - a discovery pass that silently found half the
+## files it should have looked exactly like a full suite. `ALL TESTS PASSED` is
+## now unreachable with a zero total: every way of running nothing is exit 2.
 ##
 ## Windows note: the stock Godot .exe is the non-console build and prints nothing
 ## to a PowerShell console, so redirect headless runs to a file and read that back
@@ -134,6 +143,20 @@ func _initialize() -> void:
 	# quit() is only reached once every test has actually finished.
 	await _run_all_tests(test_scripts)
 
+	# Scripts existed but held no test_* methods between them. Same fact as an
+	# empty test_dir - nothing was verified - and it used to exit 0 reporting
+	# `Total: 0 | ALL TESTS PASSED`, the exact reading this runner exists to
+	# prevent. A selector cannot be the cause: it only ever reduces _selected,
+	# never _discovered. Skipped when there are discovery errors, so a run whose
+	# scripts merely failed to compile keeps the sharper message the zero-match
+	# branch below already gives it.
+	if _discovered == 0 and _discovery_errors.is_empty() and not _runner_error:
+		_runner_error = true
+		_errors.append({
+			"script": test_dir,
+			"error": "%d test script(s) found, but no test_* methods in them - nothing was verified" % test_scripts.size(),
+		})
+
 	# Discovery errors alone must not leave a 0-test run looking green: a
 	# selector that matched nothing verifiable is still a broken gate.
 	if _selected == 0 and (_discovered > 0 or not _discovery_errors.is_empty()):
@@ -157,6 +180,15 @@ func _selector_description() -> String:
 	if parts.is_empty():
 		return "selection"
 	return " + ".join(parts)
+
+
+## Selector text for the always-printed `Selected:` line. Reads "no selector" on
+## a bare run, where _selector_description()'s "selection" is phrased to sit
+## inside the zero-match error instead.
+func _selector_label() -> String:
+	if _filter == "" and _file_filter == "":
+		return "no selector"
+	return _selector_description()
 
 
 ## True when a test method survives --filter and --file.
@@ -412,8 +444,10 @@ func _print_results() -> void:
 	print("-" .repeat(60))
 	var total: int = _passed + _failed + _skipped
 	print("  Total: %d  |  Passed: %d  |  Failed: %d  |  Skipped: %d" % [total, _passed, _failed, _skipped])
-	if _filter != "" or _file_filter != "":
-		print("  Selected: %d of %d discovered  (%s)" % [_selected, _discovered, _selector_description()])
+	# Unconditional (G-135). On a filtered run this is the ratio the selector cut
+	# the suite down to; on a bare run it is the discovery denominator, which is
+	# the number that says whether the whole suite was even found.
+	print("  Selected: %d of %d discovered  (%s)" % [_selected, _discovered, _selector_label()])
 	print("-" .repeat(60))
 
 	if _selection_error != "":
@@ -423,6 +457,11 @@ func _print_results() -> void:
 		print("  see what exists.")
 	elif _runner_error:
 		print("  RUNNER ERROR - the suite did not run to completion (exit 2)")
+	elif total == 0:
+		# Belt and braces: every path that runs nothing already sets _runner_error
+		# above, so this line should be unreachable. It exists so that no future
+		# path can reach "ALL TESTS PASSED" with an empty tally.
+		print("  NOTHING RAN - 0 of %d discovered test(s) executed, so nothing was verified" % _discovered)
 	elif _failed == 0:
 		print("  ALL TESTS PASSED")
 	else:

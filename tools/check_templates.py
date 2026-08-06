@@ -146,6 +146,8 @@ def stage_assemble(scratch, user_dir_name):
         "",
         "## Harness-check fixture (written by check_templates.py stage_assemble).",
         "",
+        "var presses: int = 0",
+        "",
         "",
         "func _ready() -> void:",
         "\tvar layer := TileMapLayer.new()",
@@ -166,10 +168,33 @@ def stage_assemble(scratch, user_dir_name):
         "\tlayer.set_cell(Vector2i(5, 5), source_id, Vector2i(0, 0))",
         "\tlayer.set_cell(Vector2i(3, 3), source_id, Vector2i(1, 0))",
         "\tadd_child(layer)",
+        "\t# A real BaseButton for the `press` row, and a Sprite2D for the",
+        "\t# non-Control node_bounds row.",
+        "\tvar button := Button.new()",
+        '\tbutton.name = "Go"',
+        '\tbutton.text = "Go"',
+        "\tbutton.position = Vector2(32, 32)",
+        "\tbutton.size = Vector2(160, 56)",
+        "\tbutton.pressed.connect(_on_go)",
+        "\tadd_child(button)",
+        "\tvar sprite := Sprite2D.new()",
+        '\tsprite.name = "Blip"',
+        "\tvar sprite_image := Image.create_empty(8, 8, false, Image.FORMAT_RGBA8)",
+        "\tsprite.texture = ImageTexture.create_from_image(sprite_image)",
+        "\tadd_child(sprite)",
+        "",
+        "",
+        "func _on_go() -> void:",
+        "\tpresses += 1",
         "",
         "",
         "func take_vec(v: Vector2) -> String:",
         '\treturn "%.1f,%.1f" % [v.x, v.y]',
+        "",
+        "",
+        "## A `-> void`: its null return must be distinguishable from an abort.",
+        "func returns_nothing() -> void:",
+        "\tpass",
         "",
     ]), encoding="utf-8")
 
@@ -268,22 +293,36 @@ def wait_for_ping(client, scratch):
 
 
 def contract_rows():
-    """(action, args, must_succeed, note). Every generic verb appears once.
+    """(action, args, must_succeed, note[, required_data_keys]).
 
-    must_succeed=False rows still assert the reply ENVELOPE (id echo, success
-    bool, message str, data dict) - they are verbs whose success depends on a
-    display or on prior state we do not guarantee headlessly.
+    Every generic verb appears once. must_succeed=False rows still assert the
+    reply ENVELOPE (id echo, success bool, message str, data dict) - they are
+    verbs whose success depends on a display or on prior state we do not
+    guarantee headlessly.
+
+    The optional 5th element names data keys the CLIENT reads by name. This is
+    the check that would have caught 0.4.0's three simultaneous wire mismatches:
+    an envelope can be perfectly well-formed while the key the client prints
+    from has been renamed out from under it. Add the keys whenever you add a
+    `data.get("...")` to devtools.py.
+
+    The optional 6th element is a {data_key: expected_value} dict, asserted
+    exactly. Use it where a row is claiming an EFFECT rather than a shape - a
+    note saying "this proves the button's callable ran" proves nothing unless
+    the count is actually read back.
     """
     return [
-        ("harness_version", {}, True, ""),
+        ("harness_version", {}, True, "", ["harness_version", "handlers"]),
         ("list_commands", {}, True, ""),
         ("scene_tree", {"depth": 5}, True, ""),
         ("validate_scene", {"path": "res://main.tscn"}, True, ""),
         ("validate_all", {}, True, "60s budget"),
         ("get_state", {"node_path": "/root/Main", "properties": ["visible"]}, True, ""),
         ("set_state", {"node_path": "/root/Main", "property": "visible", "value": False}, True, ""),
-        ("run_method", {"node_path": "/root/Main", "method": "is_visible", "args": []}, True, ""),
-        ("set_state", {"node_path": "/root/Main", "property": "visible", "value": True}, True, ""),
+        ("run_method", {"node_path": "/root/Main", "method": "is_visible", "args": []}, True, "",
+         ["result", "returned_null", "declared_return", "node_path", "method"]),
+        ("set_state", {"node_path": "/root/Main", "property": "visible", "value": True}, True, "",
+         ["property", "value", "read_back", "coerced"]),
         ("run_method", {"node_path": "/root/Main", "method": "take_vec", "args": [[3, 4]]}, True,
          "G-016: [x, y] JSON arg coerced to the declared Vector2 param"),
         ("run_method", {"node_path": "/root/Main", "method": "take_vec", "args": ["nope"]}, False,
@@ -292,8 +331,20 @@ def contract_rows():
          "G-010: bare path retried under /root"),
         ("set_state", {"node_path": "/root/Main", "property": "position", "value": [8, 6]}, True,
          "G-035: [x, y] coerced to the property's Vector2, then read back"),
+        ("set_state", {"node_path": "/root/Main", "property": "position", "value": "12,7"}, True,
+         "gather:G-137: the bare 'x,y' string form the CLI can always pass",
+         ["read_back"], {"read_back": {"x": 12.0, "y": 7.0}}),
+        ("set_state", {"node_path": "/root/Main", "property": "position", "value": "(4, 2)"}, True,
+         "gather:G-137: parenthesised tuple form",
+         ["read_back"], {"read_back": {"x": 4.0, "y": 2.0}}),
+        ("run_method", {"node_path": "/root/Main", "method": "take_vec", "args": ["3,4"]}, True,
+         "gather:G-137: the same string tuple reaches a typed method parameter",
+         ["result"], {"result": "3.0,4.0"}),
         ("set_state", {"node_path": "/root/Main", "property": "position", "value": {"x": 0, "y": 0}}, True,
          "restore; dict vector form"),
+        ("run_method", {"node_path": "/root/Main", "method": "returns_nothing", "args": []}, True,
+         "gather:G-096: a -> void call must be distinguishable from an abort",
+         ["returned_null", "declared_return"], {"returned_null": True, "declared_return": "Nil"}),
         ("performance", {"reset_baseline": True}, True, ""),
         ("input_key", {"key": "E"}, True, "G-049: raw InputEventKey by keycode name"),
         ("input_state", {}, True, "G-021: polled pressed/strength, all project actions"),
@@ -305,7 +356,9 @@ def contract_rows():
          "rect clip in cell coordinates"),
         ("tilemap_region", {"node_path": "/root/Main/Cells", "atlas": [0, 0]}, True,
          "G-065: flood-filled components of one atlas coord"),
-        ("scripts_seen", {}, True, "G-074b: script census since launch"),
+        ("scripts_seen", {}, True, "G-074b: script census since launch", ["scripts"]),
+        ("ping", {}, True, "gather:G-115: the bus dir and user:// are reported separately",
+         ["session", "pid", "bus_dir", "user_dir"]),
         ("canvas_scale", {"node_path": "/root/Main"}, True,
          "G-073/G-075: accumulated scale + effective filter"),
         ("canvas_scale", {"node_path": "/root"}, False,
@@ -314,6 +367,38 @@ def contract_rows():
          "G-017: headless may clamp/ignore; envelope only, read-back is honest"),
         ("set_feature", {"query": True}, True, "G-033: read the flags without writing"),
         ("clear_nodes", {"group": "harness_check_no_such_group"}, True, "empty selector match"),
+        ("clear_nodes", {"class": "harness_check_no_such_class", "via_method": "die"}, True,
+         "gather:G-123: removal through the game's own path, not queue_free()",
+         ["count", "via", "skipped"]),
+        ("find_nodes", {"class": "TileMapLayer"}, True,
+         "gather:G-109: identify a node by predicate instead of one probe per child",
+         ["nodes", "count", "truncated"]),
+        ("find_nodes", {"class": "Button", "properties": ["text"], "where": {"text": "Go"}}, True,
+         "property predicate + reported property",
+         ["nodes", "count"]),
+        ("press", {"node_path": "/root/Main/Go"}, True,
+         "gather:G-119: emit `pressed` on a real BaseButton",
+         ["node_path", "type", "disabled", "button_pressed"]),
+        ("run_method", {"node_path": "/root/Main", "method": "get", "args": ["presses"]}, True,
+         "the press above actually reached the connected callable",
+         ["result"], {"result": 1}),
+        ("press", {"node_path": "/root/Main/Cells"}, False,
+         "not a button and has no button child: must refuse, not silently no-op"),
+        ("raycast", {"from": [0, 0], "to": [64, 64]}, True,
+         "gather:G-136: what a collision mask would actually hit",
+         ["clear", "mask", "mask_names"]),
+        ("raycast", {"from": [0, 0]}, False, "missing `to`: envelope only"),
+        ("get_node_bounds", {"node_path": "/root/Main/Blip"}, True,
+         "gather:G-120: a screen rect for a Sprite2D, not just a Control",
+         ["global_rect", "size_source"]),
+        ("get_state", {"node_path": "/root/Main/Blip",
+                       "properties": ["texture.resource_local_to_scene"]}, True,
+         "gather:G-110/G-117: --property walks one hop into a Resource"),
+        ("canvas_scale", {"node_path": "/root/Main/Blip"}, True,
+         "gather:G-105: which canvas a node renders into",
+         ["canvas_layer", "canvas_layer_path"]),
+        ("sample_pixels", {"rect": [0, 0, 8, 8]}, False,
+         "gather:G-121: headless has no framebuffer; envelope only"),
         ("input_press", {"action": "ui_accept"}, True, ""),
         ("input_release", {"action": "ui_accept"}, True, ""),
         ("input_tap", {"action": "ui_accept"}, True, ""),
@@ -386,7 +471,10 @@ def stage_bridge(godot, scratch, full):
 
         if full:
             passed = 0
-            for action, args, must_succeed, note in contract_rows():
+            for row in contract_rows():
+                action, args, must_succeed, note = row[:4]
+                required = row[4] if len(row) > 4 else []
+                expect = row[5] if len(row) > 5 else {}
                 timeout = 90.0 if action == "validate_all" else 15.0
                 try:
                     reply = client.send_command(scratch, action, args, timeout=timeout)
@@ -396,6 +484,19 @@ def stage_bridge(godot, scratch, full):
                 problems = check_envelope(action, reply)
                 if must_succeed and not reply.get("success"):
                     problems.append("success=false: %s" % reply.get("message"))
+                if must_succeed and required:
+                    data = reply.get("data") or {}
+                    absent = [k for k in required if k not in data]
+                    if absent:
+                        problems.append(
+                            "data is missing key(s) the client reads by name: %s "
+                            "(present: %s)" % (", ".join(absent), ", ".join(sorted(data))))
+                if expect:
+                    data = reply.get("data") or {}
+                    for key, want in expect.items():
+                        if data.get(key) != want:
+                            problems.append("data[%r] is %r, expected %r"
+                                            % (key, data.get(key), want))
                 if problems:
                     ok = fail("contract %s: %s" % (action, "; ".join(problems)))
                 else:

@@ -33,6 +33,25 @@ snapshot can see. A changed file in that set that was not otherwise observed lan
 `reached_implicit` — credited as running, kept out of `unreached`, and deliberately not
 folded into `reached`, which stays what was *observed*.
 
+**Two things that were being scored as misses and are not.** A metric that reports a
+file as unreached when it demonstrably ran does not merely lose accuracy — it teaches
+its readers to discount the number, which is worse than not printing it.
+
+* *Unit tests.* Scripts under the configured `test_dir` ran in Phase 1 and are
+  structurally incapable of appearing in a scene-tree snapshot of a game session. They
+  were being counted in the denominator anyway, so writing a test alongside a fix
+  permanently capped the ratio below 100% — the exact opposite of the intended
+  incentive. They now join `not_applicable` (sub-list `test_scripts`), the same bucket
+  their own `.uid` sidecars were already landing in. Excused, not credited: the ledger
+  cannot see Phase 1's results from here, so it does not claim they passed.
+* *Non-Node scripts.* A `RefCounted` helper held as a plain field, a `Resource`
+  subclass, an item model — none of them is ever a node's `script`, so no amount of
+  exercising them can register. A project can declare the observed Node that vouches
+  for one via `reach_aliases` in `devtools_config.json` (see `_reach_aliases`). Those
+  land in `reached_alias`, with the voucher recorded alongside in `reached_alias_via`,
+  and never in `reached` — a declaration is a project's claim, not an observation, and
+  the whole value of this field is that it does not blur the two.
+
 **The other half is whether it was worth running at all.** Reach says the harness did
 something; it cannot say the something was needed. A log that only records gaps can only
 ever recommend more harness — it has no vocabulary for *this task didn't need the tool*,
@@ -98,7 +117,25 @@ LEDGER_PATH = Path(".devtools") / "verify-runs.jsonl"
 # file dragging the rate down would make the number mean less, not more.
 REACHABLE_SUFFIXES = {".gd", ".tscn"}
 
+CONFIG_PATH = Path("addons") / "godot_selftest" / "devtools_config.json"
+
+# Mirrors run_tests.gd / lint_project.gd: same key, same default, and `""` means "this
+# project has no test dir" rather than "use the default", so the three agree on what a
+# test path is. Disagreeing here would excuse files one tool considers game code.
+DEFAULT_TEST_DIR = "res://test/unit"
+
 GRACE = 10  # seconds; git must never hang the tail end of a verify run
+
+# Config complaints are printed once per process, not once per denominator: split_reach
+# runs three times (union/worktree/branch) and a triplicated warning reads like three
+# separate faults.
+_WARNED = set()
+
+
+def _warn(msg):
+    if msg not in _WARNED:
+        _WARNED.add(msg)
+        print("verify_ledger: %s" % msg, file=sys.stderr)
 
 
 def _git(root, *args):
@@ -241,7 +278,86 @@ def load_scripts_seen(paths):
     return seen if ok else None
 
 
-def implicit_scripts(root):
+def load_config(root):
+    """The project's devtools_config.json as a dict, or `{}`.
+
+    Every read of it is a `.get` with a default, because a config written by an older
+    scaffolder legitimately predates any key added since - a missing key must degrade to
+    the old behavior, never to a crash in the middle of a verify run.
+    """
+    try:
+        cfg = json.loads((root / CONFIG_PATH).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return cfg if isinstance(cfg, dict) else {}
+
+
+def _test_dir(cfg):
+    """Repo-relative test dir, `""` if the project declares it has none."""
+    raw = cfg.get("test_dir", DEFAULT_TEST_DIR)
+    if not isinstance(raw, str):
+        _warn("devtools_config.json test_dir is not a string - using %s"
+              % DEFAULT_TEST_DIR)
+        raw = DEFAULT_TEST_DIR
+    return _norm(raw).rstrip("/")
+
+
+def _under(path, folder):
+    """Prefix match on whole path segments; `test/unit` must not swallow `test/unity`."""
+    return bool(folder) and (path == folder or path.startswith(folder + "/"))
+
+
+def _reach_aliases(cfg):
+    """`{script: (voucher, ...)}` - who has to be observed for a script to be credited.
+
+    Reach can only see a script that is some node's `script` or some node's
+    `scene_file`. A `RefCounted` helper held as a plain field, a `Resource` subclass, an
+    item model - all of them can run for the whole session and register nothing. This is
+    the project's declaration of that relationship:
+
+        "reach_aliases": {
+          "world/tile_path_finder.gd": ["world/tile_scenes/bone_worker.gd"],
+          "items/types.gd":            ["items/items.gd", "ui/inventory_panel.gd"]
+        }
+
+    A single string is accepted where a list is meant. Keys and vouchers are `_norm`ed,
+    so `res://` spellings work. The vouchers are OR-ed: the first one that was observed
+    (or is itself implicit - an autoload that always runs can honestly vouch) credits
+    the script, and *is recorded*, so a reader can see which claim was leaned on.
+
+    A voucher that was not itself reached credits nothing. That is the entire integrity
+    of the mechanism: an alias converts an observation about a Node into a statement
+    about the non-Node it owns, and with no observation there is nothing to convert.
+
+    `"*"` is accepted and means "credited whenever the run observed anything at all" -
+    for code that genuinely runs on every launch. It is deliberately the weakest form,
+    since nothing can falsify it; prefer `extension_script` or an autoload, which
+    `implicit_scripts()` credits with no per-project configuration at all. Aliases do
+    not chain: a voucher must be observed, not itself alias-credited.
+    """
+    raw = cfg.get("reach_aliases")
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        _warn("devtools_config.json reach_aliases is not an object - ignored")
+        return {}
+    out = {}
+    for key, val in raw.items():
+        if isinstance(val, str):
+            val = [val]
+        if not isinstance(val, list):
+            _warn("reach_aliases[%r] is neither a string nor a list - ignored" % key)
+            continue
+        vouchers = tuple(v if v == "*" else _norm(v)
+                         for v in val if isinstance(v, str) and v.strip())
+        if vouchers:
+            out[_norm(key)] = vouchers
+        else:
+            _warn("reach_aliases[%r] names no voucher - ignored" % key)
+    return out
+
+
+def implicit_scripts(root, cfg=None):
     """Code that runs in any launched session but owns no persistent node.
 
     Two known sources: autoload scripts declared in project.godot's `[autoload]`
@@ -269,56 +385,102 @@ def implicit_scripts(root):
                 val = val[1:]
             if val:
                 out.add(_norm(val))
-    try:
-        cfg = json.loads((root / "addons" / "godot_selftest" /
-                          "devtools_config.json").read_text(encoding="utf-8"))
-        ext = cfg.get("extension_script") or ""
-    except (OSError, ValueError):
-        ext = ""
-    if ext:
+    cfg = load_config(root) if cfg is None else cfg
+    ext = cfg.get("extension_script") or ""
+    if isinstance(ext, str) and ext:
         out.add(_norm(ext))
     return out
 
 
-def split_reach(changed, observed, implicit, root):
+def _vouched_by(path, aliases, observed, vouching):
+    """The first declared voucher for `path` that actually ran, or None."""
+    for v in aliases.get(path, ()):
+        if v == "*":
+            if observed:  # a run that observed nothing vouches for nothing
+                return "*"
+            continue
+        if v in vouching:
+            return v
+    return None
+
+
+def split_reach(changed, observed, implicit, root, cfg=None):
     """Classify one changed-set against what the run observed.
 
     Returns a dict of sorted lists:
       reached          - observed at runtime (snapshot or scripts-seen)
       reached_implicit - not observed, but autoload/extension code that runs in any
                          launched session; excluded from unreached, not added to reached
+      reached_alias    - not observed, but a `reach_aliases` voucher for it was; same
+                         treatment as implicit, and likewise never folded into reached
+      reached_alias_via- {script: the voucher that credited it}, so the claim is
+                         auditable rather than an anonymous bump in a count
       unreached        - reachable-suffix files the run never loaded
-      not_applicable   - files reach cannot speak to (wrong suffix, or deleted)
+      not_applicable   - files reach cannot speak to (wrong suffix, deleted, or a test)
       deleted          - subset of not_applicable: in the diff but gone from disk;
                          a deleted file can never be loaded, so counting it unreached
                          would manufacture a permanent miss
-    When observed is None the three observation-dependent lists are None.
+      test_scripts     - subset of not_applicable: under the configured `test_dir`.
+                         They ran in Phase 1 and cannot appear in a snapshot of a game
+                         session, so scoring them as misses charged a developer for
+                         writing a test - a permanent cap on the ratio, applied
+                         precisely to the behavior the harness wants more of
+    When observed is None the observation-dependent lists are None.
     """
+    cfg = load_config(root) if cfg is None else cfg
+    test_dir = _test_dir(cfg)
+    aliases = _reach_aliases(cfg)
+
     candidates = sorted(p for p in changed if Path(p).suffix.lower() in REACHABLE_SUFFIXES)
     skipped = sorted(p for p in changed if Path(p).suffix.lower() not in REACHABLE_SUFFIXES)
     deleted = sorted(p for p in candidates if not (root / p).exists())
-    live = [p for p in candidates if p not in set(deleted)]
+    tests = sorted(p for p in candidates if _under(p, test_dir))
+    # A test file that was also deleted belongs to both sub-lists and to one entry of
+    # not_applicable; the set keeps it from being counted twice.
+    excused = set(deleted) | set(tests)
+    live = [p for p in candidates if p not in excused]
     result = {
         "reached": None,
         "reached_implicit": None,
+        "reached_alias": None,
+        "reached_alias_via": None,
         "unreached": None,
-        "not_applicable": sorted(skipped + deleted),
+        "not_applicable": sorted(set(skipped) | excused),
         "deleted": deleted,
+        "test_scripts": tests,
     }
     if observed is None:
         return result
+    # An implicit script (autoload / extension) may vouch: it demonstrably runs in every
+    # launched session, which is the same standard an observed node meets. An
+    # alias-credited script may not - crediting off a credit chains claims until nothing
+    # in the chain is an observation.
+    vouching = observed | implicit
     result["reached"] = [p for p in live if p in observed]
-    result["reached_implicit"] = [p for p in live
-                                  if p not in observed and p in implicit]
-    result["unreached"] = [p for p in live
-                           if p not in observed and p not in implicit]
+    rest = [p for p in live if p not in observed]
+    result["reached_implicit"] = [p for p in rest if p in implicit]
+    rest = [p for p in rest if p not in implicit]
+    via = {}
+    for p in rest:
+        voucher = _vouched_by(p, aliases, observed, vouching)
+        if voucher:
+            via[p] = voucher
+    result["reached_alias"] = sorted(via)
+    result["reached_alias_via"] = via
+    result["unreached"] = [p for p in rest if p not in via]
     return result
 
 
 def _sub_reach(split):
-    """The per-denominator object stored on the row: same keys, no nesting."""
+    """The per-denominator object stored on the row: same keys, no nesting.
+
+    Keys are only ever added here, never repurposed: `stats` reads rows written by
+    every past version, and a bucket name that changed meaning would silently mix two
+    populations in one average.
+    """
     return {k: split[k] for k in
-            ("reached", "reached_implicit", "unreached", "not_applicable", "deleted")}
+            ("reached", "reached_implicit", "reached_alias", "reached_alias_via",
+             "unreached", "not_applicable", "deleted", "test_scripts")}
 
 
 # The four verdicts a run can carry. `warranted` needs a named claim, `overkill` means
@@ -388,7 +550,8 @@ def cmd_record(args, root):
     worktree = changed_worktree(root)
     branch_set = changed_branch(root)
     union = None if worktree is None else (worktree | branch_set)
-    implicit = implicit_scripts(root)
+    cfg = load_config(root)
+    implicit = implicit_scripts(root, cfg)
 
     observed = _observed(args)
     if observed is None and not args.no_reach:
@@ -402,12 +565,12 @@ def cmd_record(args, root):
 
     if args.no_reach and observed is None:
         reach_obj = None
-        u = split_reach(set(), None, implicit, root)  # keeps _reconcile inputs as None
+        u = split_reach(set(), None, implicit, root, cfg)  # _reconcile inputs stay None
     else:
-        u = split_reach(union or set(), observed, implicit, root)
+        u = split_reach(union or set(), observed, implicit, root, cfg)
         w = split_reach(worktree if worktree is not None else set(),
-                        observed, implicit, root)
-        b = split_reach(branch_set, observed, implicit, root)
+                        observed, implicit, root, cfg)
+        b = split_reach(branch_set, observed, implicit, root, cfg)
         reach_obj = _sub_reach(u)
         reach_obj["worktree"] = _sub_reach(w)
         reach_obj["branch"] = _sub_reach(b)
@@ -484,13 +647,33 @@ def _reach_line(split):
         return "reach not computed (no scene-tree / scripts-seen capture)"
     reached = split["reached"]
     implicit = split.get("reached_implicit") or []
+    alias = split.get("reached_alias") or []
+    via = split.get("reached_alias_via") or {}
+    tests = split.get("test_scripts") or []
     unreached = split.get("unreached") or []
-    total = len(reached) + len(implicit) + len(unreached)
+    total = len(reached) + len(implicit) + len(alias) + len(unreached)
     detail = "reached %d/%d changed file(s)" % (len(reached), total)
     if implicit:
         detail += " (+%d implicit: %s)" % (len(implicit), ", ".join(implicit))
+    if alias:
+        # Naming the voucher inline is the point: "+1 by alias" alone would be a number
+        # the reader has to trust, and an alias is a project's claim, not an observation.
+        detail += " (+%d by alias: %s)" % (
+            len(alias), ", ".join("%s via %s" % (p, via.get(p, "?")) for p in alias))
+    if tests:
+        # Said out loud rather than quietly dropped from the denominator - a ratio that
+        # improves without saying what left it is the kind of number this file exists
+        # to not produce.
+        detail += ("; %d test script(s) excluded (ran in Phase 1; a game session cannot "
+                   "load them): %s" % (len(tests), ", ".join(tests)))
     if unreached:
         detail += "; NOT reached: " + ", ".join(unreached)
+    elif total > len(reached):
+        # "reached 1/4" with three credited files reads as a bad run at a glance, and a
+        # number that has to be read twice to be read right is a number people stop
+        # reading. Say the conclusion out loud; the annotations above still hold the
+        # evidence, and `reached` is still only what was observed.
+        detail += "; nothing left unreached"
     return detail
 
 
@@ -504,13 +687,14 @@ def cmd_reach(args, root):
     worktree = changed_worktree(root)
     branch_set = changed_branch(root)
     union = (worktree or set()) | branch_set
-    implicit = implicit_scripts(root)
+    cfg = load_config(root)
+    implicit = implicit_scripts(root, cfg)
     observed = _observed(args)
 
-    u = split_reach(union, observed, implicit, root)
+    u = split_reach(union, observed, implicit, root, cfg)
     w = split_reach(worktree if worktree is not None else set(),
-                    observed, implicit, root)
-    b = split_reach(branch_set, observed, implicit, root)
+                    observed, implicit, root, cfg)
+    b = split_reach(branch_set, observed, implicit, root, cfg)
 
     print("worktree (this session's edits - the honest number): " + _reach_line(w))
     print("branch   (all commits since base - dilutes as the branch grows): "
@@ -521,8 +705,18 @@ def cmd_reach(args, root):
     if u["deleted"]:
         print("deleted (in the diff, gone from disk - never counted unreached): "
               + ", ".join(u["deleted"]))
+    if u["test_scripts"]:
+        print("test scripts (ran in Phase 1, invisible to a game session's scene tree - "
+              "excused, not credited: reach cannot tell you they passed): "
+              + ", ".join(u["test_scripts"]))
+    if u.get("reached_alias"):
+        via = u.get("reached_alias_via") or {}
+        print("credited by reach_aliases (declared by this project, NOT observed - a "
+              "claim the config makes, shown so you can disbelieve it): "
+              + ", ".join("%s via %s" % (p, via.get(p, "?")) for p in u["reached_alias"]))
     if u["reached"] is not None and not u["reached"] \
-            and not (u["reached_implicit"] or []) and u["unreached"]:
+            and not (u["reached_implicit"] or []) \
+            and not (u["reached_alias"] or []) and u["unreached"]:
         print("\nNo changed file was loaded at runtime. Phase 6 verdict is "
               "`insufficient`, not `warranted`, even if every check passed.")
     return 0
@@ -563,6 +757,10 @@ def cmd_stats(args, root):
     overkill_seconds = 0.0
     reached_n = unreached_n = 0
     implicit_n = 0
+    # Buckets added after 0.8.0: rows written before it have no such key, and `or []`
+    # is what keeps a mixed-vintage ledger aggregating instead of raising.
+    alias_n = 0
+    test_n = 0
     wt_reached = wt_denom = 0        # worktree denominator (0.8.0+ rows)
     br_reached = br_denom = 0        # branch denominator (0.8.0+ rows)
     per_version = defaultdict(lambda: [0, 0])
@@ -588,6 +786,8 @@ def cmd_stats(args, root):
             reached_n += len(r)
             unreached_n += len(u or [])
             implicit_n += len(reach.get("reached_implicit") or [])
+            alias_n += len(reach.get("reached_alias") or [])
+            test_n += len(reach.get("test_scripts") or [])
             slot = per_version[row.get("harness") or "?"]
             slot[0] += len(r)
             slot[1] += len(r) + len(u or [])
@@ -637,6 +837,13 @@ def cmd_stats(args, root):
     if implicit_n:
         print("       %d file(s) credited implicitly (autoload/extension - runs in "
               "every session, invisible to snapshots)" % implicit_n)
+    if alias_n:
+        print("       %d file(s) credited by reach_aliases - declared by the project, "
+              "not observed. If this outgrows the observed count, the number above is "
+              "mostly the config talking." % alias_n)
+    if test_n:
+        print("       %d changed test script(s) excluded - they ran in Phase 1, which "
+              "is not something reach can see or vouch for" % test_n)
     if no_snapshot:
         print("       %d run(s) recorded no snapshot - reach unknown, not counted" % no_snapshot)
 

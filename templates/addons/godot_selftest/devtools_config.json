@@ -5,6 +5,7 @@
   "test_dir": "res://test/unit",
   "scan_root": "res://",
   "uid_check_ignore": ["res://addons/", "res://tools/"],
+  "reach_aliases": {},
   "fps_min": 30,
   "orphan_max": 0,
   "orphan_growth_max": 20,

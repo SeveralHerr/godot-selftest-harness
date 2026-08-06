@@ -44,6 +44,7 @@ SHIPPED = [
     "tools/check_devtools_log.py",
     "tools/upstream_gaps.py",
     "tools/verify_ledger.py",
+    "tools/import_check.py",
 ]
 
 # Files that must be byte-identical to their template (this repo keeps runnable copies).
