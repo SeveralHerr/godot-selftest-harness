@@ -21,9 +21,11 @@ Exit codes (both): `0` pass, `1` findings, `2` **the runner couldn't run** — a
 verified nothing. Redirect to a file and read it back; the Windows Godot build often prints
 nothing to the console, so a failed run looks like silent success.
 Test flags (after `--`): `--filter NAME` (matches method name **or** test script filename),
-`--file NAME` (one script; combines with `--filter` via AND), `--json`. A selector matching
-nothing is exit `2` (`SELECTED NOTHING — …selected 0 of N discovered`), never a pass — check
-the `Selected: N of M discovered` line, not just the exit code.
+`--file NAME` (one script; combines with `--filter` via AND), `--json`. **Every** run prints
+`Selected: N of M discovered` — read that line, not just the exit code. `Total: 0 | ALL TESTS
+PASSED` is this harness's worst failure mode and `Selected:` is what makes a silent zero
+visible. A selector matching nothing is exit `2` (`SELECTED NOTHING — …`), and a suite with no
+`test_*` methods is exit `2` as well; neither is a pass.
 `UIDs: OK` covers both halves: no stale `uid=` reference **and** no `.gd` missing its
 `.uid` sidecar. A script you just wrote outside the editor has none — commit the sidecar
 Godot generates alongside the script.
@@ -99,30 +101,38 @@ Launch first: `godot --path . --mute &` then `sleep 5 && python tools/devtools.p
 
 | Verb | Use |
 |---|---|
-| `ping` / `quit` | Confirm bridge is live / shut game down cleanly |
-| `scene-tree` | Discover root scene name + node paths (don't assume names). Each node carries `script` and `scene_file`, so a changed file maps to the node that runs it |
-| `get-state --node PATH [--property N ...]` | Read a node's properties. **Always pass `--property`** — an unfiltered `Label` is ~120 keys. Repeatable; unknown names are reported, not dropped |
-| `set-state --node PATH --property N --value V` | Set raw property (bypasses setters/signals) |
-| `run-method --node PATH --method N --args "[...]"` | Call a method — preferred when a signal should fire |
+| `ping` | Confirm the bridge is live — reports which session answered, plus `bus_dir` and `user_dir` separately |
+| `quit` | Shut the game down; waits for the process and **exits 1 if it survived**. A survivor answers the bus alongside the next instance, and the symptom is empty replies, not an error |
+| `scene-tree [--root PATH] [--depth N]` | Discover root scene name + node paths (don't assume names). Each node carries `script` and `scene_file`, so a changed file maps to the node that runs it. `--root` lists a deep subtree that would otherwise truncate |
+| `find-nodes [--class C\|--group G\|--method M] [--where N=V] [--property N] [--root PATH]` | Locate nodes by what they *are*, not where they sit. `--where` is repeatable and takes dotted paths (`--where slot_data.item.name='Iron Bar'`). Usually the right verb for identifying one node in a large tree |
+| `get-state --node PATH [--property N ...]` | Read a node's properties. **Always pass `--property`** — an unfiltered `Label` is ~120 keys. Repeatable; dotted paths walk into Resources and Dictionaries (`texture.region`, `slot_data.item.name`); unknown names are reported, not dropped |
+| `set-state --node PATH --property N --value V` | Set raw property (bypasses setters/signals) and print the read-back. Vectors take `[x,y]`, `x,y` or `(x,y)` — write `--value=-200,-296` with an `=` when it starts with `-`, or argparse reads it as a flag |
+| `run-method --node PATH --method N --args "[...]" [--json]` | Call a method — preferred when a signal should fire. Reports `returned_null` + `declared_return`, so a `-> void` that ran is distinguishable from a call that aborted. `--json` for a pipeable envelope |
+| `press --node PATH [--toggle BOOL]` | Emit `pressed` on the nearest `BaseButton` at or under PATH — a real button press with no screen coordinates to guess. A disabled button is reported, not silently "pressed" |
+| `curve --node PATH --method M --from A --to B [--step N]` | Call a pure method over an integer range and get the whole series — a difficulty ramp as one read. Capped at **500 points** |
+| `raycast --from X,Y --to X,Y [--mask N] [--areas]` | What a ray would hit, with collision-layer names resolved. A ray that **starts inside** a shape reports nothing |
+| `sample-pixels [--rect X,Y,W,H]` | Mean + dominant colour over a screen rect — "is it still on fire?" as numbers rather than a PNG to open |
 | `node-bounds PATH` | Exact position/size (deterministic layout ground truth) |
 | `canvas-scale --node PATH` | Accumulated canvas scale + effective texture filter — the crisp/blurry question as one read |
 | `set-resolution --size W,H` | Resize the window (honest read-back; headless may clamp) |
 | `ui-snapshot` / `ui-snapshot-diff` / `save-ui-baseline` | Structured UI state vs baseline |
-| `validate-all` / `validate-ui` | Scene + UI layout validation (expect 0 issues) |
+| `validate --scene S` / `validate-all` / `validate-ui` | One scene / every scene / UI layout validation (expect 0 issues) |
 | `performance [--reset-baseline]` | FPS vs `fps_min`, orphan **growth** vs `orphan_growth_max` |
-| `input <press\|release\|tap\|clear\|list\|sequence>` | Simulate input actions. `tap` releases on the NEXT frame and replies after the release, reporting `pressed_during`/`pressed_after` |
+| `input press` `input release` `input tap` ACTION | Simulate input actions. `tap` releases on the NEXT frame and replies after the release, reporting `pressed_during`/`pressed_after` |
+| `input clear` / `input list` / `input sequence FILE` | clear everything currently held / list the project's actions / replay a JSON sequence file |
 | `input state [ACTION ...]` | Polled pressed/strength per action (all project actions when none named) — what the game is actually seeing |
 | `key NAME [--count N] [--hold-frames N]` | Raw `InputEventKey` by OS keycode name (`E`, `LEFT`, `SPACE`) — for game code reading keys directly instead of actions |
-| `touch <press\|release\|drag\|clear\|list> --index N --pos X,Y` | Real `InputEventScreenTouch`/`Drag` — the only way to exercise multi-touch |
+| `touch press` `touch release` `touch drag` `--index N --pos X,Y` | Real `InputEventScreenTouch`/`Drag` — the only way to exercise multi-touch. A drag needs `--to`; `touch clear` / `touch list` cover the held points |
 | `set-feature --touchscreen true` | Makes touch UI show itself on desktop (it hides when no touchscreen is reported). Set it **before** the scene loads. `--query` reads the flags without writing |
 | `set-game-speed N` / `wait-frames N` | Speed up / advance N physics frames |
-| `step-time --seconds N [--hold ACTION]` | Advance ~N game-seconds with `time_scale` pinned to 1.0. Physics exact; process tweens land ±1 frame — it does not pause and step the tree. `--hold` keeps an action pressed across the step and releases it at the end |
+| `step-time --seconds N [--hold ACTION]` | Advance ~N game-seconds (**60 max** — longer waits are a `wait-frames` loop or `set-game-speed`) with `time_scale` pinned to 1.0. Physics exact; process tweens land ±1 frame — it does not pause and step the tree. `--hold` keeps an action pressed across the step and releases it at the end |
 | `tilemap-cells --node PATH [--layer N] [--rect X,Y,W,H]` | Used cells with source/atlas ids as data (capped at 2000; pass `--rect`) — not a screenshot guess |
 | `tilemap-region --node PATH --atlas X,Y [--layer N] [--source-id N]` | 4-neighbor connected components of matching cells, largest first — "is this island one landmass?" as data |
 | `scripts-seen [--json]` | Every distinct script path that has entered the tree since launch; `--json` prints the full reply envelope |
-| `launch [--godot PATH] [--isolated]` | Start the game detached, logs under `.devtools/`. `--isolated` prints a fresh `--session`/`--userdata` pair to use on later calls |
-| `clear-nodes --group G` (or `--method`/`--class`) | Free matching nodes |
-| `screenshot` | Visual check only (`sleep 0.5`–`1` after a state change) |
+| `launch [--isolated] [--no-mute] [--no-wait] [-- GODOT ARGS]` | Start the game detached (logs under `.devtools/`), waiting until the bus answers. `--isolated` = private session **and** bus dir, verified before the follow-up command prints. Everything after a bare `--` is forwarded to Godot (`-- --write-movie out/f.png --fixed-fps 30`, which needs `--no-mute`). It refuses a bus a live pid already owns unless `--allow-second-instance` |
+| `clear-nodes --group G` (or `--method`/`--class`) `[--via-method NAME]` | Free matching nodes. `queue_free()` skips the game's own removal path, so a cleared enemy drops nothing and pays no xp — `--via-method die` runs it instead |
+| `new-uid [--count N] [--write PATH]` | Emit a valid `uid://`, collision-checked against the project's existing sidecars. No game, no editor, no import — the way to give a script you just wrote its `.uid` |
+| `screenshot [--region X,Y,W,H] [--hide NODE] [--hide-group G]` | Visual check only (`sleep 0.5`–`1` after a state change). Crop and hiding happen game-side inside one command, so a capture is reproducible and can't leave the HUD switched off |
 | `list-commands` | Discover all registered verbs (generic + project). `--offline` statically parses the scripts when no game is running |
 | `logs --tail N [--category C]` | Read the game's JSONL debug log directly (no bus call; works on a hung game) |
 | `harness-version` | Installed harness revision (game + client). Read it once per session — it fills the `harness:` field on every gap you log. Exits 1 on a mismatch, which means a half-refreshed install |
@@ -165,10 +175,11 @@ the combo window tests nothing the moment the readout starts fading on that time
 - **One command at a time.** The bus is one command file / one result file. Requests
   carry an id the game echoes, so a crossed reply now errors (`Crossed replies: …`)
   instead of silently returning another request's data — detection, not concurrency.
-  For *parallel* instances give each its own bus: launch with
-  `-- --devtools-session <id>` and call with `--session <id>`. `ping` then reports which
-  session answered. Buses only — a shared `user://` still shares screenshots, baselines
-  and the `.godot/` import cache, so add `GODOT_USERDATA` per instance to isolate fully.
+  For *parallel* instances give each its own bus: `launch --isolated`, or launch with
+  `-- --devtools-session <id>` and call with `--session <id>`. That isolates the **bus
+  only** — Godot has no switch for `user://`, so saves, screenshots, UI baselines and the
+  `.godot/` import cache stay shared; `ping` reports `bus_dir` and `user_dir` separately so
+  the difference is a read, not a guess. Add `GODOT_USERDATA` per instance to isolate fully.
 - **`game not running` in ~2s** means a dead game *or* the wrong `user://` dir; the
   error can't tell them apart. Check `--userdata` before assuming a crash.
 - **Assert transforms on `data.transform`, not the property dump.** Godot hides

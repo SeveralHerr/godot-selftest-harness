@@ -83,12 +83,59 @@ def _normalize_doc(text):
     return re.sub(r"\s+", " ", re.sub(r"[<>`\\|/]", " ", text))
 
 
-def _doc_has(verb, doc_text_normalized):
+def _word_in(candidate, doc_text_normalized):
+    """Word-boundary containment, so `curve` does not match inside `curves`."""
+    return re.search(r"(?<![\w-])%s(?![\w-])" % re.escape(candidate),
+                     doc_text_normalized) is not None
+
+
+def _doc_has(verb, doc_text_normalized, shadowing_families=()):
+    """Is `verb` named in this doc?
+
+    `shadowing_families` names CLI families that already contain a sub-verb of
+    the same name (`touch press`, `input press`). For a TOP-LEVEL verb that
+    collides with one, a bare occurrence proves nothing: a doc listing only
+    `touch press` used to satisfy the coverage check for a brand-new top-level
+    `press`, so the one surface meant to make docs impossible to forget silently
+    exempted exactly the names most likely to be forgotten. Such a verb must
+    appear at least once NOT immediately preceded by a shadowing family word.
+    """
     cands = {verb, verb.replace("_", "-")}
     if "_" in verb:
         family, _, sub = verb.partition("_")
         cands.add("%s %s" % (family, sub))
-    return any(c in doc_text_normalized for c in cands)
+
+    if not shadowing_families:
+        return any(_word_in(c, doc_text_normalized) for c in cands)
+
+    # Fixed-width negative lookbehinds, one per family. Python's re allows
+    # several of these in sequence where a single variable-width one is illegal.
+    guards = "".join("(?<!%s )" % re.escape(f) for f in sorted(shadowing_families))
+    return any(
+        re.search(r"(?<![\w-])%s%s(?![\w-])" % (guards, re.escape(c)),
+                  doc_text_normalized) is not None
+        for c in cands)
+
+
+def _cli_surface(text):
+    """(top_level_names, {name: set(families that also define it)}).
+
+    `subparsers.add_parser("press")` and `touch_sub.add_parser("press")` are two
+    different commands, and the bare name cannot tell them apart. The receiver
+    variable is the only thing in the source that can: `subparsers` is the root,
+    `<family>_sub` is that family's subparser.
+    """
+    top = []
+    shadows = {}
+    for receiver, name in re.findall(
+            r'(\w+)\.add_parser\(\s*"([a-z][a-z0-9-]*)"', text):
+        if receiver.endswith("_sub"):
+            shadows.setdefault(name, set()).add(receiver[:-len("_sub")])
+        else:
+            # `subparsers`, or any unrecognised receiver: treat as top level
+            # rather than silently dropping the verb from the requirement.
+            top.append(name)
+    return top, shadows
 
 
 def check_doc_fanout():
@@ -101,8 +148,15 @@ def check_doc_fanout():
     problems = []
     bus_verbs = _REGISTER_RE.findall(
         (REPO / "templates/addons/godot_selftest/dev_tools.gd").read_text(encoding="utf-8"))
-    cli_names = _ADD_PARSER_RE.findall(
+    cli_top, cli_shadows = _cli_surface(
         (REPO / "templates/tools/devtools.py").read_text(encoding="utf-8"))
+    cli_top_set = set(cli_top)
+    # Sub-verbs are still required, but only ever appear as `input clear` /
+    # `touch drag`, so the shadow guard must NOT be applied to them - it exists
+    # solely to stop a TOP-LEVEL verb from being satisfied by its sub-verb
+    # namesake. Applying it to a sub-verb demands an occurrence that should not
+    # exist and would push the docs to document a command that isn't there.
+    cli_names = cli_top + sorted(cli_shadows)
 
     if not bus_verbs:
         problems.append("doc fan-out: found no register_command() calls - regex broken?")
@@ -116,7 +170,9 @@ def check_doc_fanout():
             wanted += bus_verbs
         if scope in ("both", "cli"):
             wanted += cli_names
-        missing = sorted({v for v in wanted if not _doc_has(v, doc)})
+        missing = sorted({
+            v for v in wanted
+            if not _doc_has(v, doc, cli_shadows.get(v, ()) if v in cli_top_set else ())})
         if missing:
             problems.append("%s: undocumented verb(s): %s" % (doc_rel, ", ".join(missing)))
     return problems, len(bus_verbs), len(cli_names)

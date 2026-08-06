@@ -1,6 +1,6 @@
 {
   "name": "godot-selftest-harness",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "description": "Game-agnostic self-testing harness for Godot 4.x: a file-based DevTools automation bridge, headless lint/test runners, a diff-aware /verify workflow, and a devtools gaps log that feeds real friction back into the harness. Scaffolds into any project; each project registers its own debug commands via a documented registry extension.",
   "author": {
     "name": "jherr"

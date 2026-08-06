@@ -309,13 +309,13 @@ The core keeps these engine-generic verbs (bus `action` strings, underscored):
 
 ```
 ping, screenshot, scene_tree, validate_scene, validate_all, get_state,
-set_state, run_method, performance, quit, input_press, input_release,
+set_state, run_method, curve, performance, quit, input_press, input_release,
 input_tap, input_clear, input_actions, input_sequence, input_key, input_state,
 set_game_speed, wait_frames, step_time, clear_nodes, validate_ui,
 get_ui_snapshot, get_node_bounds, save_ui_baseline, ui_snapshot_diff,
 list_commands, touch_press, touch_release, touch_drag, touch_clear, touch_list,
 set_feature, tilemap_cells, tilemap_region, scripts_seen, canvas_scale,
-set_resolution, harness_version
+set_resolution, harness_version, find_nodes, press, raycast, sample_pixels
 ```
 
 Notable behaviors:
@@ -323,8 +323,14 @@ Notable behaviors:
 - **`clear_nodes`** is a generic replacement for game-specific "clear" verbs. It
   accepts one selector — `{"group": <name>}`, `{"method": <method_name>}`, or
   `{"class": <ClassName>}` — and frees matching descendants of the current
-  scene, returning `{"count": n}`. With **no selector** it returns
-  `success: false` with a helpful message; it never blindly frees the tree.
+  scene, returning `{"count": n, "via": ..., "skipped": [...]}`. With **no selector** it
+  returns `success: false` with a helpful message; it never blindly frees the tree.
+  `{"via_method": <name>, "via_args": [...]}` calls that method on each match instead of
+  `queue_free()`, because `queue_free()` is the wrong removal for any node whose removal
+  has game meaning: a freed enemy drops nothing, pays no xp, never increments the run
+  counter and never fires the `died` connection a boss is listening on — a test built on
+  it proves the nodes are gone and nothing else. Matches that lack the method are listed
+  in `data.skipped` and make the command fail rather than being quietly `queue_free`d.
 - **`list_commands`** returns `{"success": true, ..., "data": {"actions":
   [sorted handler names]}}` so `/verify` and the Python client can discover the
   project-registered verbs.
@@ -344,10 +350,35 @@ Notable behaviors:
   and "no script" must not look alike. They are what make `/verify`'s reach measurement
   a set intersection against the diff instead of a self-assessment, and they also save
   a round of guessing when mapping a changed `.gd` to the node path that runs it.
+  `{"root": <path>}` starts the walk at any node instead of the current scene — a
+  whole-scene snapshot hits the depth limit before it reaches a deep UI subtree, so the
+  buttons a panel had just built could not be enumerated at all. `{"properties": [...]}`
+  reports the named properties on every serialized node; `find_nodes` usually answers
+  the same question more directly.
+- **`find_nodes`** matches by `class` / `group` / `method` plus `where` (a
+  property → expected-value map, dotted paths allowed) and returns
+  `{nodes: [{path, name, type, properties}], count, truncated}`. It is `clear_nodes`'
+  selector pointed at reading instead of freeing. Identifying the Elite among an
+  `EnemySpawner`'s `@CharacterBody2D@385`, `@CharacterBody2D@388`, … children otherwise
+  cost one `get_state` round trip per child — and by the time the loop finished, the
+  engine had rotated the auto-names, so a path that answered 20 seconds earlier 404'd.
+  A node missing a `where` property is a **non-match, never an error**: the predicate is
+  meant to run across a heterogeneous subtree. `properties` (extra keys to report),
+  `root` and `limit` (default 200) narrow the answer.
 - **`get_state`** takes an optional `properties` array (the CLI's repeatable
   `--property`). Names that don't exist come back in `data["missing"]` rather than
   being silently dropped. `data["transform"]` is **always** present — see the sharp
-  edge below for why the property dump alone is not trustworthy for layout.
+  edge below for why the property dump alone is not trustworthy for layout. A **dotted**
+  name walks into Resources and Dictionaries: `texture.region`, `slot_data.item.name`.
+  Plain `--property texture` answers `<AtlasTexture#-92233719…>` — an object id — while
+  *which picture* lives one hop down, and there is no node path for a sub-resource, so
+  every Resource-shaped question used to need a bespoke project verb. A hop off a plain
+  value fails into `missing` with a reason naming the segment that ran out, so it can
+  never be read as "the value is null".
+- **Node paths round-trip.** Godot auto-names an unnamed node `@Label@249`, `scene_tree`
+  prints exactly that, and feeding the printed path back used to answer `Node not found`
+  — a node the harness had just listed was unaddressable. `_resolve_node` now falls back
+  to a literal per-segment descent, so any path the harness printed resolves.
 - **`step_time`** advances the running game by roughly N game-seconds with
   `Engine.time_scale` pinned to 1.0. Read the sharp edge below before trusting it.
 - **`touch_press` / `touch_release` / `touch_drag` / `touch_clear` / `touch_list`**
@@ -370,15 +401,79 @@ Notable behaviors:
   all-zero, so it adds no findings to an existing project.
 - **`run_method` and `set_state` coerce JSON arguments to the declared types.** JSON
   cannot carry a `Vector2`, so a `func take_vec(v: Vector2)` used to be uncallable over
-  the bus. `[x, y]` / `{"x": .., "y": ..}` (and 3-component / `r,g,b,a` forms) become
-  `Vector2`/`Vector2i`/`Vector3`/`Vector3i`/`Color` per the declared parameter type
-  (from `get_method_list()`) or the property's current type; int/float/bool/String
-  conversions are handled too. An impossible coercion **fails the command** naming both
-  types — the method is never called with a silently-wrong argument. `run_method` also
-  retries a bare node path under `/root` and echoes the path it used in
-  `data.node_path`. `set_state` **reads the property back** after the write and fails
-  with "set had no effect" (reporting `written` vs `read_back`) when a typo'd property
-  or a clamping setter swallowed the value.
+  the bus. `[x, y]` / `{"x": .., "y": ..}` / `"x,y"` / `"(x,y)"` (and 3-component /
+  `r,g,b,a` forms) become `Vector2`/`Vector2i`/`Vector3`/`Vector3i`/`Color` per the
+  declared parameter type (from `get_method_list()`) or the property's current type;
+  int/float/bool/String conversions are handled too. An impossible coercion **fails the
+  command** naming both types *and the forms it would have accepted* — the method is
+  never called with a silently-wrong argument. `run_method` also retries a bare node
+  path under `/root` and echoes the path it used in `data.node_path`. `set_state`
+  **reads the property back** after the write and fails with "set had no effect"
+  (reporting `written` vs `read_back`) when a typo'd property or a clamping setter
+  swallowed the value.
+- **`run_method` reports `returned_null` and `declared_return`.** A `-> void` that ran
+  perfectly and a `-> int` that aborted on a runtime error both come back as
+  `result: null`, and GDScript hands the bridge no exception to tell them apart. What
+  *is* knowable is what the method declared, so the reply says it: `declared_return` is
+  a `type_string()` — `"Nil"` for a `-> void` or an untyped func, `""` when the method
+  is absent from `get_method_list()` and nothing can be claimed.
+- **`curve`** calls a pure method over an integer range and returns the series:
+  `{node_path, method, from, to, step, args, arg_index}` in, `{points: [{input, value}],
+  min, max, sum}` out (`sum`/`min`/`max` are `null` for a non-numeric series).
+  Calibrating a difficulty ramp — `size_for_day`, `cost_for_parcel`, `xp_for_level`
+  across 20+ days — otherwise meant hand-evaluating the formula in prose arithmetic
+  every time anyone touched the constants; the game already knows those numbers and
+  nothing could ask it for more than one at a time. `arg_index` chooses which parameter
+  the swept value fills, so a method whose day argument is second is still sweepable.
+- **`press`** emits `pressed` on the nearest `BaseButton` at, or one level under, a node
+  path — a container path is what `scene_tree` hands you. Panels used to be verified one
+  layer below what ships: the callables (`_on_strike`) were driven through `run_method`,
+  which proves the *actions* and not the *buttons*, and a mis-wired `pressed.connect`
+  shipped green. A **disabled** button is refused rather than pressed, because a real
+  press would do nothing either and emitting anyway manufactures a state no player can
+  reach. `{"toggle": bool}` sets `button_pressed` first on a `toggle_mode` button. Data:
+  `node_path, type, disabled, button_pressed`.
+- **`raycast`** casts through the 2D physics space: `{from, to, mask, areas, exclude}`
+  in, `{clear, collider, collider_class, position, normal, mask, mask_names}` out. The
+  harness could say what tiles are where and where a node is, but nothing could say what
+  a given `collision_mask` would actually *hit*, which is the only form the question
+  takes once a project has more than one physics layer — so every project wrote its own
+  `los_probe`. `mask_names` resolves the mask against the project's own
+  `layer_names/2d_physics/*` (unnamed bits report as `layer_N`, so no bit is silently
+  dropped) because the whole bug class here is a number nobody can read. See the sharp
+  edge on rays that start inside a shape.
+- **`sample_pixels`** summarizes the rendered frame over a rect: `{rect, pixels, mean,
+  brightest, darkest, dominant, dominant_share}`, `dominant` being the most common colour
+  after quantising to 5 bits per channel. Asserting "this sprite renders blue" previously
+  meant an inline zlib/PNG reader — ~30 lines of scanline defiltering that every visual
+  assertion would have to carry. This is the same capture path `screenshot` uses,
+  summarized instead of saved.
+- **`screenshot`** takes `region: [x,y,w,h]`, `hide: [node paths]` and
+  `hide_group: [group names]`, and reports the applied `region` and the `hidden` paths.
+  The crop and the hiding happen game-side inside one command, so a store capture is
+  reproducible from the command line instead of being two `set_state` calls plus a
+  separate PIL crop. Each node's **previous** visibility is remembered, so an
+  already-hidden node is not "restored" into view, and visibility is restored on every
+  failure path too — this verb cannot leave a HUD switched off.
+- **`ping` reports `bus_dir` and `user_dir` separately**, always. When they differ the
+  bus is isolated and saves/screenshots are not; when they match nothing is isolated.
+  `launch --isolated` previously claimed an isolation it did not have and nothing could
+  contradict it, so this is a read rather than an assumption.
+- **`get_node_bounds` works on any `CanvasItem`**, not just a `Control`. It used to
+  answer `Node is not a Control`, so every visual check on a game object meant
+  rebuilding the camera transform by hand. For a `Control` the rect is
+  `get_global_rect()`; for anything else it is `get_global_transform_with_canvas()` —
+  the same transform the renderer uses, so it accounts for the camera, every ancestor's
+  scale and the `CanvasLayer` — applied to whatever extent the node can report (a
+  `Sprite2D`'s texture rect, a `CollisionShape2D`'s shape, a `TileMapLayer`'s used
+  rect). `data.size_source` names which of those produced the size; see the sharp edge
+  on `0x0`.
+- **`canvas_scale` also reports `canvas_layer` and `canvas_layer_path`.** A
+  `CanvasModulate` tints exactly one canvas, so "will that tint reach this node" is a
+  question about `CanvasLayer` ancestry — previously answered by grepping the `.tscn`
+  for every `type="CanvasLayer"` and hand-walking parents, since `scene_tree` reports
+  `script` and `scene_file` and nothing about canvases. `0` / `""` mean the root
+  viewport canvas, which is a real answer, not a missing one.
 - **`input_key`** dispatches a raw `InputEventKey` by OS keycode name (`{"key": "E"}`,
   `"LEFT"`, `"SPACE"`; optional `count`, `hold_frames`) with both `keycode` and
   `physical_keycode` set — the only way to reach game code that reads key events
@@ -423,13 +518,16 @@ Generic hyphenated subcommands mirror the bus verbs:
 
 ```
 ping, screenshot, scene-tree, validate, validate-all, get-state, set-state,
-run-method, performance, quit, logs, harness-version, launch,
+run-method, curve, performance, quit, logs, harness-version, launch,
 input <press|release|tap|clear|list|sequence|state>, key,
 touch <press|release|drag|clear|list>, set-feature, step-time,
 set-game-speed, wait-frames, clear-nodes, validate-ui, ui-snapshot,
 node-bounds, save-ui-baseline, ui-snapshot-diff, tilemap-cells,
-tilemap-region, scripts-seen, canvas-scale, set-resolution
+tilemap-region, scripts-seen, canvas-scale, set-resolution,
+find-nodes, press, raycast, sample-pixels, new-uid
 ```
+
+`new-uid` is the one subcommand that never touches the bus — see below.
 
 Notable flags:
 
@@ -445,7 +543,42 @@ Notable flags:
 - `get-state --node PATH --property NAME` — repeatable. Without it a single `Label`
   read returns ~120 keys, which is why every assertion used to be piped through an
   ad-hoc filter. A name that doesn't exist is reported explicitly rather than silently
-  omitted, so a typo can't look like a missing value.
+  omitted, so a typo can't look like a missing value. A **dotted** name walks into
+  Resources and Dictionaries: `--property texture.region`,
+  `--property slot_data.item.name`.
+- `find-nodes [--class C] [--group G] [--method M] [--where NAME=VALUE] [--property NAME]
+  [--root PATH] [--limit N]` — `--where` and `--property` are repeatable and accept
+  dotted paths (`--where slot_data.item.name='Iron Bar'`). Use it instead of a
+  `scene-tree` dump plus a `get-state` per child when the question is "which of these
+  is the one".
+- `press --node PATH [--toggle BOOL]` — emit `pressed` on the button at, or directly
+  under, `PATH`.
+- `raycast --from X,Y --to X,Y [--mask N] [--areas] [--exclude NODE]` — `--exclude` is
+  repeatable; without `--mask` every layer is tested.
+- `sample-pixels [--rect X,Y,W,H]` — mean / dominant colour over a screen rect
+  (default: the whole viewport).
+- `curve --node PATH --method NAME --from N --to N [--step N] [--args JSON]
+  [--arg-index N]` — the series a pure method produces over an integer range.
+- `scene-tree [--depth N] [--root PATH] [--property NAME]` — `--root` lists one subtree
+  instead of the whole scene (a deep UI subtree otherwise truncates); `--property` is
+  repeatable and reports that property on every node.
+- `screenshot [--filename F] [--region X,Y,W,H] [--hide NODE] [--hide-group GROUP]` —
+  `--hide` / `--hide-group` are repeatable; the crop and the hiding happen game-side in
+  one command, and previous visibility is always restored.
+- `run-method --node PATH --method NAME [--args JSON] [--json]` — `--json` prints the
+  full reply envelope (pipeable, like `cmd`), which is where `returned_null` and
+  `declared_return` are readable.
+- `clear-nodes --group/--method/--class SELECTOR [--via-method NAME] [--via-args JSON]`
+  — `--via-method` calls the game's own removal path instead of `queue_free()`.
+- `new-uid [--count N] [--write PATH]` — emit a correctly-encoded `uid://` string with
+  **no game, no editor and no import**: a pure reimplementation of
+  `ResourceUID.id_to_text()` (base 34, `a`–`z` then `0`–`9`; verified against the engine
+  on 4.6.1 for eight ids including two 63-bit ones), collision-checked against every
+  `.uid` sidecar in the project. An agent that isn't allowed to run Godot otherwise
+  hand-writes a sidecar nobody can validate — and lint's `UIDs: OK` is only reachable
+  from a tree that already compiles, which a fan-out doesn't have until every agent has
+  landed. `--write` refuses to overwrite an existing sidecar, because changing a uid
+  breaks every reference to it.
 - `performance --reset-baseline` — re-baseline the orphan count (see below). The reply
   also carries `time_scale`, `devtools_set_speed` (the last `set-game-speed` value this
   session, `null` if never) and `orphan_baseline_age_frames`, so a reading taken under
@@ -463,11 +596,35 @@ Notable flags:
   contents and connected components as data.
 - `scripts-seen [--json]` — the script census; with `--json` the full reply envelope is
   printed (what `tools/verify_ledger.py` consumes from a redirect).
-- `launch [--godot PATH] [--isolated]` — start the game detached with stdout/stderr
-  under `.devtools/` (never a pipe — an unread pipe stalls Godot on Windows). Binary
-  from `--godot`, `$GODOT_BIN`, or the config's `godot_bin`. `--isolated` exports a
-  fresh `GODOT_DEVTOOLS_SESSION` and `GODOT_USERDATA` and prints the
-  `--session`/`--userdata` to pass on subsequent calls. Prints the PID.
+- `launch [--godot PATH] [--isolated] [--no-mute] [--no-wait]
+  [--allow-second-instance] [-- GODOT ARGS]` — start the game detached with
+  stdout/stderr under `.devtools/` (never a pipe — an unread pipe stalls Godot on
+  Windows). Binary from `--godot`, `$GODOT_BIN`, or the config's `godot_bin`. Prints
+  the PID.
+  - `--isolated` gives the instance a fresh session id **and its own bus directory**
+    (passed as `-- --devtools-busdir <dir>`, which the autoload honours), then proves
+    that bus answers a `ping` **before** printing the `--session … --userdata …`
+    follow-up command — a bus that never answered prints the stderr tail and exits 1
+    instead, because a follow-up command that would not work is worse than none. It
+    does not move `user://`; the output labels that line `SHARED`, and the sharp edge
+    below says why.
+  - Everything after a bare `--` is forwarded to the Godot command line, so a run
+    needing an engine flag no longer has to re-implement launching:
+    `devtools.py launch --no-mute -- --write-movie out/frame.png --fixed-fps 30`.
+  - `--no-mute` opts out of `--mute`: a `--write-movie` run records the audio bus, and
+    a muted run captures silence.
+  - `launch` **refuses to join a bus a live pid already owns** — two instances
+    answering one bus is silent corruption — naming the pid and session in the error.
+    A *dead* owner file is cleared rather than obeyed, since that is the normal
+    post-crash state. `--allow-second-instance` overrides the refusal.
+  - `--no-wait` returns as soon as the process is spawned, without proving the bus
+    answers.
+- `quit [--exit-code N] [--wait SECONDS]` — sends the quit and then **waits for the pid
+  in the owner file to actually go** (default 10 s), exiting **1** on a survivor with
+  the `taskkill`/`kill -9` line to run. `quit` was not reliably fatal: three separate
+  times the old process was still alive after a relaunch (once at 1.4 GB), and the only
+  symptom was verbs returning empty output while `ping` said `No response` — which
+  reads as *no* game rather than as *two*.
 - `list-commands --offline` — no running game: statically parse `register_command(`
   names from the installed core and the config's extension script, labeled
   generic/project (a text scan, not runtime truth).
@@ -487,7 +644,13 @@ Two subcommands make project verbs first-class without touching the CLI:
 - `harness-version` — prints the installed revision game-side and client-side. Exits 1
   if they disagree, or if the running build predates the verb entirely (which names the
   fix: re-run `/scaffold-godot-harness`). Use it to fill the `harness:` field when
-  logging a gap.
+  logging a gap. **It answers with a cold bridge too**: with no game running it reports
+  this client's version and the addon's `HARNESS_VERSION` read off disk, and marks the
+  *running* build `unknown` rather than failing. Every gaps-log entry is written after
+  the session is over — exactly when the bridge is down — so failing the whole verb made
+  the field it exists to fill unfillable at the only moment anyone fills it, and the
+  value got copied from a neighbouring entry instead. A disk-level mismatch still
+  exits 1.
 
 ### Parallel verification (`--session`)
 
@@ -586,6 +749,51 @@ green-lights orphaned code, and both report clean. It is a heuristic — signal
 callbacks, `call()`-by-name, and `@export` hooks produce false positives — so it is
 opt-in and advisory.
 
+The **global class cache** check runs before the compile pass, on purpose. Every
+top-level `class_name` in the scanned scripts is compared against
+`res://.godot/global_script_class_cache.cfg`; a class the cache doesn't know is an
+`ERROR` (`class_cache_stale`), and it prints *above* the compile results it explains.
+One missing entry — the normal state after a rebase, a pull, or a branch switch —
+cascades into `Could not find type "X" in the current scope` in files nobody touched;
+one such run produced 135 bogus parse errors. The fix is one line, and lint now names
+it: `godot --headless --path . --import`. No cache file at all is a *different*
+condition (a fresh clone that has never been imported) and gets one advisory line
+(`class_cache_missing`), not one finding per class.
+
+The **string-literal reference** check (`string_ref_unresolved`) flags the name inside
+`has_method("x")` / `has_signal("x")` / `emit_signal("x")` / `call("x")` /
+`call_deferred("x")` / `connect("x", …)` when no `func x` and no `signal x` exists
+anywhere in the project and `ClassDB` knows no such engine member. It is the
+`--find-orphans` scan pointed the other way — references that declare nowhere — and it
+is always on, because the entire failure mode is that nobody knew to look. It is
+**advisory** and always will be; see the sharp edge below for what it structurally
+cannot see.
+
+### `tools/import_check.py`
+
+`godot --headless --path . --import` exits `0` whether or not the scripts it just
+re-scanned compile. A real run:
+
+```
+import exit=0
+SCRIPT ERROR: Parse Error: Cannot infer the type of "walk" variable
+   at: GDScript::reload (res://player/player.gd:446)
+ERROR: Failed to load script "res://items/items.gd" with error "Parse error".
+```
+
+"The class cache was regenerated" and "the project still parses" are the same exit
+code, so a broken game reports as a clean import — and the tool you ran *to fix* a
+`class_name` cascade is the one that told you it had succeeded. `import_check.py` runs
+the same import, captures stdout and stderr to `.devtools/import.log`, scans it for the
+signals Godot only prints on a real failure (`SCRIPT ERROR`, `Parse Error`,
+`Failed to load script`, `Compilation failed` — literal, case-insensitive substrings,
+each taken from captured output), and **quotes the findings back rather than counting
+them**. Exit codes follow the harness convention: `0` clean, `1` the import ran and the
+output contains parse/load errors, `2` couldn't run at all (no binary, no
+`project.godot`, no captured output, a crash, or a timeout). Binary resolution matches
+`devtools.py launch`: `--godot` → `$GODOT_BIN` → the config's `godot_bin`. Flags:
+`-p/--project`, `--godot`, `--json`.
+
 ### The run ledger (`tools/verify_ledger.py`)
 
 Phase 5 appends one row per `/verify` run to `.devtools/verify-runs.jsonl`, including
@@ -616,6 +824,22 @@ passed". `stats` breaks reach out per harness version, which is what tells you w
 release improved anything or just felt like it. Files reach cannot speak to (`.cfg`,
 shaders, `project.godot`) are recorded as `not_applicable` rather than counted as
 misses; runs with no snapshot record reach as `null`, never as zero.
+
+Two things that were being scored as misses no longer are — a metric that reports a file
+as unreached when it demonstrably ran doesn't merely lose accuracy, it teaches its
+readers to discount the number:
+
+- **Scripts under `test_dir`** ran in Phase 1 and are structurally incapable of appearing
+  in a scene-tree snapshot of a game session. Counting them in the denominator meant
+  writing a test alongside a fix permanently capped the ratio below 100% — precisely the
+  wrong incentive. They now join `not_applicable` (sub-list `test_scripts`). Excused, not
+  credited: the ledger cannot see Phase 1's results, so it makes no claim they passed.
+- **Scripts credited by `reach_aliases`** land in `reached_alias`, with the voucher
+  recorded in `reached_alias_via` and printed inline (`+1 by alias: X via Y`) so the
+  claim is auditable rather than an anonymous bump. Never folded into `reached` — an
+  alias is a project's declaration, not an observation, and the whole value of the field
+  is that it doesn't blur the two. Aliases don't chain: a voucher that was itself only
+  alias-credited credits nothing.
 
 Each row also carries the run's `value` verdict, its `expected` prediction, and its
 `cheaper_alternative` — the countable form of the log's `Value:` block, so "how often was
@@ -668,8 +892,15 @@ names only, so `--filter spawner` against a brand-new `test_enemy_spawner.gd` se
 nothing, skipped the entire suite, and printed `Total: 0 | Passed: 0 | Failed: 0` with exit
 `0` — byte-identical to a clean run for anything grepping the exit code. Two agents in one
 session shipped work on the strength of that output. The runner now matches filenames too,
-reports `Selected: N of M discovered` whenever a selector is in play, and treats a
-zero-selection (or discovering no test scripts at all) as "nothing was verified".
+and treats a zero-selection as "nothing was verified". So do two neighbouring cases:
+discovering **no test scripts at all**, and discovering scripts that hold **no `test_*`
+methods between them** — both exit `2`, because "the suite is empty" and "the suite
+passed" are the same sentence otherwise.
+
+`Selected: N of M discovered` is printed on **every** run, not only when a selector is in
+play (it reads `(no selector)` then). A line that only appears under a filter is a line
+nobody learns to read, and the number it carries is the one that distinguishes a real
+pass from an empty one.
 
 ### What the test runner cannot catch
 
@@ -718,6 +949,45 @@ Run it after any script/scene/gameplay change, before committing.
   Godot's `Tween` default — land within about one frame. Compare the returned
   `process_seconds` against `seconds_requested` rather than assuming, and use
   `TWEEN_PROCESS_PHYSICS` when the sample point actually matters.
+- **`launch --isolated` isolates the bus, and only the bus.** Godot resolves `user://`
+  inside the engine and honours no flag for it, so screenshots, save files and UI
+  baselines are still shared with every other instance. The previous version printed a
+  temp `userdata:` path as though it had moved them; nothing ever wrote there, and the
+  follow-up command it printed failed with `game not running`. The claim is now exactly
+  as large as the behaviour, and `ping` reports `bus_dir` and `user_dir` separately so
+  the difference is checkable rather than trusted. For real isolation give each instance
+  its own userdata directory as well (see *Parallel verification* above).
+- **`run_method`'s `returned_null` cannot tell "returned null" from "aborted".**
+  GDScript raises nothing the bridge can catch, so a `-> void` that ran and a `-> int`
+  that hit a runtime error are indistinguishable from the reply alone.
+  `declared_return` says what the method *declares*, which is as far as the engine
+  allows; `[ERR]` / `[SCRIPT ERROR]` on the game's stderr is still the only evidence of
+  the abort.
+- **A ray that starts inside a collision shape reports nothing.** That is the engine's
+  behaviour and `raycast` inherits it — its `clear` message says so out loud — so five
+  bisecting probes can all come back `clear` with a wall sitting between them. Start the
+  ray outside the geometry you are asking about.
+- **`node-bounds` on a non-`Control` derives the extent, and `0x0` means "unknown".** A
+  `Control` reports its own `get_global_rect()`; anything else is the canvas transform
+  applied to whatever the node can report about itself. When it can report nothing, the
+  rect is a correct origin with a **zero size** — "where on screen is this" answered,
+  "how big is it" not. That is not the same claim as "this node is zero-sized", and
+  `data.size_source` is what tells them apart (`Control.get_global_rect`,
+  `canvas transform x Sprite2D texture rect`, `… x origin only (this class reports no
+  extent)`).
+- **The unresolved-string-reference lint is advisory and structurally blind to common
+  names.** It suppresses anything `ClassDB` knows on *any* engine class, so `open`,
+  `close`, `start`, `stop`, `play` and `clear` can never be flagged — some engine class
+  owns each of them, and suppressing engine names suppresses these too. It is also blind
+  to names built by concatenation or held in variables (no finding, and no claim they
+  were checked), to `cb.call("player")` on a `Callable` — where the literal is *data*,
+  not a method name, and no text scan can tell the difference — and to GDExtension/C#
+  members and built-in Variant methods, which live outside `ClassDB`. `call` is the
+  honest reason the rule is advisory rather than an error: a noisy new ERROR would teach
+  projects to stop reading lint output, which is worse than the gap.
+- **`curve` is capped at 500 points and `step-time` at 60 game-seconds.** The bus serves
+  one command at a time, so a typo'd range would wedge it for everyone. Both refuse with
+  the cap named rather than truncating silently.
 - **Registry-extension lifetime.** The core must keep a live reference to the
   instantiated extension (`var _extension`). If it lets the `RefCounted` go out
   of scope, the bound `Callable`s are freed and every project verb silently
