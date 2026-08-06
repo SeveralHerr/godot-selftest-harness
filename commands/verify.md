@@ -113,7 +113,7 @@ git diff HEAD --stat
 | (c) Only `static func`s or `const` tables that existing unit tests cover | **Headless-only** | Phase 1 (import gate + lint + tests). Skip runtime; the Phase 6 entry must **name which tests** stood in for runtime. |
 | Anything else — instance methods, signals, scenes, exports, node paths, config | **Full run** | All phases. |
 
-Rules: when in doubt, full run. Tier (c) requires you to have *checked* the tests exist and exercise the changed functions (`--filter` them in Phase 1), not assumed it. Tiers (b) and (c) still write a ledger row in Phase 5 — use `--no-reach` (there is no session to observe) and `value: overkill` with `cheaper_alternative` naming the tier.
+Rules: when in doubt, full run. Tier (c) requires you to have *checked* the tests exist and exercise the changed functions (`--filter` them in Phase 1), not assumed it. Tiers (b) and (c) still write a ledger row in Phase 5 — use `--no-reach` (there is no session to observe) and `value: overkill` with `cheaper_alternative` naming the tier. Record `found: []` unless the lint or test gate actually caught something, in which case record that finding with its `phase` — a tier that catches a real defect is the strongest possible evidence the cheaper tier was the right call.
 
 ## Phase 1: Headless Gates — Import, Lint & Unit Tests (no game running)
 
@@ -385,6 +385,8 @@ For each significant change in the diff, design a test that:
 
 Also test at least one guard/edge case per behavior (e.g. the effect must NOT happen when a precondition is absent). Report each test with a name, what it verified, and pass/fail.
 
+**Record a check's FIRST observation, not its final state.** If a check fails, you fix the code, and it then passes, that check is recorded `"result": "fail"` with `"fixed_in_run": true` — *not* `pass`. A `verdict: pass` run containing failed checks is a normal, correct, and highly informative row: it is what a run that did its job looks like. Rewriting the check green once the bug is gone erases the only evidence the run was worth doing — the first 52 runs recorded in anger produced 319 checks and not one `fail`, while their prose described real defects caught. Whatever you fix between writing a check and finishing the run belongs in `found` (Phase 5).
+
 **Generic worked example** — suppose the diff adds a method `apply_damage(amount)` to a node that reduces a `health` property and emits a `health_changed` signal, but only while `is_alive` is true:
 
 ```bash
@@ -458,9 +460,12 @@ cat > .devtools/run.json <<'EOF'
  "tests": {"exit": 0, "total": 111, "failed": 0},
  "runtime": {"launched": true, "scene": "<root scene>",
              "fps": 58.2, "orphan_growth": 3, "orphan_growth_exceeded": false},
- "checks": [{"name": "<Phase 4 test name>", "result": "pass"}],
+ "checks": [{"name": "<Phase 4 test name>", "result": "pass"},
+            {"name": "<a check that failed first>", "result": "fail", "fixed_in_run": true}],
  "duration_s": 94,
  "expected": "<the Phase 4 Step 1 prediction, verbatim>",
+ "found": [{"what": "<what this run caught that the diff alone would not have>",
+            "phase": "runtime", "static_would_have_caught": false}],
  "value": "warranted",
  "cheaper_alternative": "<what would have given the same confidence for less, or 'nothing'>"}
 EOF
@@ -471,11 +476,13 @@ EOF
   --run .devtools/run.json
 ```
 
-`value` is `warranted`, `overkill`, `insufficient`, or `inconclusive` — the same verdict Phase 6 writes up in prose, recorded here as an enum so it is countable. `record` downgrades a `warranted` whose changed files were never loaded, and says so on stderr. Leaving `cheaper_alternative` blank also draws a warning: it is the field that can say the harness was the wrong tool, and therefore the easiest one to skip.
+**`found` is required, and `[]` is a real answer.** It is the list of things this run caught that reading the diff would not have — one entry each, `{"what": ..., "phase": "import"|"lint"|"tests"|"runtime"|"other", "static_would_have_caught": true|false}`. Every other field in the row describes the run's *end state*, so a defect you found at minute four and fixed at minute six is invisible everywhere else: the checks get written green, the runners re-run clean, and the row is indistinguishable from one where nothing was ever wrong. Write `"found": []` when the run genuinely confirmed what you already knew — that is the honest answer and it is what `overkill` means. Omitting the key entirely records `null` (unrecorded) and draws a warning; it is not a synonym for empty.
+
+`value` is `warranted`, `overkill`, `insufficient`, or `inconclusive` — the same verdict Phase 6 writes up in prose, recorded here as an enum so it is countable. `record` downgrades a self-reported `warranted` on two grounds, and says so on stderr: one whose changed files were never loaded becomes `insufficient`, and one whose `found` is empty becomes **`overkill`** — a run that caught nothing confirmed what was already known, whatever it felt like at the time. Do not pad `found` to keep the verdict: an `overkill` row is a useful row, and the pattern across many of them is the only thing that can tell you to run `/verify` less often. Leaving `cheaper_alternative` blank also draws a warning: it is the field that can say the harness was the wrong tool, and therefore the easiest one to skip.
 
 `verdict` is `pass`, `fail`, **`aborted`** (the import gate or a runner exited `2`, or the game never came up — never file it as a pass), or **`partial`** — which `record` sets itself, downgrading a reported `pass` whenever any check in `checks` has `"result": "blocked"`: a check that could not run is not a check that passed. Mark checks you could not execute as `blocked` rather than omitting them.
 
-Each check is `{"name": ..., "result": "pass"|"fail"|"blocked"}`.
+Each check is `{"name": ..., "result": "pass"|"fail"|"blocked"}`, plus `"fixed_in_run": true` on a check that failed and was repaired before the run ended. Per Phase 4, `result` is the check's **first** observation — do not rewrite it green because the bug is now gone.
 
 The row has no `import` field — `record` keeps only the keys above and silently drops any others, so do not invent one. An import-gate failure lands in `verdict`; name the gate that failed in the summary prose instead.
 
@@ -503,6 +510,7 @@ Append an entry to `log-devtools.md` at the project root (create it if missing).
 - Value: **<warranted|overkill|insufficient|inconclusive>** — <one sentence of why>
   - Expected: <the prediction you wrote in Phase 4 Step 1, copied verbatim>
   - Got: <what runtime actually told you — quote the assertion, not "it passed">
+  - Found: <what this run caught that reading the diff would not have, or "nothing">
   - Cheaper: <the cheapest thing that would have given the same confidence>
 
 - Gap: **<what was missing>** — <the command run, the output it gave, the workaround used>
@@ -514,19 +522,20 @@ Append an entry to `log-devtools.md` at the project root (create it if missing).
 
 | Verdict | When |
 |---|---|
-| `warranted` | Runtime produced a claim the diff could not. Name it specifically — "the tween rests at 0.85, not 1.0", not "verified the animation". |
-| `overkill` | Everything passed and confirmed what was already known. Renames, comments, constants, pure refactors, and anything lint alone settled belong here. |
+| `warranted` | Runtime produced a claim the diff could not. Name it specifically — "the tween rests at 0.85, not 1.0", not "verified the animation". **Requires a non-empty `found`**; Phase 5 downgrades a `warranted` with `found: []` to `overkill` automatically. |
+| `overkill` | Everything passed and confirmed what was already known. Renames, comments, constants, pure refactors, and anything lint alone settled belong here. This is the verdict for `found: []`. |
 | `insufficient` | It ran but could not reach or assert the thing that mattered. **Reach from Phase 5 decides this, not your impression** — if the changed file was never loaded, the verdict is `insufficient` even when every check passed, and a `reach_aliases` credit is a declaration rather than an observation, so it does not rescue one. File the gap. |
 | `inconclusive` | Aborted (a runner exit `2` from the import gate, lint, or the test runner, or the game never came up), or the change was too small to judge. |
 
-Two rules that keep this honest:
+Three rules that keep this honest:
 
 1. **Copy `Expected:` from Phase 4 verbatim.** Do not rewrite it to match what you found. A prediction edited after the fact is worse than no prediction, because it reads as evidence.
-2. **`Cheaper:` must name something concrete** — "reading `player.gd:40-60`", "the existing unit test", "lint alone, 4s", or "nothing, this needed the running game". "Probably still worth it" is not an answer to the question.
+2. **`Found:` counts what you fixed mid-run.** A bug this run surfaced and you repaired before Phase 5 is exactly what belongs here — it is invisible in every other field, since the checks end green and the runners end clean. If nothing surfaced, write "nothing" and take the `overkill`.
+3. **`Cheaper:` must name something concrete** — "reading `player.gd:40-60`", "the existing unit test", "lint alone, 4s", or "nothing, this needed the running game". "Probably still worth it" is not an answer to the question.
 
 `overkill` is the verdict that will be under-reported, because a run that passed feels like a run that helped. If a stretch of entries contains no `overkill` at all, suspect the log before believing the harness.
 
-Both facts also go into the ledger row in Phase 5 (`value` and `cheaper_alternative`), which is what makes them countable across runs rather than only readable one at a time.
+All three also go into the ledger row in Phase 5 (`found`, `value`, `cheaper_alternative`), which is what makes them countable across runs rather than only readable one at a time.
 
 The `[G-NNN]` status line is required — it is what lets a later reader tell an open gap from one fixed two versions ago:
 

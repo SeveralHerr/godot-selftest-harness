@@ -29,6 +29,7 @@ distinguishable from a forgotten log.
 - Value: **<warranted|overkill|insufficient|inconclusive>** — <one sentence of why>
   - Expected: <what you wrote down *before* the run that runtime would reveal>
   - Got: <what it actually told you — quote the assertion, not "it passed">
+  - Found: <what this run caught that reading the diff would not have, or "nothing">
   - Cheaper: <the cheapest thing that would have produced the same confidence>
 
 - Gap: **<what was missing>** — <evidence: the command run, the output it gave, the
@@ -46,14 +47,22 @@ recommend improvements forever without noticing that the tool was the wrong choi
 
 | Verdict | Means | What it should change |
 |---|---|---|
-| `warranted` | Runtime told you something the diff could not. **Name the specific claim.** | Nothing — this is the harness working. |
-| `overkill` | The change was verifiable more cheaply; the run confirmed something never in doubt. | Invoke `/verify` less for this shape of change. |
+| `warranted` | Runtime told you something the diff could not. **Name the specific claim**, and record it under `Found:`. | Nothing — this is the harness working. |
+| `overkill` | The change was verifiable more cheaply; the run confirmed something never in doubt. This is the verdict when `Found:` is "nothing". | Invoke `/verify` less for this shape of change. |
 | `insufficient` | It ran, but couldn't reach or assert the thing that actually mattered; you shipped on something weaker. | File the gap — this is where the harness needs work. |
 | `inconclusive` | Aborted, or the change was too small to judge. | Nothing. Don't inflate it to `warranted`. |
 
 `overkill` and `insufficient` are the two verdicts that teach, and they point opposite
 ways: one says use it less, the other says fix it. If neither ever appears, the log is
 flattering the tool rather than measuring it.
+
+**`Found:` is the half that survives a fix.** Every other line here describes how the run
+came out, so a bug the run surfaced and you repaired before writing the entry disappears
+completely — the checks end green, the runners end clean, and the entry reads exactly like
+one where nothing was ever wrong. That is the single biggest way this log undercounts its
+own tool. Write what you fixed *because* of the run, however small; write "nothing" when
+that is true and take the `overkill`. `/verify` Phase 5 records the same thing as the
+countable `found` field in the ledger, and downgrades a `warranted` that found nothing.
 
 **Write `Expected:` before the run, not after.** One line during Phase 4 Step 1, naming
 what runtime should reveal that reading the diff cannot. It costs nothing and it is the
@@ -111,6 +120,8 @@ someone could disagree with it:
   - Got: `get-state --property scale` read `0.85` at rest; `data.transform` confirmed it.
     The diff looks correct — `scale` is never written back because the tween is `EASE_OUT`
     on a property the parent container overwrites.
+  - Found: the orb rests at 0.85 instead of 1.0 after every hit. Fixed in this run by
+    tweening the container's own scale; the check that caught it stays recorded `fail`.
   - Cheaper: nothing. Reading the file is what produced the wrong belief in the first place.
 ```
 
@@ -123,6 +134,7 @@ failed. The run was still not worth its 90 seconds:
 - Value: **overkill** — a pure rename with no runtime behavior to observe.
   - Expected: nothing specific; ran /verify out of habit because scripts changed.
   - Got: all checks passed, reach 3/3. Confirmed only what lint already proved.
+  - Found: nothing.
   - Cheaper: `lint_project.gd` alone, ~4s. The 90s launch + entry hook bought nothing.
 ```
 

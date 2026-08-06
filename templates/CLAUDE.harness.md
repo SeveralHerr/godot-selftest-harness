@@ -52,6 +52,7 @@ block is required either way.
 - Value: **<warranted|overkill|insufficient|inconclusive>** — <one sentence of why>
   - Expected: <what you predicted runtime would reveal, written before running it>
   - Got: <what it actually told you — quote the assertion, not "it passed">
+  - Found: <what this run caught that reading the diff would not have, or "nothing">
   - Cheaper: <the cheapest thing that would have given the same confidence>
 
 - Gap: **<what was missing>** — <the command run, the output it gave, the workaround used>
@@ -69,6 +70,13 @@ asserted what mattered (**reach decides this, not your impression**); file the g
 unwritten, because a run that passed feels like a run that helped. `Cheaper:` must name
 something concrete — "reading `player.gd:40-60`", "lint alone, 4s", "nothing, this needed
 the running game". "Probably still worth it" is not an answer.
+
+**`Found:` counts a bug you fixed mid-run.** Every other field describes how the run
+*ended*, so a defect surfaced at minute four and repaired by minute six vanishes: the
+checks end green, the runners end clean. Write it here or it is not recorded anywhere.
+"nothing" is the honest answer for a run that confirmed what you already knew, and Phase 5
+turns a `warranted` with nothing found into `overkill` automatically — so padding it buys
+nothing.
 
 The `[G-NNN]` line is required and is what makes the log answerable: ids are stable and
 never reused, `status:` is `open`/`fixed`/`wontfix` (`fixed` adds `fixed-in: X.Y.Z`),
@@ -92,9 +100,13 @@ The field worth reading is **reach**: computed by intersecting the diff against 
 `script`/`scene_file` paths in a `scene-tree` snapshot, so it says whether a run actually
 loaded the code it claimed to verify rather than asking the run to grade itself. A pass
 on an unreached file is a statement about the diff, not the running game — report it that
-way. Each row also carries the `value` verdict above, so "how often was this overkill?"
-is a query. `python tools/verify_ledger.py stats` reads the history back; `reach`
-computes reach alone without writing a row. Commit the ledger.
+way. Each row also carries the `value` verdict above and **`found`** — the list of what
+the run caught, `[]` when it caught nothing — so both "how often was this overkill?" and
+"how often did it tell me something?" are queries rather than reading exercises. A Phase 4
+check that failed and was fixed keeps `"result": "fail"` with `"fixed_in_run": true`;
+rewriting it green erases the run's own evidence. `python tools/verify_ledger.py stats`
+reads the history back; `reach` computes reach alone without writing a row. Commit the
+ledger.
 
 ### Command cheat-sheet (`python tools/devtools.py <verb>`)
 Launch first: `godot --path . --mute &` then `sleep 5 && python tools/devtools.py ping`.

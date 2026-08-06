@@ -2357,3 +2357,125 @@ made by reading the code, not by re-running each gap's original failure. That is
     `.godot/` a per-invocation name so two runs cannot share an import cache. A `--worktree`
     flag for the deliberate case of validating uncommitted edits keeps today's behaviour
     available where it is wanted.
+
+---
+
+## 2026-08-05 — The ledger could not see what the harness caught (0.10.0)
+
+A question about whether the harness is improving turned into a measurement of it. The
+answer came from `verify_ledger.py stats` against `../gather`, which is the good news:
+the instrument existed and had 52 real rows in it. The bad news is what it said.
+
+- Gap: **the ledger records a run's end state, so a defect found and fixed mid-run leaves
+  no trace anywhere.** Every field describes how the run came out. A bug surfaced at
+  minute four and repaired by minute six ends with `checks` written green, lint and tests
+  re-run clean, and a row byte-identical in shape to one where nothing was ever wrong.
+  Across 52 runs the ledger therefore recorded **319 Phase 4 checks with not one `fail`**,
+  zero new lint findings, zero failing tests — while 98% of those same runs graded
+  themselves `warranted`, on the strength of catches that survived only as prose in
+  `cheaper_alternative`.
+
+  Evidence, before the fix:
+  ```
+  $ python tools/verify_ledger.py stats
+  runs: 52  (partial 8 | pass 44)
+  runs where a runtime check caught something: 0 (0%)
+  runs where only lint/tests caught something: 0
+  was it worth running?
+    warranted      51  (98%)
+    insufficient    1  (2%)
+
+  Not one run in 52 judged itself overkill. That is possible, and it is also what a log
+  that flatters the tool looks like - check the entries before believing the number.
+  ```
+  The tool was already saying the number was untrustworthy. It could not say why, because
+  the field that would have explained it did not exist — the strongest single piece of
+  evidence in the whole ledger ("both defects found were invisible to lint and to all 464
+  unit tests") is a sentence in a free-text field, uncountable and unqueryable.
+  - [H-022] status: fixed | fixed-in: 0.10.0 | seen: 1 | harness: 0.9.0
+  - Improvement (done): a `found` field — a list of `{what, phase,
+    static_would_have_caught}`, with `[]` meaning *this run caught nothing* and `null`
+    meaning unrecorded, kept rigorously distinct. `stats` gained a "did it tell you
+    anything?" block reporting the hit rate, the phase split, and the share of findings
+    that lint and tests would **not** have caught, which is the number that justifies
+    launching a game at all. Rows predating the field are excluded from the rate rather
+    than scored as zeros.
+
+- Gap: **`value` had one mechanical gate where it needed two, so `warranted` was
+  effectively unfalsifiable.** `_reconcile_value()` downgraded a `warranted` whose changed
+  files were never loaded, which catches the run that saw nothing — but nothing at all
+  contradicted a run that saw the code, found it fine, and called that warranted anyway.
+  With 51 of 52 rows self-graded `warranted` and zero `overkill`, the enum had stopped
+  discriminating; a field that only ever takes one value is not a measurement.
+  - [H-023] status: fixed | fixed-in: 0.10.0 | seen: 1 | harness: 0.9.0
+  - Improvement (done): a second downgrade, `warranted` + `found: []` → `overkill`, with
+    the original preserved in `value_reported` like the existing one. Deliberately keyed
+    on `[]` and never on `null`: coercing an unrecorded field would be scoring a silence,
+    and every pre-0.10.0 row is silent forever. `stats` also now calls out a pile of
+    `warranted` rows carrying no `found` at all — the shape where the claim is present and
+    its evidence is not.
+
+- Gap: **`/verify` told Phase 4 to report checks, and never said *when*, so they were all
+  written at the end.** Nothing in the workflow was wrong, exactly; a check recorded after
+  the fix is a truthful description of the final state. It is also the mechanism behind
+  319 checks and zero fails, and it means the runs that did the most work look identical
+  to the ones that did the least.
+  - [H-024] status: fixed | fixed-in: 0.10.0 | seen: 1 | harness: 0.9.0
+  - Improvement (done): Phase 4 now specifies a check records its **first** observation,
+    with `fixed_in_run: true` on one that was repaired during the run — making
+    `verdict: pass` with failed checks a normal and informative row rather than an
+    unrepresentable one. This is a discipline, not a gate: no script can tell a check
+    written before a fix from one written after.
+
+- Gap: **`CLAUDE.md` described a validation gate that had already been built.** The
+  "Validating a template change" section said nothing checks the templates before they
+  ship and gave a four-step manual procedure, citing `tools/check_templates.sh` as the gap
+  that would close it. `tools/check_templates.py` exists, does all four steps plus a real
+  bridge round-trip, and passes. A doc describing the repo's own verification discipline
+  had drifted from the repo — the exact failure the harness exists to prevent, one level
+  up.
+  - [H-025] status: fixed | fixed-in: 0.10.0 | seen: 1 | harness: 0.9.0
+  - Improvement (done): the section now names the command, lists its five stages, and says
+    to run it before committing anything under `templates/`.
+
+- Gap (open): **the honest reach number is going down and nothing flags a regression.**
+  `stats` breaks reach out per harness version — `0.7.0 60% (220/366)` → `0.8.0 55%
+  (193/354)` — which is exactly the comparison it was built for, but reading it requires
+  someone to run `stats` and notice. Two versions is not yet a trend, and there is no
+  point at which the tool says so itself.
+  - [H-026] status: open | seen: 1 | harness: 0.10.0
+  - Improvement: have `stats` compare the newest harness version's reach against the
+    previous one and print a regression line when it drops by more than a few points with
+    a comparable denominator. The data is already in the aggregate; only the sentence is
+    missing.
+
+- Gap (open): **nothing counts which of the 48 verbs is ever used.** `dev_tools.gd` is
+  4001 lines and `devtools.py` 2951, and every release adds verbs pooled from one
+  project's gaps. There is no signal distinguishing a verb that three projects call every
+  run from one that has never been invoked outside its own documentation, which means "we
+  added a verb" cannot currently be told apart from "we improved the harness". Related to
+  the single-source problem below.
+  - [H-027] status: open | seen: 1 | harness: 0.10.0
+  - Improvement: have the bridge append `{verb, ts}` to a rotating counter file per
+    session, and a `verb-usage` subcommand that reports never-invoked verbs. Cheap, and it
+    turns the growth of the surface area into something with a denominator.
+
+- Gap (open): **84% of gaps come from one game, and the log cannot show that.** Of 157
+  entries, 132 are `gather:G-*` and 21 are `H-*`. "The core is game-agnostic" is a design
+  commitment currently validated against a single project, and a second scaffolded project
+  would be worth more directional information than the next ten verbs. Nothing in the log
+  or in `upstream_gaps.py` surfaces the concentration.
+  - [H-028] status: open | seen: 1 | harness: 0.10.0
+  - Improvement: have `upstream_gaps.py` print the per-project split after a pool, so a
+    release notices when it is being shaped entirely by one game's needs.
+
+**Validation run this turn:** `tools/check_templates.py` — all five stages, including the
+real-bus bridge round-trip against Godot 4.7.1 (`stage 5 bridge: ping answered (pong)`).
+`record_version.py --check` OK at 0.10.0. `verify_ledger.py` was additionally exercised
+end-to-end in a scratch git repo: both downgrade paths fired through the real `record`
+path, and `stats` was checked against a mixed-vintage fixture ledger holding `found`
+absent / `[]` / populated rows, confirming pre-0.10.0 rows are excluded from the rate
+rather than counted as zeros. One bug was found and fixed that way — a `found` list whose
+entries were all malformed collapsed to `[]` and would have silently triggered the new
+`overkill` downgrade, turning a formatting slip into a rewritten verdict; it records
+`null` now.

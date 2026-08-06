@@ -50,8 +50,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-# harness-version: 0.9.0
-HARNESS_VERSION = "0.9.0"
+# harness-version: 0.10.0
+HARNESS_VERSION = "0.10.0"
 
 # Substrings that mean the import did not leave a parseable project behind. Every one
 # of these is taken from real captured output, not from guesswork:

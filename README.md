@@ -115,10 +115,15 @@ to inflate without noticing:
 2. **`Cheaper:` demands a concrete alternative** — "reading `ore_vein.gd:40-52`", "lint
    alone, 4s", "nothing, this needed the running game". "Probably still worth it" is not
    an answer to the question that was asked.
-3. **The verdict is cross-checked against reach.** `verify_ledger.py record` downgrades a
-   `warranted` whose changed files were never loaded, keeping the original under
+3. **The verdict is cross-checked twice, mechanically.** `verify_ledger.py record`
+   downgrades a `warranted` whose changed files were never loaded to `insufficient`, and
+   one whose `found` list is empty to `overkill`. Both keep the original under
    `value_reported` so the disagreement stays auditable.
-4. **It is a countable enum, not prose**, so `stats` can say "31% of runs were overkill"
+4. **`Found:` is asked separately from `Value:`**, because they fail differently: the
+   verdict is an impression formed at the end of a run, while `found` is a list of things
+   that either happened or didn't. A bug surfaced and fixed mid-run belongs here — it is
+   invisible in every other field.
+5. **It is a countable enum, not prose**, so `stats` can say "31% of runs were overkill"
    — a sentence no amount of narrative in a log will ever produce.
 
 `overkill` is the verdict that will be under-reported, because a run that passed feels
@@ -863,10 +868,34 @@ dry-run subcommand because the verdict depends on reach: a run that never loaded
 changed file is `insufficient` however well its checks went, and that has to be knowable
 *before* the row is written.
 
-`stats` reports the value mix, the time spent on runs judged overkill, and the recent
-`cheaper_alternative` lines. It also calls out a long stretch with no `overkill` at all,
-because that is both a genuinely possible outcome and what a log that flatters the tool
-looks like.
+**`found` is what the run caught** (0.10.0+), and it exists because every other field
+describes the run's *end state*. A defect found four minutes in and fixed before Phase 5
+leaves no trace: the checks are written green, the runners re-run clean, and the row is
+identical to one where nothing was ever wrong. The first 52 rows recorded in anger showed
+exactly that — 319 Phase 4 checks with not one `fail`, zero new lint findings, zero
+failing tests, and 98% of runs grading themselves `warranted` on the strength of catches
+that survived only as prose. Each entry is `{what, phase, static_would_have_caught}`, and
+the three states are distinct on purpose: a non-empty list, `[]` meaning *this run found
+nothing*, and `null` meaning unrecorded — which every pre-0.10.0 row is, permanently.
+`stats` excludes those from the rate rather than scoring them as zeros.
+
+That gives `value` its second mechanical gate. `record` already downgraded a `warranted`
+whose changed files were never loaded to `insufficient`; a `warranted` with `found: []`
+now becomes **`overkill`**, because confirming what was already known is the definition.
+Both downgrades print on stderr. The point is that the one field grading the tool's own
+usefulness is no longer graded solely by the tool.
+
+Two related disciplines live in `/verify` rather than here, because no script can enforce
+them: a Phase 4 check records its **first** observation with `fixed_in_run: true` rather
+than being rewritten green, and `found: []` is to be recorded honestly rather than padded
+to protect a verdict. An `overkill` row is a useful row.
+
+`stats` reports the value mix, the time spent on runs judged overkill, the recent
+`cheaper_alternative` lines, and the share of runs that caught anything — broken out by
+whether lint and tests would have caught it too, which is the number that justifies
+running a game at all. It also calls out a long stretch with no `overkill`, and a pile of
+`warranted` rows with no `found` recorded, because both are what a log that flatters the
+tool looks like.
 
 Commit the ledger. Its value is entirely in being long.
 

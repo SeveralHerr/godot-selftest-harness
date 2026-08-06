@@ -63,22 +63,22 @@ files; the extension loads last so a project can override a generic verb.
 
 ## Validating a template change
 
-Nothing in this repo checks the templates before they ship — a syntax error in
-`dev_tools.gd` reaches a user's game before anything notices. This is a known open gap
-(see `log-devtools.md`; the fix is a `tools/check_templates.sh`). Until it exists, do it by
-hand in the scratchpad:
+**`python tools/check_templates.py`** does this, and it is the gate — a syntax error in
+`dev_tools.gd` otherwise reaches a user's game before anything notices. Five stages:
 
-1. Assemble a scratch Godot 4.x project from `templates/` (addon, tools, `devtools_ext`,
+1. `py_compile` every `.py`, `json.load` every `.json`.
+2. Assemble a scratch Godot 4.x project from `templates/` (addon, tools, `devtools_ext`,
    `test/`, a minimal `project.godot` with the `DevTools` autoload).
-2. Parse-check every changed `.gd` under it, `py_compile` every changed `.py`, and
-   `json.load` every `.json`.
-3. Run both headless runners against it; expect exit `0`.
-4. If you touched the bridge, launch the scratch project and drive the changed verb over
-   the real bus with the real `devtools.py`. Testing one half against a fake of the other
-   is exactly the thing that failed before.
+3. Parse-check every `.gd` under it.
+4. Run both headless runners; expect exit `0` from each.
+5. Launch the scratch project and drive the bridge over the real file bus with the real
+   `devtools.py`. Testing one half against a fake of the other is the thing that failed
+   before, and this stage is why the check is worth its runtime.
 
-Say plainly which of these you actually ran. "Templates unchanged since last verified run"
-is a fine answer; "should be fine" is not.
+Run it before committing any change under `templates/`, alongside
+`python tools/record_version.py --check`. Say plainly which you actually ran — "templates
+unchanged since last verified run" is a fine answer; "should be fine" is not. Stage 5
+needs a real Godot binary; see the memory note for where it lives on this machine.
 
 ## Releasing a version
 
