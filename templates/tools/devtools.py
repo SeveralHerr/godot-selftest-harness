@@ -626,14 +626,37 @@ def send_command(project_path: Path, action: str, args: dict = None, timeout: fl
 
 
 def cmd_screenshot(args, project_path: Path):
-    """Take a screenshot of the running game."""
-    result = send_command(project_path, "screenshot", {"filename": args.filename} if args.filename else {})
-    if result["success"]:
-        print(f"Screenshot saved: {result['data']['path']}")
-        print(f"Size: {result['data']['width']}x{result['data']['height']}")
-    else:
+    """Take a screenshot, optionally cropped and with nodes/groups hidden.
+
+    Data keys read: path, width, height, region, hidden. Hiding is done and
+    undone game-side inside one command, so a capture cannot leave the HUD
+    switched off (gather:G-079).
+    """
+    cmd_args = {}
+    if args.filename:
+        cmd_args["filename"] = args.filename
+    if args.region is not None:
+        cmd_args["region"] = args.region
+    if args.hide:
+        cmd_args["hide"] = [normalize_node_path(p) for p in args.hide]
+    if args.hide_group:
+        cmd_args["hide_group"] = args.hide_group
+
+    result = send_command(project_path, "screenshot", cmd_args)
+    if not result["success"]:
         print(f"Failed: {result['message']}", file=sys.stderr)
         sys.exit(1)
+    data = result["data"]
+    print(f"Screenshot saved: {data['path']}")
+    print(f"Size: {data['width']}x{data['height']}")
+    if data.get("region"):
+        r = data["region"]
+        print(f"Cropped to: {r['x']},{r['y']} {r['w']}x{r['h']}")
+    if data.get("hidden"):
+        print(f"Hidden for the capture (restored after): {', '.join(data['hidden'])}")
+    elif args.hide or args.hide_group:
+        print("WARNING: --hide/--hide-group matched no CanvasItem - the capture "
+              "shows everything.", file=sys.stderr)
 
 
 def cmd_validate(args, project_path: Path):
@@ -682,13 +705,56 @@ def print_validation_result(result: dict):
 
 
 def cmd_scene_tree(args, project_path: Path):
-    """Get the current scene tree."""
-    result = send_command(project_path, "scene_tree", {"depth": args.depth})
+    """Get the current scene tree, or a subtree of it."""
+    cmd_args = {"depth": args.depth}
+    if args.root:
+        cmd_args["root"] = normalize_node_path(args.root)
+    if args.properties:
+        cmd_args["properties"] = args.properties
+    result = send_command(project_path, "scene_tree", cmd_args)
     if result["success"]:
         print(json.dumps(result["data"], indent=2))
     else:
         print(f"Failed: {result['message']}", file=sys.stderr)
         sys.exit(1)
+
+
+def cmd_curve(args, project_path: Path):
+    """Sweep a pure method over an integer range (bus verb: curve, G-127).
+
+    Data keys read: points, min, max, sum, node_path, method.
+    """
+    cmd_args = {
+        "node_path": normalize_node_path(args.node),
+        "method": args.method,
+        "from": args.start,
+        "to": args.end,
+        "step": args.step,
+        "arg_index": args.arg_index,
+    }
+    if args.args:
+        try:
+            extra = json.loads(args.args)
+        except json.JSONDecodeError as e:
+            print(f"Error: Invalid JSON in --args: {e}", file=sys.stderr)
+            sys.exit(1)
+        if not isinstance(extra, list):
+            print("Error: --args must be a JSON array", file=sys.stderr)
+            sys.exit(1)
+        cmd_args["args"] = extra
+
+    result = send_command(project_path, "curve", cmd_args)
+    if not result["success"]:
+        print(f"Failed: {result['message']}", file=sys.stderr)
+        sys.exit(1)
+    data = result.get("data") or {}
+    if "points" not in data:
+        print(f"curve: the reply carried no 'points' key. Keys: {sorted(data)}",
+              file=sys.stderr)
+        sys.exit(1)
+    print(result.get("message", ""))
+    for point in data["points"]:
+        print(f"  {point.get('input')}: {_format_value(point.get('value'))}")
 
 
 def cmd_performance(args, project_path: Path):
@@ -2190,6 +2256,81 @@ def _glue_leading_dash_values(argv):
     return out
 
 
+# Godot's ResourceUID text encoding, reimplemented. Verified against
+# ResourceUID.id_to_text() on 4.6.1 for 1, 33, 34, 35, 1234567890 and two 63-bit
+# ids: base 34, digits 'a'..'z' (0..24) then '0'..'9' (25..33), most significant
+# first, no padding.
+_UID_CHAR_COUNT = ord("z") - ord("a")      # 25
+_UID_BASE = _UID_CHAR_COUNT + (ord("9") - ord("0"))   # 34
+
+
+def uid_to_text(uid_id: int) -> str:
+    """Godot's ResourceUID::id_to_text."""
+    if uid_id < 0:
+        return "uid://<invalid>"
+    out = []
+    while uid_id:
+        c = uid_id % _UID_BASE
+        if c < _UID_CHAR_COUNT:
+            out.append(chr(ord("a") + c))
+        else:
+            out.append(chr(ord("0") + (c - _UID_CHAR_COUNT)))
+        uid_id //= _UID_BASE
+    return "uid://" + "".join(reversed(out))
+
+
+def cmd_new_uid(args, project_path: Path):
+    """Emit a fresh, correctly-encoded, collision-checked uid:// string.
+
+    A subagent that is not allowed to run Godot also cannot generate a `.uid`,
+    so it hand-writes one and nobody can validate it until the orchestrator
+    imports - and lint's `UIDs: OK` is only reachable from a tree that already
+    compiles, which a fan-out does not have until every agent has landed
+    (gather:G-094). This is a pure function over the same encoding plus a scan of
+    the existing sidecars: no game, no editor, no import.
+    """
+    existing = set()
+    for sidecar in project_path.rglob("*.uid"):
+        try:
+            existing.add(sidecar.read_text(encoding="utf-8").strip())
+        except OSError:
+            continue
+
+    made = []
+    for _ in range(max(1, args.count)):
+        for _attempt in range(1000):
+            # 63-bit, matching create_id()'s 0x7FFF... mask.
+            text = uid_to_text(uuid.uuid4().int & 0x7FFFFFFFFFFFFFFF)
+            if text not in existing:
+                existing.add(text)
+                made.append(text)
+                break
+        else:
+            print("Error: could not find an unused uid in 1000 attempts (that "
+                  "should be impossible - is the project full of duplicates?)",
+                  file=sys.stderr)
+            sys.exit(1)
+
+    if args.write:
+        target = Path(args.write)
+        if not target.is_absolute():
+            target = project_path / target
+        if target.suffix != ".uid":
+            target = target.with_suffix(target.suffix + ".uid")
+        if target.exists():
+            print(f"Error: {target} already exists; refusing to overwrite a uid "
+                  "(changing one breaks every reference to it).", file=sys.stderr)
+            sys.exit(1)
+        target.write_text(made[0], encoding="utf-8")
+        print(f"{made[0]}  -> {target}")
+        return
+
+    for text in made:
+        print(text)
+    print(f"({len(existing) - len(made)} existing .uid sidecar(s) scanned for "
+          "collisions)", file=sys.stderr)
+
+
 def cmd_find_nodes(args, project_path: Path):
     """Find nodes by class/group/method and property predicates (bus verb:
     find_nodes, gather:G-109). Data keys read: nodes, count, truncated."""
@@ -2330,6 +2471,15 @@ def main():
     # screenshot
     p = subparsers.add_parser("screenshot", help="Take a screenshot")
     p.add_argument("--filename", "-f", help="Output filename")
+    p.add_argument("--region", type=rect_arg, metavar="X,Y,W,H",
+                   help="Crop to this pixel rect (game-side, so the crop is "
+                        "reproducible from the command line)")
+    p.add_argument("--hide", action="append", metavar="NODE",
+                   help="Hide this node for the capture and restore it after "
+                        "(repeatable)")
+    p.add_argument("--hide-group", action="append", metavar="GROUP",
+                   help="Hide every CanvasItem in this group for the capture "
+                        "(repeatable)")
     p.set_defaults(func=cmd_screenshot)
 
     # validate
@@ -2344,7 +2494,25 @@ def main():
     # scene-tree
     p = subparsers.add_parser("scene-tree", help="Get scene tree")
     p.add_argument("--depth", "-d", type=int, default=10, help="Max depth")
+    p.add_argument("--root", help="Start from this node instead of the current "
+                                  "scene (a deep UI subtree otherwise truncates)")
+    p.add_argument("--property", dest="properties", action="append", metavar="NAME",
+                   help="Report this property on every node (repeatable). "
+                        "find-nodes is usually the better verb for identifying one.")
     p.set_defaults(func=cmd_scene_tree)
+
+    # curve
+    p = subparsers.add_parser(
+        "curve", help="Call a pure method over an integer range and print the series")
+    p.add_argument("--node", "-n", required=True, help="Node path")
+    p.add_argument("--method", "-m", required=True, help="Method name")
+    p.add_argument("--from", dest="start", type=int, required=True, metavar="N")
+    p.add_argument("--to", dest="end", type=int, required=True, metavar="N")
+    p.add_argument("--step", type=int, default=1)
+    p.add_argument("--args", help="JSON array of extra arguments")
+    p.add_argument("--arg-index", type=int, default=0,
+                   help="Which parameter the swept value fills (default 0)")
+    p.set_defaults(func=cmd_curve)
 
     # performance
     p = subparsers.add_parser("performance", help="Get performance metrics")
@@ -2549,6 +2717,16 @@ def main():
     p.add_argument("--via-args", metavar="JSON",
                    help="JSON array of arguments for --via-method")
     p.set_defaults(func=cmd_clear_nodes)
+
+    # new-uid (offline: no game, no editor, no import)
+    p = subparsers.add_parser(
+        "new-uid", help="Emit a fresh uid:// string, collision-checked against "
+                        "the project's existing .uid sidecars")
+    p.add_argument("--count", type=int, default=1, help="How many to emit")
+    p.add_argument("--write", metavar="PATH",
+                   help="Write it to PATH (a .uid suffix is added if missing). "
+                        "Refuses to overwrite an existing sidecar.")
+    p.set_defaults(func=cmd_new_uid)
 
     # find-nodes
     p = subparsers.add_parser(

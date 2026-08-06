@@ -406,6 +406,7 @@ func _register_generic_handlers() -> void:
 	register_command("press", _cmd_press)
 	register_command("raycast", _cmd_raycast)
 	register_command("sample_pixels", _cmd_sample_pixels)
+	register_command("curve", _cmd_curve)
 
 
 func _load_extension() -> void:
@@ -561,7 +562,8 @@ func _process_command_line_args() -> void:
 			"--devtools-screenshot":
 				# Take a screenshot on the next frame so the scene is rendered.
 				await get_tree().process_frame
-				var result: Dictionary = _cmd_screenshot({})
+				# await: _cmd_screenshot is a coroutine whenever it hides nodes.
+				var result: Dictionary = await _cmd_screenshot({})
 				_write_log("cli", "CLI screenshot", result)
 			"--devtools-validate":
 				# Validate after the scene tree is ready.
@@ -599,17 +601,74 @@ func _cmd_ping(_args: Dictionary) -> Dictionary:
 	}
 
 
+## Captures the viewport to a PNG.
+##
+## args: { "filename": String, "region": [x, y, w, h], "hide": Array[String] of
+##         node paths, "hide_group": Array[String] of group names }
+## data keys: path, width, height, size_bytes, region, hidden (Array of the node
+## paths actually hidden and restored).
+##
+## Why region/hide exist: store art is game pixels with no UI on them at a fixed
+## aspect, and the verb could only capture the whole window with everything
+## visible. Producing one cover took two set_state calls to hide HUD nodes by
+## hand plus a separate PIL script to crop -- and hiding by hand is easy to get
+## wrong in the other direction, with nothing to catch a HUD left switched off
+## (gather:G-079). Visibility here is ALWAYS restored, including on the failure
+## paths, so this verb cannot leave the game in a state no player can reach.
 func _cmd_screenshot(args: Dictionary) -> Dictionary:
 	var default_name: String = "screenshot_%s.png" % Time.get_datetime_string_from_system().replace(":", "-")
 	var filename: String = args.get("filename", default_name)
 	var screenshots_dir: String = ProjectSettings.globalize_path("user://screenshots")
 	DirAccess.make_dir_recursive_absolute(screenshots_dir)
 
-	var abs_path: String = screenshots_dir.path_join(filename)
+	# Collect what to hide, remembering each node's PREVIOUS state so a node that
+	# was already invisible is not "restored" into visibility.
+	var to_hide: Array[CanvasItem] = []
+	var was_visible: Array[bool] = []
+	var hidden_paths: Array = []
+	for entry: Variant in (args.get("hide", []) if args.get("hide") is Array else []):
+		var found: Dictionary = _resolve_node(str(entry))
+		if found["node"] is CanvasItem:
+			to_hide.append(found["node"] as CanvasItem)
+	for entry: Variant in (args.get("hide_group", []) if args.get("hide_group") is Array else []):
+		for node: Node in get_tree().get_nodes_in_group(str(entry)):
+			if node is CanvasItem:
+				to_hide.append(node as CanvasItem)
+
+	for item: CanvasItem in to_hide:
+		was_visible.append(item.visible)
+		hidden_paths.append(str(item.get_path()))
+		item.visible = false
+
+	# One frame so the hidden nodes are actually off the rendered image.
+	if not to_hide.is_empty():
+		await RenderingServer.frame_post_draw
+
 	var image: Image = get_viewport().get_texture().get_image()
+
+	for i: int in to_hide.size():
+		to_hide[i].visible = was_visible[i]
+
 	if image == null:
 		return {"success": false, "message": "Failed to capture viewport image"}
 
+	var region: Dictionary = {}
+	var raw_region: Variant = args.get("region")
+	if raw_region is Array and (raw_region as Array).size() == 4:
+		var a: Array = raw_region
+		var rect: Rect2i = Rect2i(int(a[0]), int(a[1]), int(a[2]), int(a[3])).intersection(
+			Rect2i(0, 0, image.get_width(), image.get_height()))
+		if rect.size.x <= 0 or rect.size.y <= 0:
+			return {
+				"success": false,
+				"message": "region %s does not overlap the %dx%d capture" % [
+					str(raw_region), image.get_width(), image.get_height()],
+			}
+		image = image.get_region(rect)
+		region = {"x": rect.position.x, "y": rect.position.y,
+			"w": rect.size.x, "h": rect.size.y}
+
+	var abs_path: String = screenshots_dir.path_join(filename)
 	var err: Error = image.save_png(abs_path)
 	if err != OK:
 		return {"success": false, "message": "Failed to save PNG: error %d" % err}
@@ -622,17 +681,35 @@ func _cmd_screenshot(args: Dictionary) -> Dictionary:
 			"width": image.get_width(),
 			"height": image.get_height(),
 			"size_bytes": FileAccess.get_file_as_bytes(abs_path).size() if FileAccess.file_exists(abs_path) else -1,
+			"region": region,
+			"hidden": hidden_paths,
 		},
 	}
 
 
+## args: { "depth": int, "root": String (subtree to start from),
+##         "properties": Array[String] (report these on every node) }
+##
+## `root` exists because a whole-scene snapshot truncates before it reaches a
+## deep UI subtree, so the buttons a panel just built could not even be
+## enumerated (gather:G-119). `properties` exists because identifying one node
+## among auto-named siblings otherwise costs a get_state round trip per child
+## (gather:G-109) -- though find_nodes answers that question directly and is
+## usually the better verb.
 func _cmd_scene_tree(args: Dictionary) -> Dictionary:
 	var depth: int = args.get("depth", 10)
 	var root: Node = get_tree().current_scene
+	var root_path: String = args.get("root", "")
+	if not root_path.is_empty():
+		var resolved: Dictionary = _resolve_node(root_path)
+		if resolved["node"] == null:
+			return {"success": false, "message": "Root node not found: %s" % root_path}
+		root = resolved["node"]
 	if root == null:
 		return {"success": false, "message": "No current scene"}
 
-	var tree_data: Dictionary = _serialize_node(root, depth)
+	var extra: Array = args.get("properties", []) if args.get("properties") is Array else []
+	var tree_data: Dictionary = _serialize_node(root, depth, extra)
 	return {
 		"success": true,
 		"message": "Scene tree captured",
@@ -640,7 +717,7 @@ func _cmd_scene_tree(args: Dictionary) -> Dictionary:
 	}
 
 
-func _serialize_node(node: Node, depth: int) -> Dictionary:
+func _serialize_node(node: Node, depth: int, extra: Array = []) -> Dictionary:
 	# `script` is the node's script resource path, or "" when it has none (or has a
 	# built-in one, which has no path). It exists so a caller can answer "did this run
 	# actually touch the file I changed?" by intersecting a scene-tree snapshot with a
@@ -674,10 +751,21 @@ func _serialize_node(node: Node, depth: int) -> Dictionary:
 		data["size"] = {"x": ctrl.size.x, "y": ctrl.size.y}
 		data["visible"] = ctrl.visible
 
+	# Requested properties are reported per node under "properties", present but
+	# null where the node does not have one -- an absent key and "this node has no
+	# such property" must not look the same to a client scanning for a match.
+	if not extra.is_empty():
+		var props: Dictionary = {}
+		for entry: Variant in extra:
+			var name: String = str(entry)
+			var walk: Dictionary = _resolve_property_path(node, name)
+			props[name] = _serialize_variant(walk["value"]) if walk["ok"] else null
+		data["properties"] = props
+
 	if depth > 0 and node.get_child_count() > 0:
 		var children: Array = []
 		for child in node.get_children():
-			children.append(_serialize_node(child, depth - 1))
+			children.append(_serialize_node(child, depth - 1, extra))
 		data["children"] = children
 
 	return data
@@ -3563,6 +3651,92 @@ func _cmd_sample_pixels(args: Dictionary) -> Dictionary:
 			"dominant": {"r": dominant.r, "g": dominant.g, "b": dominant.b},
 			"dominant_share": float(top_count) / maxf(1.0, float(count)),
 		},
+	}
+
+
+## Calls a pure method over an integer range and returns the series.
+##
+## Calibrating a difficulty ramp meant hand-evaluating `size_for_day` /
+## `health_mult_for_day` / `cost_for_parcel` / `xp_for_level` across 20+ days in
+## prose arithmetic, every time anyone touched the constants -- and two
+## arithmetic slips in one session were caught only by a second pass
+## (gather:G-127). The game already knows these numbers; nothing could ask it for
+## more than one at a time.
+##
+## args: { "node_path": String, "method": String, "from": int, "to": int,
+##         "step": int (default 1), "args": Array (extra args after the sweep
+##         value), "arg_index": int (which parameter the sweep value fills,
+##         default 0) }
+## data keys: node_path, method, points (Array of {input, value}), min, max, sum.
+##
+## The sweep is capped so a typo'd range cannot wedge the single-command bus.
+func _cmd_curve(args: Dictionary) -> Dictionary:
+	const MAX_POINTS: int = 500
+
+	var node_path: String = args.get("node_path", "")
+	var resolved: Dictionary = _resolve_node(node_path)
+	var node: Node = resolved["node"]
+	if node == null:
+		return {"success": false, "message": "Node not found: %s" % node_path}
+
+	var method: String = args.get("method", "")
+	if method.is_empty() or not node.has_method(method):
+		return {"success": false, "message": "Node %s has no method: %s" % [resolved["path"], method]}
+
+	var from: int = int(args.get("from", 0))
+	var to: int = int(args.get("to", 0))
+	var step: int = int(args.get("step", 1))
+	if step == 0:
+		return {"success": false, "message": "step must not be 0"}
+	if (to - from) / step < 0:
+		return {"success": false, "message": "step %d never reaches %d from %d" % [step, to, from]}
+	var count: int = int(abs(float(to - from) / float(step))) + 1
+	if count > MAX_POINTS:
+		return {
+			"success": false,
+			"message": "curve refuses %d points; the maximum is %d (narrow the range or widen --step)" % [
+				count, MAX_POINTS],
+		}
+
+	var extra: Array = args.get("args", []) if args.get("args") is Array else []
+	var arg_index: int = int(args.get("arg_index", 0))
+
+	var points: Array = []
+	var lowest: Variant = null
+	var highest: Variant = null
+	var sum: float = 0.0
+	var numeric: bool = true
+
+	var i: int = from
+	while (step > 0 and i <= to) or (step < 0 and i >= to):
+		var call_args: Array = extra.duplicate()
+		call_args.insert(clampi(arg_index, 0, call_args.size()), i)
+		var value: Variant = node.callv(method, call_args)
+		points.append({"input": i, "value": _serialize_variant(value)})
+		if _is_number(value):
+			sum += float(value)
+			if lowest == null or float(value) < float(lowest):
+				lowest = value
+			if highest == null or float(value) > float(highest):
+				highest = value
+		else:
+			numeric = false
+		i += step
+
+	var data: Dictionary = {
+		"node_path": resolved["path"],
+		"method": method,
+		"points": points,
+		"min": lowest,
+		"max": highest,
+		"sum": sum if numeric else null,
+	}
+	return {
+		"success": true,
+		"message": "%s(%d..%d step %d): %d point(s)%s" % [
+			method, from, to, step, points.size(),
+			", min %s max %s sum %s" % [str(lowest), str(highest), str(sum)] if numeric else " (non-numeric)"],
+		"data": data,
 	}
 
 
