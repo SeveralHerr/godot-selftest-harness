@@ -66,8 +66,9 @@ The installed harness can silently diverge from the plugin's templates — a pro
 # `cmp` report every installed file as drifted when not one byte of content differs.
 DRIFTED=""
 for f in addons/godot_selftest/dev_tools.gd addons/godot_selftest/scene_validator.gd \
-         tools/devtools.py tools/lint_project.gd tools/run_tests.gd \
-         tools/check_devtools_log.py tools/upstream_gaps.py tools/verify_ledger.py; do
+         tools/devtools.py tools/lint_project.gd tools/run_tests.gd tools/eval.gd \
+         tools/import_check.py tools/check_devtools_log.py tools/upstream_gaps.py \
+         tools/verify_ledger.py; do
   src="${CLAUDE_PLUGIN_ROOT}/templates/$f"
   [ -f "$src" ] && [ -f "$f" ] || continue
   diff -q <(tr -d '\r' < "$src") <(tr -d '\r' < "$f") >/dev/null || { echo "DRIFT: $f"; DRIFTED="$DRIFTED $f"; }
@@ -108,13 +109,41 @@ git diff HEAD --stat
 | Diff is… | Tier | What runs |
 |---|---|---|
 | (a) Nothing Godot loads: only docs/`.md` outside code, `.beads/`, `log-devtools.md`, CI/git files | **Nothing** | Print "nothing to verify". Write **no** ledger row. Log the Phase 6 entry with `Value: **overkill** — avoided: triaged out at Phase 0.5, no res:// change` and **STOP the run here.** |
-| (b) Only comments/docstrings inside `.gd`/`.tscn` files, or `.md` files in code dirs | **Lint-only** | Phase 1 lint. Skip tests and runtime; say so in the summary. |
-| (c) Only `static func`s or `const` tables that existing unit tests cover | **Headless-only** | Phase 1 (lint + tests). Skip runtime; the Phase 6 entry must **name which tests** stood in for runtime. |
+| (b) Only comments/docstrings inside `.gd`/`.tscn` files, or `.md` files in code dirs | **Lint-only** | Phase 1 import gate + lint. Skip tests and runtime; say so in the summary. |
+| (c) Only `static func`s or `const` tables that existing unit tests cover | **Headless-only** | Phase 1 (import gate + lint + tests). Skip runtime; the Phase 6 entry must **name which tests** stood in for runtime. |
 | Anything else — instance methods, signals, scenes, exports, node paths, config | **Full run** | All phases. |
 
 Rules: when in doubt, full run. Tier (c) requires you to have *checked* the tests exist and exercise the changed functions (`--filter` them in Phase 1), not assumed it. Tiers (b) and (c) still write a ledger row in Phase 5 — use `--no-reach` (there is no session to observe) and `value: overkill` with `cheaper_alternative` naming the tier.
 
-## Phase 1: Headless Lint & Unit Tests (no game running)
+## Phase 1: Headless Gates — Import, Lint & Unit Tests (no game running)
+
+### Import gate (before lint)
+
+`godot --headless --path . --import` **exits 0 while printing parse errors.** Real captured output:
+
+```
+BARE --import exit=0
+SCRIPT ERROR: Parse Error: Could not parse global class "ScratchPlayer" from "res://player.gd".
+ERROR: Failed to load script "res://items.gd" with error "Parse error".
+```
+
+"the class cache was regenerated" and "the project still parses" are the same exit code, so nothing downstream of the bare command can tell them apart. `tools/import_check.py` runs the same import, captures stdout+stderr to `.devtools/import.log`, scans it for `SCRIPT ERROR` / `Parse Error` / `Failed to load script` / `Compilation failed`, and quotes the failing lines back with their `at:` locations.
+
+It runs **ahead of lint and tests** because a stale or broken class cache is the *cause* of the cascade they would otherwise report: one missing entry in `.godot/global_script_class_cache.cfg` turns into parse errors in dozens of files nobody touched, and working through them in file order means fixing the wrong thing first.
+
+Guard `project.godot` around it. Godot's import pass sometimes rewrites it, stripping comments and web-renderer overrides. Plain lint/test runs do **not** dirty `project.godot`; only `--import` does, and not every `--import` — which is exactly why the change goes unnoticed:
+
+```bash
+mkdir -p .devtools && cp project.godot .devtools/project.godot.bak
+"$PY" tools/import_check.py; echo "exit=$?"
+diff .devtools/project.godot.bak project.godot >/dev/null || echo "WARNING: --import REWROTE project.godot — diff it before staging; restore the comments/overrides it stripped (cp .devtools/project.godot.bak project.godot if the rewrite was pure loss)"
+```
+
+Exit codes are this repo's usual contract: `0` imported clean, `1` parse/load errors in the output — stop and fix the quoted script, `2` **could not run** (no Godot binary, no `project.godot`, a timeout, Godot exited non-zero, or it wrote no output at all — which on Windows means the non-console build, and an empty log is an unverified run, not a clean one). Never read a `2` as a pass. `--json` emits the same verdict machine-readably; `--timeout N` (default 900s) bounds a first import of a large project.
+
+Run this for **every tier that reaches Phase 1, including lint-only.** The failure it catches is one you *received* — a rebase, a pull, a branch switch that brought in a `class_name` you never wrote — so triaging on the diff cannot exempt it: the diff is the one place the cause does not appear.
+
+### Lint and unit tests
 
 Both runners write to stdout and set a meaningful exit code. **Redirect to a file and read it back** rather than trusting the console — the Godot binary on Windows is often the non-console build, which prints nothing to PowerShell, so a failed run looks like a silent success.
 
@@ -126,6 +155,8 @@ cat lint.log
 Exit-code contract (both runners): `0` = pass, `1` = findings (lint errors / failing tests) — stop and report them, `2` = **the runner itself could not run** (bad `devtools_config.json`, missing `test_dir`, unreadable `scan_root`) — stop with a different message, because a `2` means you verified nothing, not that the code is clean. The runners call `quit(n)` with their own counts, so the code is not polluted by Godot's leaked-RID-at-shutdown noise. The last line of lint output is also machine-readable: `lint: N error(s), M warning(s) -> exit C`.
 
 Warnings alone do not fail; pass `--strict` to make them fail.
+
+**`class_cache_stale` is reported first and must be fixed first.** A `class_name X` declared in a script but absent from `.godot/global_script_class_cache.cfg` is an error finding raised *ahead of* the parse-error cascade it causes, with `hint: many scripts failing together usually means a stale class cache`. Recognize it on sight — it presents as errors in files you never touched — and do not start reading them: the fix is a command, not a code change. Run `godot --headless --path . --import`, or `"$PY" tools/import_check.py` for the same import with the errors actually surfaced, then re-lint. Passing the import gate above means this cannot fire; you will see it on a run that reached lint another way (a fresh clone, a lint-only rerun). `class_cache_missing` — no cache file at all — is the never-imported case and is advisory only.
 
 `UIDs: OK` now means both halves of the UID pass are clean: no stale `uid=` reference **and** no `.gd` missing its `.uid` sidecar. A script you just created outside the editor has no sidecar, and that is reported as `WARN: <path>: no .uid sidecar` rather than being counted as OK. Commit the sidecar with the script; `uid_check_ignore` in the config exempts paths (default: `addons/`, `tools/`).
 
@@ -147,21 +178,23 @@ cat tests.log
 
 `run_tests.gd` auto-discovers tests under the configured `test_dir`. Stop if any tests fail.
 
-**If you must run `--import`** (required after adding any new `class_name`), guard `project.godot` first — Godot's import pass sometimes rewrites it, stripping comments and web-renderer overrides. Plain lint/test runs do **not** dirty `project.godot`; only `--import` does, and not every `--import` — which is exactly why the change goes unnoticed:
-
-```bash
-mkdir -p .devtools && cp project.godot .devtools/project.godot.bak
-"$GODOT_BIN" --headless --path . --import > import.log 2>&1; echo "exit=$?"
-diff .devtools/project.godot.bak project.godot >/dev/null || echo "WARNING: --import REWROTE project.godot — diff it before staging; restore comments/overrides it stripped (cp .devtools/project.godot.bak project.godot if the rewrite was pure loss)"
-```
-
 **Narrowing the run.** `--filter NAME` matches a test's method name **or its script filename**; `--file NAME` matches the script path (bare name, filename, or substring). They combine with AND:
 
 ```bash
 "$GODOT_BIN" --headless --path . --script res://tools/run_tests.gd -- --file test_player --filter damage
 ```
 
-A selector that matches nothing is **exit 2**, not a pass: `SELECTED NOTHING - filter 'spawner' selected 0 of 111 discovered test(s)`. Before this, a filter that hit nothing skipped the whole suite and printed `Total: 0 | Passed: 0 | Failed: 0` with exit 0 — indistinguishable from a clean run, and work shipped on the strength of it. Discovering no test scripts at all is exit 2 for the same reason. The summary line now also prints `Selected: N of M discovered` whenever a selector is in play, so a filter quietly matching two of eleven files is visible in the output rather than only in the exit code.
+A selector that matches nothing is **exit 2**, not a pass: `SELECTED NOTHING - filter 'spawner' selected 0 of 111 discovered test(s)`. Before this, a filter that hit nothing skipped the whole suite and printed `Total: 0 | Passed: 0 | Failed: 0` with exit 0 — indistinguishable from a clean run, and work shipped on the strength of it.
+
+**Every way of running nothing is now exit 2**, and the summary says which one:
+
+| Line | Means |
+|---|---|
+| `SELECTED NOTHING - …` | The selector matched no test. |
+| `no test_*.gd scripts found` | Nothing under `test_dir` — check the config before believing the suite is empty. |
+| `N test script(s) found, but no test_* methods in them` | The files exist and define nothing runnable. This used to print `ALL TESTS PASSED` at exit 0 — a scaffolded-but-unwritten suite reading as a green one. |
+
+Read `Selected: N of M discovered  (<selector>)` on **every** run, filtered or not — it is printed unconditionally now. On a bare run it is the discovery denominator, which is what tells you the whole suite was even found; on a filtered run it is what the selector cut it down to, so a `--file` quietly matching two of eleven scripts is visible in the output instead of only in the exit code.
 
 **Capture stderr, and read it.** Two failure modes only appear there:
 
@@ -178,26 +211,23 @@ Treat exit `2` as "**you verified nothing**" — it is not a test failure and mu
 mkdir -p .devtools && git status --porcelain > .devtools/git-status-before.txt
 ```
 
-Launch in the background. Append `--mute` only when `config.mute` is true (it defaults to true):
+**Prefer `launch` over a bare `&` and a sleep.** It spawns Godot detached with logs under `.devtools/`, then *proves the bus answers a ping* before returning — so a launch that reports success has been verified rather than waited for. It also refuses to start when a live pid already owns this bus, which is the failure that presents as flaky verbs: two instances answering one command file corrupt each other silently, and nothing in a reply says so.
+
+```bash
+"$PY" tools/devtools.py launch; echo "exit=$?"
+```
+
+It always passes `--mute` unless you pass `--no-mute` — it does not read `config.mute`, so pass `--no-mute` when that key is false or when the run needs audio (a `--write-movie` capture records the audio bus, and a muted run captures silence). Everything after a bare `--` goes to the Godot command line. `--isolated` gives the session a private id **and** a private bus directory, verified before the follow-up command is printed; `user://` itself is still shared, because Godot has no switch for it. `--allow-second-instance` overrides the live-pid refusal; `--no-wait` returns without proving the bus, which forfeits the reason to use this verb.
+
+The manual equivalent, when you need to drive the Godot command line yourself:
 
 ```bash
 # --mute suppresses audio during automated testing (omit if config.mute is false)
 "$GODOT_BIN" --path . --mute &
-```
-
-Wait for startup, then confirm connection:
-
-```bash
 sleep 5 && "$PY" tools/devtools.py ping
 ```
 
-If ping fails, retry once:
-
-```bash
-sleep 3 && "$PY" tools/devtools.py ping
-```
-
-If it fails twice, check the Godot terminal output for errors and stop. A failed call now returns in ~2s rather than hanging for the full timeout, so the retry is cheap. **Read which of the three failures you got — they have different causes:**
+If ping fails, retry once with `sleep 3`. If it fails twice, check the Godot terminal output for errors and stop. A failed call now returns in ~2s rather than hanging for the full timeout, so the retry is cheap. **Read which of the three failures you got — they have different causes:**
 
 | Message | Means |
 |---|---|
@@ -324,19 +354,24 @@ This prints all currently registered action strings. Any verb beyond the generic
 
 | Command | Use for |
 |---|---|
-| `get-state --node PATH --property NAME` | Read node properties (primary assertion tool). `--property` is repeatable — always use it; an unfiltered `Label` returns ~120 keys. Assert transforms on `data.transform`, which is always present: Godot hides `position`/`scale`/`rotation` on container children, so a scale animation on a `VBoxContainer` child is invisible to the property dump while working perfectly on screen |
+| `get-state --node PATH --property NAME` | Read node properties (primary assertion tool). `--property` is repeatable — always use it; an unfiltered `Label` returns ~120 keys. A **dotted** name walks into Resources and Dictionaries (`--property texture.region`, `--property slot_data.item.name`), so a nested value is one call rather than a `run-method` to fetch the sub-object; an unknown name exits 1 instead of reporting absence as a value. Assert transforms on `data.transform`, which is always present: Godot hides `position`/`scale`/`rotation` on container children, so a scale animation on a `VBoxContainer` child is invisible to the property dump while working perfectly on screen |
+| `find-nodes --class X --where prop=value` | Identify a node by what it *is*, instead of one `get-state` round trip per auto-named sibling. `--class` / `--group` / `--method` pick the population, `--where NAME=VALUE` narrows it (repeatable, dotted paths allowed), `--property NAME` reports a value per hit, `--root` confines the search. A node lacking the property is a non-match, never an error, so a predicate is safe across a mixed subtree |
 | `step-time --seconds N` | Advance ~N game-seconds with `time_scale` pinned to 1.0 — for sampling a tween at a chosen moment instead of guessing with `set-game-speed` + sleeps. Physics time is exact; process-driven tweens (the `Tween` default) land within ~1 frame, so compare the returned `process_seconds` rather than assuming |
 | `touch <press\|release\|drag\|clear\|list> --index N --pos X,Y` | Real `InputEventScreenTouch`/`Drag` — the only way to exercise multi-touch |
 | `set-feature --touchscreen true` | Make touch UI visible on desktop (it hides itself when no touchscreen is reported). Set it **before** the scene loads: a Control that read availability in its own `_ready()` won't re-evaluate |
 | `set-state --node PATH --property NAME --value V` | Set a raw property (see pitfall about signals below) |
 | `run-method --node PATH --method NAME --args "[...]"` | Call any method on a node — **preferred** for anything that should emit a signal / run side effects |
+| `curve --node PATH --method NAME --from N --to M` | Sweep a pure method over an integer range and get the whole series back (`points`, plus `min`/`max`/`sum`) — a difficulty or cost ramp asserted as data instead of hand-evaluated in prose arithmetic, which is where the slips happen. `--step`, `--args` for the method's other parameters, `--arg-index` for which one the sweep fills. Capped at 500 points; the bus serves one command at a time and a typo'd range would wedge it |
 | `input tap ACTION --hold N` / `input press` / `input release` | Simulate input actions defined in the project |
+| `press --node PATH` | Emit `pressed` on the nearest `BaseButton` at or under a path (a container path works — it looks one level down). **Use this instead of `run-method` on the button's callback:** calling `_on_thing_pressed` directly proves the action and not the wiring, which is how a mis-wired `pressed.connect` used to ship green. A `disabled` button is refused rather than pressed, because a real press would also do nothing. `--toggle BOOL` sets a `toggle_mode` button's state before emitting |
+| `raycast --from X,Y --to X,Y [--mask N]` | What a collision mask would actually hit — the only form the question takes once a project has more than one physics layer — with the bits resolved to the layer names in `project.godot`, so the answer is readable. `--areas` also hits `Area2D`, `--exclude` drops a collider. Engine sharp edge it inherits: a ray *starting inside* a shape reports nothing, so several bisecting probes can all come back `clear` with a wall between them — cast from outside |
+| `sample-pixels --rect X,Y,W,H` | Mean / dominant / brightest / darkest colour over a screen rect, so a colour regression is assertable rather than eyeballed. Same capture path as `screenshot`, summarised instead of saved; `dominant_share` says how much of the rect that colour owns |
 | `set-game-speed N` | Speed up time-dependent behavior (timers, tweens, physics) |
 | `wait-frames N` | Advance N physics frames deterministically |
 | `node-bounds PATH` | Exact position/size of a node (ground truth for layout/movement) |
 | `scene-tree --depth N` | The live hierarchy as JSON. Every node carries `script` (its `res://` script path, `""` if none) and `scene_file` (set on instanced scene roots) — which is how Phase 5 computes reach, and also the fastest way to map a changed `.gd` to the node path that runs it |
 | `ui-snapshot` / `ui-snapshot-diff` | Structured UI state; diff against a saved baseline |
-| `clear-nodes` | Free matching nodes: `--group NAME`, or via `cmd clear_nodes --args '{"method":"..."}'` / `'{"class":"..."}'` |
+| `clear-nodes --group N` / `--class C` / `--method M` | Free matching nodes. Prefer `--via-method NAME` (with `--via-args JSON`), which calls the game's own removal path on each match: bare `queue_free()` skips death handling entirely, so a cleared enemy drops nothing, pays no xp, and the teardown you thought you tested never ran |
 | `screenshot` | Visual verification (always `sleep 0.5`–`1` after a state change first) |
 | `cmd <verb> --args '{...}'` | Any project-registered verb from `list-commands` |
 | `harness-version` | The installed harness revision, game-side and client-side. Fills the `harness:` field of every gap logged in Phase 6; a non-zero exit means the addon and the client are on different versions (re-run `/scaffold-godot-harness`) |
@@ -383,8 +418,10 @@ Also test at least one guard/edge case per behavior (e.g. the effect must NOT ha
 ```bash
 "$PY" tools/devtools.py scene-tree > .devtools/tree-phase4.json
 "$PY" tools/devtools.py --json scripts-seen > .devtools/scripts-seen.json
-"$PY" tools/devtools.py quit
+"$PY" tools/devtools.py quit; echo "exit=$?"
 ```
+
+`quit` waits for the process to actually go and **exits 1 if it survived** (`--wait SECONDS`, default 10), naming the survivor. Do not ignore that code: a Godot that outlived its `quit` still owns the bus, so the next run's `launch` refuses to start or — worse — a second instance answers the same command file and replies come back for the wrong request.
 
 **Check what the engine touched.** Diff the current git status against the Phase 2 snapshot; any file changed now that is **not** in your session's edit set is engine re-serialization (`.tscn`, `.tres`, `project.godot` are the usual suspects) — report those separately as "engine-touched (re-serialization)", and do not stage them blindly with your work:
 
@@ -403,6 +440,14 @@ diff .devtools/git-status-before.txt .devtools/git-status-after.txt || true
 ```
 
 It prints **two denominators**: `worktree` (this session's edits — the honest per-session number) and `branch` (everything since the merge base, which dilutes as the branch grows). Judge the run on the worktree line.
+
+Three things are no longer scored as misses, and each is printed by name so you can disbelieve it:
+
+- **Scripts under `test_dir` are out of the denominator entirely.** They ran in Phase 1 and can never appear in a game session's scene tree, so counting them capped the ratio below 100% for anyone who wrote a test alongside a fix. They are listed as *excused, not credited* — reach cannot tell you they passed, only that it has nothing to say.
+- **`reach_aliases`** in `devtools_config.json` lets the project name an observed Node that vouches for a script no snapshot can ever see (a `RefCounted` helper, a `Resource` subclass). Those land in a **separate** `reached_alias` bucket with the voucher printed alongside, never folded into `reached` — a config declaration is the project's claim, not this run's observation.
+- **Autoloads and the DevTools extension** are `reached_implicit`: they run in every session but own no persistent node.
+
+So `reached 1/4` with three annotated credits is not a bad run, and a 100% line built on aliases is not the same evidence as one built on observation. Quote the line as printed rather than reducing it to a fraction.
 
 Then append this run to the ledger. **Writing `run.json` and running `record` are one step, not two — if you wrote `run.json` you MUST run `record` in the same breath**, in the same command block; a summary written from a `run.json` that never reached the ledger is a row lost forever. Write the results you have into a JSON object and hand it over; everything else — timestamp, sha, branch, changed files, and reach — is derived, not asked for:
 
@@ -428,13 +473,15 @@ EOF
 
 `value` is `warranted`, `overkill`, `insufficient`, or `inconclusive` — the same verdict Phase 6 writes up in prose, recorded here as an enum so it is countable. `record` downgrades a `warranted` whose changed files were never loaded, and says so on stderr. Leaving `cheaper_alternative` blank also draws a warning: it is the field that can say the harness was the wrong tool, and therefore the easiest one to skip.
 
-`verdict` is `pass`, `fail`, **`aborted`** (a runner exited `2` or the game never came up — never file it as a pass), or **`partial`** — which `record` sets itself, downgrading a reported `pass` whenever any check in `checks` has `"result": "blocked"`: a check that could not run is not a check that passed. Mark checks you could not execute as `blocked` rather than omitting them.
+`verdict` is `pass`, `fail`, **`aborted`** (the import gate or a runner exited `2`, or the game never came up — never file it as a pass), or **`partial`** — which `record` sets itself, downgrading a reported `pass` whenever any check in `checks` has `"result": "blocked"`: a check that could not run is not a check that passed. Mark checks you could not execute as `blocked` rather than omitting them.
 
 Each check is `{"name": ..., "result": "pass"|"fail"|"blocked"}`.
 
+The row has no `import` field — `record` keeps only the keys above and silently drops any others, so do not invent one. An import-gate failure lands in `verdict`; name the gate that failed in the summary prose instead.
+
 `record` **refuses to run with unknown reach**: no readable `--scene-tree` and no readable `--scripts-seen` is exit 1, telling you to re-capture before quitting or pass `--scripts-seen`. For a genuinely aborted run (the game never came up, so there is nothing to capture) pass `--no-reach`, which records `reach: null` on purpose — the escape hatch is explicit so a null reach is always a choice, never a default.
 
-The command prints which changed files the run reached, and names the ones it did not — including the worktree/branch split and any files credited as `implicit` (autoloads and the DevTools extension run in every session but own no node a snapshot can see). **Carry the worktree reach line into the Pass/Fail Summary verbatim.** A green run on a file nothing touched is a statement about the diff, not about the running game, and it is the one failure this workflow cannot otherwise see — the summary says "all checks passed" either way.
+The command prints which changed files the run reached and names the ones it did not, with the same worktree/branch split and the same `implicit` / `alias` / excused-test annotations described above. **Carry the worktree reach line into the Pass/Fail Summary verbatim.** A green run on a file nothing touched is a statement about the diff, not about the running game, and it is the one failure this workflow cannot otherwise see — the summary says "all checks passed" either way.
 
 Both `checks` and `verdict` are self-reported; reach is computed from the snapshots. If they disagree — every check passing on a file the snapshots say was never loaded — believe the snapshots and say so.
 
@@ -469,8 +516,8 @@ Append an entry to `log-devtools.md` at the project root (create it if missing).
 |---|---|
 | `warranted` | Runtime produced a claim the diff could not. Name it specifically — "the tween rests at 0.85, not 1.0", not "verified the animation". |
 | `overkill` | Everything passed and confirmed what was already known. Renames, comments, constants, pure refactors, and anything lint alone settled belong here. |
-| `insufficient` | It ran but could not reach or assert the thing that mattered. **Reach from Phase 5 decides this, not your impression** — if the changed file was never loaded, the verdict is `insufficient` even when every check passed. File the gap. |
-| `inconclusive` | Aborted (a runner exit `2`, or the game never came up), or the change was too small to judge. |
+| `insufficient` | It ran but could not reach or assert the thing that mattered. **Reach from Phase 5 decides this, not your impression** — if the changed file was never loaded, the verdict is `insufficient` even when every check passed, and a `reach_aliases` credit is a declaration rather than an observation, so it does not rescue one. File the gap. |
+| `inconclusive` | Aborted (a runner exit `2` from the import gate, lint, or the test runner, or the game never came up), or the change was too small to judge. |
 
 Two rules that keep this honest:
 
@@ -542,6 +589,6 @@ For each issue, present a recommendation in this format:
 
 ## Pass/Fail Summary
 
-Report results as a table: Godot binary used, harness drift (Phase 0) if any, config thresholds (fps_min / orphan_growth_max), lint status, unit test status, live scene name (and which entry point fired), validate-all, validate-ui, performance (FPS + orphan growth vs baseline), and each change-specific test (name + what it verified + pass/fail). List the project verbs discovered via `list-commands` that you used. Also check the Godot terminal output for GDScript runtime errors or warnings.
+Report results as a table: Godot binary used, harness drift (Phase 0) if any, config thresholds (fps_min / orphan_growth_max), import gate status, lint status, unit test status (with the `Selected: N of M discovered` figure, not just pass/fail), live scene name (and which entry point fired), validate-all, validate-ui, performance (FPS + orphan growth vs baseline), and each change-specific test (name + what it verified + pass/fail). List the project verbs discovered via `list-commands` that you used. Also check the Godot terminal output for GDScript runtime errors or warnings.
 
 **Include the worktree reach line from Phase 5** (the per-session denominator; report the branch ratio alongside it, labeled as such), naming any changed file the run did not reach. Do not report a run as verified when its changed files were never loaded — say which ones were covered at runtime and which were only read. If all checks pass *and* the changed files were reached, the commit is safe to proceed; if checks pass but reach was partial, say so plainly and let the user decide.

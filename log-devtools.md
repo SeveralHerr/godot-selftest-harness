@@ -1487,12 +1487,22 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   residue after discounting those is `crafting/recipes.gd` and `systems/skill_tree.gd`, which
   genuinely were not reached: the recipe cost and the Industry unlock were never opened in a
   running game.
-  - [gather:G-076] status: open | seen: 1 | harness: 0.7.0 | source: gather 2026-08-02
+  - [gather:G-076] status: fixed | fixed-in: 0.9.0 | seen: 1 | harness: 0.7.0 | source: gather 2026-08-02
   - Improvement: have the game side report the set of script paths actually *loaded*
     (`ResourceLoader`'s cache, or a `ClassDB`/`global_script_class_cache` walk) as a second
     reach input alongside the scene tree, so non-Node scripts can register. Without it, any
     project whose logic lives in Resources or RefCounted gets a permanently deflated reach
     number, which trains readers to ignore the field — the opposite of why it exists.
+  - Note (0.9.0): closed by a different mechanism than the one proposed. Rather than a
+    game-side `ResourceLoader`/`global_script_class_cache` walk, `verify_ledger.py` gained a
+    `reach_aliases` map in `devtools_config.json` — the project declares which observed Node
+    vouches for which non-Node script. Alias-credited files leave `NOT reached` and land in
+    `reached_alias` with the voucher named inline (`+1 by alias: items/types.gd via
+    items/items.gd`), never folded into `reached`, because a declaration is a claim and an
+    observation is not. A voucher that was not itself reached credits nothing, and aliases
+    do not chain. That solves the stated problem — a class that plainly ran no longer reads
+    as a miss — at the cost of per-project configuration the proposed fix would not have
+    needed. Same shipped change closes [G-102], whose Improvement asked for exactly this.
 
 - Gap: **no verb places an arbitrary placeable tile, so the chest-delivery branch is
   untestable.** `_deliver()` prefers a chest in reach and falls back to a ground pickup; only
@@ -1513,6 +1523,13 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
     Every placeable in the game is one registry lookup away, and the per-feature placer verbs
     (`place_station`, `place_build`, now `place_worker`) are three partial reimplementations
     of it that each cover their own author's case and nobody else's.
+  - Note (0.9.0, partial): only the compounding half shipped. `set-state --value` now
+    coerces `"400,400"`, `"(400,400)"` and `[400,400]` to a Vector2 and prints the
+    read-back, so the "reported `State updated` and wrote `(0, 0)`" behaviour is gone —
+    that is the `set_state` side of [G-137]. The headline is untouched: there is still no
+    verb that places an arbitrary placeable tile, so the chest-delivery branch is still
+    untestable, and `tile_at` ignoring its `x`/`y` is project-side. Stays open on the
+    `place_tile` ask.
 
 - Gap: **no headless fixture for "the actual world", so world-shaped assumptions go
   unchecked until runtime.** Every routing rule was unit-tested and correct in the abstract;
@@ -1537,7 +1554,7 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   script to crop 1260x1000 out of 1920x1080 and box-filter it to 630x500. Hiding the UI by
   hand is also easy to get wrong in the other direction — I re-enabled both before the
   gallery shots, and nothing would have told me if I had not.
-  - [gather:G-079] status: open | seen: 1 | harness: 0.7.0 | source: gather 2026-08-02
+  - [gather:G-079] status: fixed | fixed-in: 0.9.0 | seen: 1 | harness: 0.7.0 | source: gather 2026-08-02
   - Improvement: `screenshot --region X,Y,W,H` and `--hide-group GROUP` (repeatable), so a
     crop is reproducible from the command line instead of living in a throwaway script, and
     so "capture the world without the HUD" is one call that cannot leave the HUD hidden.
@@ -1564,7 +1581,7 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   anything and the failure presents as five broken tests in files you never touched.
   `--import` fixed it (`0 error(s), 0 warning(s)`, 295/295), but only because the project's
   own docs had the answer; the harness's output pointed nowhere.
-  - [gather:G-090] status: open | seen: 1 | harness: 0.8.0 | source: gather 2026-08-02
+  - [gather:G-090] status: fixed | fixed-in: 0.9.0 | seen: 1 | harness: 0.8.0 | source: gather 2026-08-02
   - Improvement: have `lint_project.gd` compare the `class_name` declarations it already
     scans against `.godot/global_script_class_cache.cfg` and, on a mismatch, fail with one
     line — `stale class cache: BoneWorker declared in res://… but absent from the cache; run
@@ -1580,10 +1597,16 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   keeping only `--session` worked first try. This is the *client* half of the note already
   under [G-036]; the difference is that `--isolated` now actively hands you the broken
   invocation.
-  - [gather:G-091] status: open | seen: 1 | harness: 0.8.0 | source: gather 2026-08-03
+  - [gather:G-091] status: fixed | fixed-in: 0.9.0 | seen: 1 | harness: 0.8.0 | source: gather 2026-08-03
   - Improvement: either drop the `userdata` line from `--isolated` output and say plainly
     that only the bus is isolated, or make it real by writing a scratch copy of
     `project.godot` with `use_custom_user_dir=true` — which is the [G-057] ask anyway.
+  - Note (0.9.0): the first of the two options this entry offered, plus more than it asked.
+    `--isolated` no longer prints a `userdata:` line at all; it prints the isolated bus dir
+    and, separately, `user://: <path>   (SHARED …)`. The bus really is isolated now
+    (`--devtools-busdir` / `GODOT_DEVTOOLS_BUSDIR`, honoured by the autoload), and `launch`
+    pings it before printing the follow-up command, so it can no longer hand you a broken
+    invocation. The `user://` half stays open under [G-115].
 
 - Gap: **`launch` cannot pass extra arguments to the Godot binary, so any run needing an
   engine flag has to re-implement launching.** Recording needs `--write-movie
@@ -1593,7 +1616,7 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   `GODOT_DEVTOOLS_SESSION` env var, detached stdout/stderr redirection — about 30 lines
   that will drift from the harness's copy. It also has to *not* pass `--mute`, since the
   movie writer records the audio bus into a `.wav` and a muted run captures silence.
-  - [gather:G-092] status: open | seen: 1 | harness: 0.8.0 | source: gather 2026-08-03
+  - [gather:G-092] status: fixed | fixed-in: 0.9.0 | seen: 1 | harness: 0.8.0 | source: gather 2026-08-03
   - Improvement: let `launch` forward everything after a bare `--` to the Godot command
     line (`devtools.py launch --isolated -- --write-movie out/frame.png --fixed-fps 30`),
     and make `--mute` opt-out rather than unconditional.
@@ -1616,7 +1639,7 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   explicitly: "the `.uid` I hand-wrote has not been validated by Godot." Lint's `UIDs: OK`
   covers presence and staleness but is only reachable with a working tree that compiles,
   which is exactly what a fan-out does not have until every agent lands.
-  - [gather:G-094] status: open | seen: 1 | harness: 0.8.0 | source: gather 2026-08-03
+  - [gather:G-094] status: fixed | fixed-in: 0.9.0 | seen: 1 | harness: 0.8.0 | source: gather 2026-08-03
   - Improvement: a `devtools.py new-uid` that emits a fresh, correctly-encoded, collision-
     checked uid string without launching the editor or importing. It is a pure function over
     `ResourceUID::id_to_text` plus a scan of existing sidecars, it needs no game, and it
@@ -1630,7 +1653,7 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   binned as "not applicable", so the classifier already has the concept — the test scripts
   just are not in it. Effect is the unflattering mirror of the fixed [G-044]: writing a test
   alongside a fix permanently caps your reach ratio below 100%.
-  - [gather:G-095] status: open | seen: 3 | harness: 0.8.0 | source: gather 2026-08-03
+  - [gather:G-095] status: fixed | fixed-in: 0.9.0 | seen: 3 | harness: 0.8.0 | source: gather 2026-08-03
   - Improvement: put paths under the configured `test_dir` in the existing "not applicable"
     bucket, or better, credit them from the Phase 1 run — `run_tests.gd` already knows
     exactly which test scripts it selected and executed.
@@ -1641,7 +1664,7 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   for a `-> void` — indistinguishable from a call that raised, which is the exact failure
   mode `gather-5my` is about. I asserted around it by reading the world afterwards, but a
   verb that reports "did this call complete" would have been a one-liner.
-  - [gather:G-096] status: open | seen: 1 | harness: 0.8.0 | source: gather 2026-08-03
+  - [gather:G-096] status: fixed | fixed-in: 0.9.0 | seen: 1 | harness: 0.8.0 | source: gather 2026-08-03
   - Improvement: give `run-method` a `--json` envelope like `scripts-seen` has, and have it
     distinguish "returned null" from "aborted" — the bridge already knows, since a raise
     unwinds before the reply is written.
@@ -1670,6 +1693,18 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
     `call("x")` / `connect("x", …)` string literals naming a method or signal that exists
     nowhere in the project. It is the same scan, and it would have printed this one as a
     finding before the game was ever launched.
+  - Note (0.9.0, partial): the scan shipped — `lint_project.gd` rule `string_ref_unresolved`
+    flags `has_method` / `has_signal` / `emit_signal` / `call` / `call_deferred` / `connect`
+    string literals that resolve to no `func` and no `signal` anywhere in the project. It
+    suppresses any name `ClassDB` carries on **any** engine class, and this gap's own
+    example is one of those: `open` is `FileAccess.open`; so are `close`, `start`, `stop`,
+    `play`, `clear`. So `has_method("open")` against a panel that implements
+    `set_open(bool)` is still not flagged — the exact literal that cost the session. What
+    it does catch is project-shaped contract names (`set_opened`, `wave_cleared`), which is
+    worth having but is not the case filed. Dropping the ClassDB suppression is not the
+    fix: every legitimate `connect("pressed", …)` would become a finding, and an advisory
+    that noisy is one nobody reads. Closing it properly needs the receiver's static type,
+    which a text scan does not have.
 
 - Gap: **no way to stage two interacting world states without the setup verbs undoing each
   other.** `place_station` puts a station at the nearest free cell *to the player* and
@@ -1693,6 +1728,21 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   - Improvement: check the owner file before writing the command rather than when reading a
     crossed reply, so the very first call fails with the pid mismatch instead of with an
     empty response the caller has to interpret.
+  - Note (0.9.0, partial): `send_command` now reads the owner record *before* it writes the
+    command file (`owner_status()`), so the pid a reply is judged against is the one that
+    was there when the request went out, and both the precheck message and the mismatch
+    error now say whether that pid is **confirmed gone** or **still alive** rather than
+    guessing "has likely exited". A dead-owner mismatch is called out as a survivor of an
+    earlier run, with the kill command — which is the [G-103] half.
+    An earlier cut of this fix *deleted* the stale owner file pre-write, and the review of
+    this log caught that it removes the very record `reply.pid` is compared against, so a
+    survivor's reply would then be accepted silently. It does not delete any more; staleness
+    is reported, never tidied away. What remains open is the gap as literally written: the
+    only condition a pre-write read can detect is "the recorded owner is gone". A **live**
+    second instance answering a bus it does not own is still caught from `reply.pid` after
+    the reply comes back, not before the command goes out — and it cannot be otherwise while
+    nothing on disk distinguishes a second live poller from none.
+    Stays open: the first call still cannot name a live foreign instance before it answers.
 
 - Gap: **`worker_state` indices are not stable across calls, and the trace silently lies.**
   `devtools_ext/commands.gd:1896` sorts `_bone_machines()` by live `position`, so as workers
@@ -1715,7 +1765,7 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   `RefCounted` helpers after `HealthManager` leaked one object per enemy — so neither
   `scene-tree` nor `scripts-seen` can observe it, and the ledger downgrades a run that
   exercised it for 40 game-seconds and produced 17-waypoint paths out of it.
-  - [gather:G-102] status: open | seen: 7 | harness: 0.8.0 | source: gather 2026-08-03
+  - [gather:G-102] status: fixed | fixed-in: 0.9.0 | seen: 7 | harness: 0.8.0 | source: gather 2026-08-03
   - Improvement: let a project declare non-Node scripts that a reached Node owns — e.g. a
     `reach_aliases` map in `devtools_config.json` (`world/tile_path_finder.gd` credited when
     `world/tile_scenes/bone_worker.gd` is reached) — or credit them the way autoloads are
@@ -1733,7 +1783,7 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   crashed one had not fully exited, which is the multi-instance cross-talk hazard arriving by
   accident rather than by choice. Recovery was `taskkill //F`, delete the owner and
   command/result files, relaunch.
-  - [gather:G-103] status: open | seen: 1 | harness: 0.8.0 | source: gather 2026-08-03
+  - [gather:G-103] status: fixed | fixed-in: 0.9.0 | seen: 1 | harness: 0.8.0 | source: gather 2026-08-03
   - Improvement: two small things. (1) Have the bus write a `last_command` breadcrumb that
     survives the process, so "the game died during verb X" is readable rather than inferred
     from the last log line. (2) Make the ping precheck notice that the owner pid is dead AND
@@ -1759,7 +1809,7 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   reports `script` and `scene_file` per node but nothing about which canvas it renders into.
   `canvas-scale --node PATH` is adjacent — it already walks the canvas chain to accumulate
   scale — and stops one field short.
-  - [gather:G-105] status: open | seen: 4 | harness: 0.8.0 | source: gather 2026-08-03
+  - [gather:G-105] status: fixed | fixed-in: 0.9.0 | seen: 4 | harness: 0.8.0 | source: gather 2026-08-03
   - Improvement: have `canvas-scale` also return `canvas_layer_path` and `canvas_layer` (the
     `layer` int, or `0` for the root canvas). Then "will this CanvasModulate reach that node"
     is one call per node instead of a manual read of the scene file.
@@ -1796,7 +1846,7 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   harness (`_cost_label.name = "Cost"`), which is the right fix here but does not help
   anyone reading a Control they did not write — the parent `@MarginContainer@243` and
   `@HBoxContainer@244` in that same path are still unaddressable.
-  - [gather:G-108] status: open | seen: 1 | harness: 0.8.0 | source: gather 2026-08-03
+  - [gather:G-108] status: fixed | fixed-in: 0.9.0 | seen: 1 | harness: 0.8.0 | source: gather 2026-08-03
   - Improvement: have `get-state`/`node-bounds` accept the `@Name@id` segments that
     `scene-tree` emits — they are stable for the life of the node, and round-tripping a path
     the harness itself just printed should never 404. Failing that, have `scene-tree` mark
@@ -1814,7 +1864,7 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   that had answered 20 seconds earlier. Workaround: drove `IslandManager._on_boss_died`
   directly instead of killing the real node, which tests the reward path but not the
   `health_manager.died` wiring that reaches it.
-  - [gather:G-109] status: open | seen: 2 | harness: 0.8.0 | source: gather 2026-08-03
+  - [gather:G-109] status: fixed | fixed-in: 0.9.0 | seen: 2 | harness: 0.8.0 | source: gather 2026-08-03
   - Improvement: let `scene-tree` take a `--property NAME` to include that property on
     every node it emits (`--property type` would have answered this in one call), or add a
     `find-nodes --class Enemy --where type=Elite` verb returning matching paths. The
@@ -1831,7 +1881,7 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   `tiles.png` while `GameItem.get_atlas()` wraps `game_items_atlas.tres` (an AtlasTexture whose
   own atlas is that same png), so comparing the wrapper reports a mismatch between identical
   pictures, and comparing the rect alone can match two different ones across the three sheets.
-  - [gather:G-110] status: open | seen: 1 | harness: 0.8.0 | source: gather 2026-08-03
+  - [gather:G-110] status: fixed | fixed-in: 0.9.0 | seen: 1 | harness: 0.8.0 | source: gather 2026-08-03
   - Improvement: let `--property` walk one level into a Resource — `--property texture.region`,
     `--property texture.atlas.resource_path` — falling back to the object id when the path does
     not resolve. Sprite regions, StyleBox colors, Shape2D extents and Timer sub-resources all
@@ -1848,18 +1898,25 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   a run: two instances ended up live and the client caught it with `Foreign instance on the
   bus: the reply to 'use_slot' came from pid 19256, but devtools_owner.json says pid 19472
   owns this bus`.
-  - [gather:G-111] status: open | seen: 2 | harness: 0.8.0 | source: gather 2026-08-03
+  - [gather:G-111] status: fixed | fixed-in: 0.9.0 | seen: 2 | harness: 0.8.0 | source: gather 2026-08-03
   - Improvement: have `--isolated` pass the userdata dir to the game the way it passes the
     session id (`--userdata`/`GODOT_USERDATA` on the child process), and have `launch` verify
     the new instance answers a `ping` on its own bus before printing the follow-up command —
     printing a command that cannot work is worse than failing, because it reads as success.
+  - Note (0.9.0): both asks, in the only form Godot allows. The dir the follow-up command
+    names is now a dir the game genuinely writes to — `launch` passes it as
+    `-- --devtools-busdir <dir>` and as `GODOT_DEVTOOLS_BUSDIR`, and the autoload puts the
+    command, result, owner and breadcrumb files there — so "the client watches the isolated
+    dir and the game does not write to it" is no longer true. And `launch` proves it with a
+    `ping` on that bus before printing anything. It is the *bus* that moved, not `user://`;
+    the sharing that leaves behind is [G-115], which stays open.
 
 - Gap: **`quit` is not reliably fatal, and nothing notices the survivor until it corrupts a
   read.** Three separate times a `quit` followed by a relaunch left the old process alive
   (`tasklist` showed two Godot PIDs, once at 1.4 GB), and the only symptom was verbs returning
   empty output. `python tools/devtools.py ping` then said `No response`, which reads as *no*
   game rather than *two*. Had to `taskkill //IM` and start over.
-  - [gather:G-112] status: open | seen: 2 | harness: 0.8.0 | source: gather 2026-08-03
+  - [gather:G-112] status: fixed | fixed-in: 0.9.0 | seen: 2 | harness: 0.8.0 | source: gather 2026-08-03
   - Improvement: have `quit` wait for the process to actually exit and report if it did not,
     and have `launch` refuse to start when another instance already owns the bus — the owner
     file it already writes has everything needed to detect it.
@@ -1904,6 +1961,18 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
     second after launch, rather than printing a path nothing will ever write to. Passing
     `GODOT_USERDATA` through to the spawned process — or `--userdata` straight to the game —
     would fix the underlying cause.
+  - Note (0.9.0, partial): the dishonesty is gone and the bus half is real. The autoload
+    honours `--devtools-busdir` / `GODOT_DEVTOOLS_BUSDIR`, `launch --isolated` passes a
+    fresh temp dir on both, and it now proves the new instance answers a `ping` on that bus
+    *before* printing the follow-up command — so a half-applied isolation fails at launch
+    instead of handing you a working-looking invocation. `launch` also prints
+    `user://: <path>   (SHARED — saves, screenshots and UI baselines are not isolated)`,
+    and `ping` reports `bus_dir` and `user_dir` as separate fields. What this entry names
+    and 0.9.0 does not change: `user://` is still shared, so screenshots, saves and UI
+    baselines still collide between instances. Godot resolves `user://` inside the engine
+    with no runtime switch, so the improvement above is not implementable as written; the
+    real close is [G-057]'s scratch project copy with `use_custom_user_dir=true`. Stays open
+    for that. `--isolated` is now honest about what it isolates, which is the smaller half.
 
 - Gap: **`harness-version` cannot be answered without a running game, so the field it exists
   to fill is unfillable at the moment you write the log.** `python tools/devtools.py
@@ -1912,7 +1981,7 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   precisely when the bridge is down. Workaround: none — the `harness:` field above says
   "unread" rather than carrying a number I would have had to copy from a neighbouring entry
   and might have been stale.
-  - [gather:G-116] status: open | seen: 1 | harness: unread | source: gather 2026-08-03
+  - [gather:G-116] status: fixed | fixed-in: 0.9.0 | seen: 1 | harness: unread | source: gather 2026-08-03
   - Improvement: read the client-side revision from disk when the bridge is down and report
     it alone, flagged as client-only, instead of failing the whole verb.
 
@@ -1925,7 +1994,7 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   (`charged_state` -> `ground_drops`) that walks the pickups and reports `slot_data.item.name`
   — which works, but it is a bespoke verb per Resource-shaped question, and the generic
   primitive should not need one.
-  - [gather:G-117] status: open | seen: 1 | harness: 0.8.0 | source: gather 2026-08-04
+  - [gather:G-117] status: fixed | fixed-in: 0.9.0 | seen: 1 | harness: 0.8.0 | source: gather 2026-08-04
   - Improvement: let `--property` take a dotted path (`--property slot_data.item.name`), or
     have `get-state` expand a Resource one level into its script variables instead of
     printing an object id. One level would have answered this without a new verb.
@@ -1946,7 +2015,7 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   `scene-tree` truncates before the World tab's children, so I could not even enumerate the
   Buttons to confirm `_build_world_tab` had produced them, let alone emit `pressed`. Workaround:
   test the callables directly and accept that a mis-wired `pressed.connect` would ship green.
-  - [gather:G-119] status: open | seen: 1 | harness: 0.8.0 | source: gather 2026-08-04
+  - [gather:G-119] status: fixed | fixed-in: 0.9.0 | seen: 1 | harness: 0.8.0 | source: gather 2026-08-04
   - Improvement: a `press --node PATH` verb that finds the nearest `BaseButton` and emits
     `pressed`, plus a `--filter`/`--depth` on `scene-tree` so a deep UI subtree can be listed
     without returning the whole scene.
@@ -1956,7 +2025,7 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   check on a game object therefore needs the camera transform reconstructed by hand
   (`(world - player) * zoom + viewport/2`), which is three devtools calls and an assumption
   that the camera is centred on the player. Workaround: exactly that, scripted.
-  - [gather:G-120] status: open | seen: 1 | harness: 0.8.0 | source: gather 2026-08-04
+  - [gather:G-120] status: fixed | fixed-in: 0.9.0 | seen: 1 | harness: 0.8.0 | source: gather 2026-08-04
   - Improvement: make `node-bounds` accept any `CanvasItem` and return its screen-space rect
     via `get_global_transform_with_canvas()`. That one change turns "is this thing drawn, and
     what colour is it" from a scripted reconstruction into two calls.
@@ -1965,7 +2034,7 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   "this sprite renders blue" meant writing a zlib/PNG reader inline to read pixels back. It
   worked and it is what caught the shader, but it is ~30 lines of scanline defiltering that
   every visual assertion would have to carry.
-  - [gather:G-121] status: open | seen: 3 | harness: 0.8.0 | source: gather 2026-08-04
+  - [gather:G-121] status: fixed | fixed-in: 0.9.0 | seen: 3 | harness: 0.8.0 | source: gather 2026-08-04
   - Improvement: a `sample-pixels --rect X,Y,W,H` verb returning mean/brightest/dominant RGB
     from the same capture path `screenshot` already uses. Colour regressions become assertable
     instead of eyeballed.
@@ -1987,7 +2056,7 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   "the boss ends the run" was therefore impossible with the shipped verbs — a test built on
   `clear-nodes` proves the nodes are gone and nothing else. Worked around by writing a project
   verb, `kill_enemy --args '{"type":"Elite"}'`, which drives `take_damage`.
-  - [gather:G-123] status: open | seen: 1 | harness: 0.8.0 | source: gather 2026-08-04
+  - [gather:G-123] status: fixed | fixed-in: 0.9.0 | seen: 1 | harness: 0.8.0 | source: gather 2026-08-04
   - Improvement: this is arguably project-specific (it needs to know about `HealthManager`), but
     the *shape* is not: `clear-nodes` is the only generic way to remove a node and it is always
     the wrong one when the node's removal has game meaning. A generic
@@ -1998,7 +2067,7 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   Button's `text` back to confirm the two-step NEW RUN confirm returned
   `Binary file (standard input) matches` from grep, because the reply carries embedded nulls.
   `tr -d '\000'` worked around it. Small, but it turns a one-line assertion into a pipeline.
-  - [gather:G-124] status: open | seen: 1 | harness: 0.8.0 | source: gather 2026-08-04
+  - [gather:G-124] status: fixed | fixed-in: 0.9.0 | seen: 1 | harness: 0.8.0 | source: gather 2026-08-04
   - Improvement: strip or escape non-printable bytes in the CLI's text output path.
 
 - Gap: **a dry run does not reproduce the recording's timestep, and the skill's "three clean dry
@@ -2032,7 +2101,7 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   `tonight_health_mult` for exactly one day, and `land_state` reports one parcel price; there is
   no verb that sweeps a pure static across a range. Two arithmetic slips in this session were
   caught only by a second pass.
-  - [gather:G-127] status: open | seen: 1 | harness: 0.8.0 | source: gather 2026-08-04
+  - [gather:G-127] status: fixed | fixed-in: 0.9.0 | seen: 1 | harness: 0.8.0 | source: gather 2026-08-04
   - Improvement: a generic `curve --node PATH --method NAME --from N --to M` verb that calls a
     static/pure method over an integer range and returns the series, so "what does this ramp
     actually look like" is one call rather than a transcription. It generalises past raids —
@@ -2058,7 +2127,7 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   events. Every one of those is available and none of them is the question. `validate-ui` reports
   0 issues for a UI whose only affordance is invisible on the current device, because an
   unreachable panel is not a layout fault.
-  - [gather:G-129] status: open | seen: 1 | harness: 0.8.0 | source: gather 2026-08-04
+  - [gather:G-129] status: fixed | fixed-in: 0.9.0 | seen: 1 | harness: 0.8.0 | source: gather 2026-08-04
   - Improvement: a generic `reachable-ui` verb that walks visible `Control`s with a `pressed`
     signal or a registered input action and reports `{action, node, rect, on_screen}` — the set a
     finger or cursor could actually hit this frame. Diffing that between `--touchscreen true` and
@@ -2066,6 +2135,14 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
     instead of it shipping. It generalises past touch: the same read catches a button laid out
     off-screen, one under a full-rect `MOUSE_FILTER_STOP` sibling, and one whose whole strip is
     hidden behind a device check.
+  - Note (0.9.0): shipped as `reachable_ui` / `reachable-ui`, close to the filed shape. It
+    reports `{path, type, text, rect, on_screen, blocked_by, kind}` per Control rather than
+    `action` — a registered input action is not reachable *through a Control*, and pretending
+    the two are one list would have made the count mean nothing. Occlusion is real: a later
+    `MOUSE_FILTER_STOP` sibling covering a control's centre is named in `blocked_by`.
+    Unreachable controls are listed with the reason, not omitted, so the touch-vs-desktop
+    diff the entry asks for is a diff of two full lists. Contract row asserts the fixture's
+    one Button comes back `count: 1, reachable: 1`.
 
 - Gap: **no verb answers "what would this cost the player", so balance questions have no
   - [gather:auto-2ac87a] status: open | seen: 1 | source: gather 2026-08-05
@@ -2101,7 +2178,7 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   prints `Result: True`, so piping it to a JSON parser — which works for every `cmd` verb —
   dies with `JSONDecodeError: Expecting value: line 1 column 1`. Five parallel calls produced
   five stack traces and no data before I noticed the verb itself had worked fine.
-  - [gather:G-131] status: open | seen: 1 | harness: 0.8.0 | source: gather 2026-08-05
+  - [gather:G-131] status: fixed | fixed-in: 0.9.0 | seen: 1 | harness: 0.8.0 | source: gather 2026-08-05
   - Improvement: give `run-method` the same `{action, success, message, data}` envelope as the
     registered verbs, with the return value under `data.result`, or accept `--json` on it. A
     client that has to special-case one verb's output format cannot be scripted uniformly.
@@ -2126,7 +2203,7 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   (res://player/player.gd:446)` and `ERROR: Failed to load script "res://items/items.gd" with error
   "Parse error"`. In a single-agent session that is a broken game reported as a clean import; here
   it was a concurrent edit mid-save, and only re-reading the log distinguished the two.
-  - [gather:G-133] status: open | seen: 1 | harness: 0.8.0 | source: gather 2026-08-05
+  - [gather:G-133] status: fixed | fixed-in: 0.9.0 | seen: 1 | harness: 0.8.0 | source: gather 2026-08-05
   - Improvement: have the harness wrap `--import` the way it wraps lint — a `tools/import.py`
     (or a lint phase flag) that greps the import log for `SCRIPT ERROR` / `Failed to load script`
     and exits 1, so "the class cache was regenerated" and "the project still parses" stop being the
@@ -2152,7 +2229,7 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   `--file test_player_combat` reports `Selected: 38 of 662 discovered`; the bare run reports only
   `Total: 662 | Passed: 660 | Failed: 2`. The two numbers are the same fact, but only the filtered
   form states the denominator explicitly, which is the form worth quoting in a handoff.
-  - [gather:G-135] status: open | seen: 1 | harness: 0.8.0 | source: gather 2026-08-05
+  - [gather:G-135] status: fixed | fixed-in: 0.9.0 | seen: 1 | harness: 0.8.0 | source: gather 2026-08-05
   - Improvement: always emit the `Selected:` line, with `(no selector)` where the filter would go.
 
 - Gap: **no generic verb for a space-state query, so "what would collide along this segment"
@@ -2165,7 +2242,7 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   back from two opposite-facing probes located a wall's faces at x=-256 and x=-240 exactly,
   after five short bisecting probes had all returned `clear` because a Godot ray originating
   inside a shape reports nothing.
-  - [gather:G-136] status: open | seen: 1 | harness: 0.8.0 | source: gather 2026-08-05
+  - [gather:G-136] status: fixed | fixed-in: 0.9.0 | seen: 1 | harness: 0.8.0 | source: gather 2026-08-05
   - Improvement: a generic `raycast --from X,Y --to X,Y [--mask N] [--areas]` verb, reporting
     `clear`, the collider's node path, and the hit position. It is ~20 lines against
     `direct_space_state`, needs nothing project-specific, and is the direct read for any
@@ -2179,14 +2256,14 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   error names the type it wanted and not the syntax that produces it, so the working form is
   found by guessing. This is the same coercion hole as `run-method`'s documented `gather-6sp`,
   one layer up.
-  - [gather:G-137] status: open | seen: 1 | harness: 0.8.0 | source: gather 2026-08-05
+  - [gather:G-137] status: fixed | fixed-in: 0.9.0 | seen: 1 | harness: 0.8.0 | source: gather 2026-08-05
   - Improvement: accept `x,y` and `(x,y)` as well as the JSON array, and on failure print the
     accepted forms rather than only the rejected type.
 
 - Gap: **`harness-version` reports `game not running`**, so the `harness:` field on every gap
   above is copied from the previous entry rather than read. The client half of the version is
   knowable with no game at all — it is the installed revision on disk.
-  - [gather:G-138] status: open | seen: 1 | harness: 0.8.0 | source: gather 2026-08-05
+  - [gather:G-138] status: fixed | fixed-in: 0.9.0 | seen: 1 | harness: 0.8.0 | source: gather 2026-08-05
   - Improvement: print the client revision unconditionally and mark the game half `unknown`
     when the bridge is cold, instead of failing the whole verb.
 
@@ -2197,3 +2274,86 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   calls, of which two exist purely to establish how much game time passed. The improvement filed
   last time (put `game_time` in the status provider merged into every reply) would have cut this
   to three calls and removed the only step that can silently invalidate the result.
+
+## 2026-08-05 — 0.9.0: 57 gaps pooled from gather, 31 of them closed
+
+`tools/upstream_gaps.py ../gather/log-devtools.md` pooled 57 open gaps (the section
+above), and three commits then closed a batch of them: `1b0b308` (bus honesty, reads, five
+new generic verbs, the four sibling tools), `dc842e0` (`curve`, `new-uid`, screenshot
+cropping/hiding, `scene-tree --root/--property`) and the release commit, which also
+carried `reachable_ui` — filed below as closing gather:G-129, and landed after the
+closure pass below had already been written, which is why it is not in the list.
+Closed as `fixed-in: 0.9.0`:
+gather:G-076, G-079, G-090, G-091, G-092, G-094, G-095, G-096, G-102, G-103, G-105,
+G-108, G-109, G-110, G-111, G-112, G-116, G-117, G-119, G-120, G-121, G-123, G-124,
+G-127, G-131, G-133, G-135, G-136, G-137, G-138. Four named in those commit messages
+stay **open** because only part of what they describe shipped, each with a note under it
+saying which part: gather:G-077 (the `set-state` coercion landed; no `place_tile` verb
+did), gather:G-098 (the string-literal scan landed but ClassDB owns `open`/`close`/
+`start`/`stop`/`play`/`clear`, so the gap's own `has_method("open")` example is still not
+flagged), gather:G-100 (the owner record is now read before the write and reported as
+confirmed-gone or still-alive; a *live* foreign instance is still only caught from
+`reply.pid` after it answers), gather:G-115 (the bus
+is genuinely isolated and verified now, but `user://` — saves, screenshots, UI baselines
+— is still shared, which is the sharing that entry is about).
+
+Validation actually run: `python tools/check_templates.py --full` against Godot 4.6.1,
+all stages passing, **72/72 verb-contract rows** on the final tree (71 before
+`reachable_ui` landed). The contract table grew two things this
+release that matter more than the row count: rows now assert the `data` KEYS the client
+reads by name, and a row that claims an effect carries an expected `{key: value}` map, so
+the `press` row asserts that the connected callable actually incremented a counter and
+the `"x,y"` / `"(x,y)"` coercion rows assert the Vector2 that was stored, not merely that
+the call returned success. The gate earned its keep once, on the second commit: a
+GDScript parse error in `_cmd_raycast` from Python-style implicit string concatenation
+across two lines —
+
+```
+templates/addons/godot_selftest/dev_tools.gd:3437 - Parse Error: Expected closing "}" after dictionary elements.
+```
+
+— which is the worst class of template defect there is, because a `dev_tools.gd` that
+does not parse does not instantiate, and the autoload takes the entire bridge down with
+it. Every verb in the user's game would have answered nothing.
+
+Not validated: nothing was driven over a real bus by hand this session beyond what
+`check_templates.py --full` drives itself, and the per-gap closure judgements below were
+made by reading the code, not by re-running each gap's original failure. That is H-020.
+
+- Gap: **nothing in this repo checks that a shipped fix closes the gap it names, so a
+  wrong judgement is invisible.** Thirty status lines moved to `fixed-in: 0.9.0` this
+  session on the strength of one agent reading `dev_tools.gd`, `devtools.py`,
+  `lint_project.gd`, `run_tests.gd`, `verify_ledger.py` and `import_check.py` and
+  deciding. Four of the thirty-four ids named in the commit messages turned out to be
+  partial and were left open — which is the process working, but it is also the measure
+  of the error rate: the same reading pass that caught four could have missed a fifth.
+  `check_templates.py` proves a verb answers with the keys it promises; it has no notion
+  of a gap id, so it cannot tell you that the verb answers the *question that was filed*.
+  The commit messages cite gap ids, `record_version.py --check` verifies stamps and doc
+  fan-out, and neither of them ever reads `log-devtools.md`.
+  - [H-020] status: open | seen: 1 | harness: 0.9.0
+  - Improvement: let a gap's status line carry the evidence that closed it — a
+    `verified-by:` field naming a `check_templates.py` contract row, a lint rule id, or a
+    named test — and have `record_version.py --check` fail when a line says
+    `fixed-in: <this version>` with no such reference, the same way it already fails on a
+    stale stamp. It would not prove the judgement right, but it would make an unevidenced
+    close visible instead of indistinguishable from an evidenced one.
+
+- Gap: **`check_templates.py` cannot be run by more than one agent at a time, so all
+  validation serialises behind the orchestrator.** It assembles a scratch Godot project
+  by copying `templates/` and then imports and launches it; two copies taken while a third
+  agent is mid-edit read different trees, and a copy taken during a write reads a
+  half-written file. This session ran four agents against this repo — three on
+  `README.md`, `templates/CLAUDE.harness.md` and `commands/verify.md`, one on this log —
+  and the only safe policy was that none of them touch the gate, exactly as
+  `gather:G-093` describes for a game project. Honest limit on this entry: no concurrent
+  run was attempted, so the corruption is predicted from the mechanism rather than quoted
+  from a failure — but the policy that avoided it cost real serialisation, and that part
+  is observed.
+  - [H-021] status: open | seen: 1 | harness: 0.9.0
+  - Improvement: have `check_templates.py` snapshot `templates/` into its scratch dir from
+    `git stash create` / `git archive HEAD` rather than from the working tree — a commit is
+    immutable and a concurrent edit cannot tear it — and give the scratch dir and its
+    `.godot/` a per-invocation name so two runs cannot share an import cache. A `--worktree`
+    flag for the deliberate case of validating uncommitted edits keeps today's behaviour
+    available where it is wanted.

@@ -48,12 +48,12 @@
     "tools/verify_ledger.py": "a26b468d1df619e179fc1a9436e07477672931c64c768ea6b3c7dd3609f17755"
   },
   "0.9.0": {
-    "addons/godot_selftest/dev_tools.gd": "866da7f71e1d532549671f4122817135160306d10ebfe7f42a2ad7bea5c17ac2",
+    "addons/godot_selftest/dev_tools.gd": "238cde984d6d612de289b2d085c5399d4ec96b331bae83179b97c8c1664c634e",
     "addons/godot_selftest/scene_validator.gd": "51ae6398991d10bf138d8b9a0dbdeabd067e64cdf6ea03f96bfdf641224046fb",
     "tools/lint_project.gd": "52698a71e5436e380d08300a91de699e663f597ed3c39042fe2ca227726b590e",
     "tools/run_tests.gd": "09f9c816d4a2e1ef9b4aca524639ab2935aaba3d765f481874c60b4bbd01d586",
     "tools/eval.gd": "cbc6afd9a9d1ac327743baeafe578314371d7e16da84b61d4cc63a444cd6c27f",
-    "tools/devtools.py": "d627e671aa8ac9f655257314643b949bca858962d346d70172ce67cb7b13d825",
+    "tools/devtools.py": "26b4ada5a918a2436a1182eddde5ea00079da92e5dd9a3916ba22e941158d307",
     "tools/check_devtools_log.py": "877177195403e152c2c8fd319298ffde7a27dd5bbae8e733309d09f298a2d334",
     "tools/upstream_gaps.py": "7eb6b2ec741cb327367925918ca8e0d09d38d363b8f800e08824c801cb567df8",
     "tools/verify_ledger.py": "3b04dd1bdf80de7441221040f59d8b38b2875a864c5aac245390c54cf1a2b41e",

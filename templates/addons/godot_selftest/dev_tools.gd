@@ -407,6 +407,7 @@ func _register_generic_handlers() -> void:
 	register_command("raycast", _cmd_raycast)
 	register_command("sample_pixels", _cmd_sample_pixels)
 	register_command("curve", _cmd_curve)
+	register_command("reachable_ui", _cmd_reachable_ui)
 
 
 func _load_extension() -> void:
@@ -3738,6 +3739,95 @@ func _cmd_curve(args: Dictionary) -> Dictionary:
 			", min %s max %s sum %s" % [str(lowest), str(highest), str(sum)] if numeric else " (non-numeric)"],
 		"data": data,
 	}
+
+
+## Every Control a finger or cursor could actually hit this frame.
+##
+## The bug this exists for: a feature had a key binding, a desktop button, a
+## passing suite and no way in on a phone. `validate_ui` reported 0 issues,
+## correctly -- an unreachable panel is not a layout fault -- and finding it took
+## forcing a feature flag, reading `visible` on two nodes, looking a button path
+## up in the scene tree, computing a rect centre and sending two touch events.
+## Every one of those reads is available and none of them is the question
+## (gather:G-129). Diffing this verb between `set_feature --touchscreen true` and
+## `false` names that class of bug outright.
+##
+## A Control counts as reachable when it is effectively visible, has a non-zero
+## on-screen rect, does not ignore the mouse, and is either a BaseButton or
+## carries a `gui_input`/`pressed` connection. `blocked_by` names a later sibling
+## whose own rect covers this one's centre and which stops input -- the
+## full-rect MOUSE_FILTER_STOP overlay that silently eats a button.
+##
+## data keys: controls (Array of {path, type, text, rect, on_screen, blocked_by,
+## kind}), count, reachable, viewport {w, h}.
+func _cmd_reachable_ui(_args: Dictionary) -> Dictionary:
+	var vp: Vector2 = Vector2(get_tree().root.size)
+	var found: Array = []
+	_collect_reachable(get_tree().root, vp, found)
+
+	# Occlusion: a Control drawn later covers one drawn earlier. Compare each
+	# candidate's centre against every LATER candidate's rect.
+	for i: int in found.size():
+		var entry: Dictionary = found[i]
+		var rect: Rect2 = entry["_rect"]
+		var centre: Vector2 = rect.position + rect.size * 0.5
+		for j: int in range(i + 1, found.size()):
+			var other: Dictionary = found[j]
+			if not other["_stops_input"]:
+				continue
+			if (other["_rect"] as Rect2).has_point(centre):
+				entry["blocked_by"] = other["path"]
+				break
+
+	var out: Array = []
+	var reachable: int = 0
+	for entry: Dictionary in found:
+		var clean: Dictionary = entry.duplicate()
+		clean.erase("_rect")
+		clean.erase("_stops_input")
+		if clean["on_screen"] and clean["blocked_by"].is_empty():
+			reachable += 1
+		out.append(clean)
+
+	return {
+		"success": true,
+		"message": "%d of %d interactive control(s) are actually reachable at %dx%d" % [
+			reachable, out.size(), int(vp.x), int(vp.y)],
+		"data": {
+			"controls": out,
+			"count": out.size(),
+			"reachable": reachable,
+			"viewport": {"w": vp.x, "h": vp.y},
+		},
+	}
+
+
+func _collect_reachable(node: Node, vp: Vector2, out: Array) -> void:
+	if node is Control:
+		var control: Control = node as Control
+		var kind: String = ""
+		if control is BaseButton:
+			kind = "BaseButton"
+		elif control.gui_input.get_connections().size() > 0:
+			kind = "gui_input"
+		if not kind.is_empty() and _is_effectively_visible(control) \
+				and control.mouse_filter != Control.MOUSE_FILTER_IGNORE:
+			var rect: Rect2 = control.get_global_rect()
+			if rect.size.x > 0.0 and rect.size.y > 0.0:
+				out.append({
+					"path": str(control.get_path()),
+					"type": control.get_class(),
+					"text": _get_control_text(control),
+					"rect": {"x": rect.position.x, "y": rect.position.y,
+						"w": rect.size.x, "h": rect.size.y},
+					"on_screen": Rect2(Vector2.ZERO, vp).intersects(rect),
+					"blocked_by": "",
+					"kind": kind,
+					"_rect": rect,
+					"_stops_input": control.mouse_filter == Control.MOUSE_FILTER_STOP,
+				})
+	for child: Node in node.get_children():
+		_collect_reachable(child, vp, out)
 
 
 func _load_validator() -> GDScript:

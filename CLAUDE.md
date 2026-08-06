@@ -19,6 +19,8 @@ into someone else's repo. Read `PURPOSE.md` for what the project is committed to
 | `templates/addons/godot_selftest/scene_validator.gd` | Scene/UI validation, namespaced `GodotSelftest*`. |
 | `templates/tools/devtools.py` | Python CLI client — the *other half* of the wire contract. |
 | `templates/tools/lint_project.gd`, `run_tests.gd` | Headless runners. Exit `0` pass / `1` findings / `2` couldn't run. |
+| `templates/tools/eval.gd` | Headless one-off script evaluator. Shipped and installed; easy to forget because no doc surface is required to name it. |
+| `templates/tools/import_check.py` | Wraps `godot --import`, which exits `0` while printing parse errors, and exits `1` on them. Runs ahead of lint in `/verify`. |
 | `templates/tools/check_devtools_log.py` | `Stop` hook installed into the target project. Always exits 0. |
 | `templates/tools/upstream_gaps.py` | Pools a project log's open gaps into this repo's log, deduped by id. **`tools/upstream_gaps.py` is a byte-identical copy** — edit the template, then copy it across. |
 | `templates/devtools_ext/commands.gd` | Stub the target owns; `commands.example.gd` is the reference. |

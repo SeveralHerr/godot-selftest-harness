@@ -112,6 +112,7 @@ Launch first: `godot --path . --mute &` then `sleep 5 && python tools/devtools.p
 | `curve --node PATH --method M --from A --to B [--step N]` | Call a pure method over an integer range and get the whole series — a difficulty ramp as one read. Capped at **500 points** |
 | `raycast --from X,Y --to X,Y [--mask N] [--areas]` | What a ray would hit, with collision-layer names resolved. A ray that **starts inside** a shape reports nothing |
 | `sample-pixels [--rect X,Y,W,H]` | Mean + dominant colour over a screen rect — "is it still on fire?" as numbers rather than a PNG to open |
+| `reachable-ui` | Every Control a finger/cursor could actually hit now; unreachable ones are listed `OFF-SCREEN` or `BLOCKED BY <path>`, not dropped. Diff it across `set-feature --touchscreen true\|false` to catch an affordance that exists on one device only — `validate-ui` reports 0 issues for that, correctly |
 | `node-bounds PATH` | Exact position/size (deterministic layout ground truth) |
 | `canvas-scale --node PATH` | Accumulated canvas scale + effective texture filter — the crisp/blurry question as one read |
 | `set-resolution --size W,H` | Resize the window (honest read-back; headless may clamp) |

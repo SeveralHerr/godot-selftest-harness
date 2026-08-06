@@ -282,26 +282,27 @@ def pid_alive(pid) -> bool:
     return True
 
 
-def _clear_stale_owner(user_data: Path) -> str:
-    """Delete an owner file whose process is gone. Returns a note, or ''.
+def owner_status(user_data: Path) -> dict:
+    """{present, pid, alive, path} for the bus owner record. Never raises.
 
-    A stale owner file after a crash is the NORMAL condition, not an anomaly -
-    but the client used to keep quoting it at every later call, so a clean
-    relaunch read as a second failure stacked on the first (gather:G-103). The
-    check runs before the command is written rather than after a crossed reply
-    comes back, so the very first call is the one that says so (gather:G-100).
+    Read BEFORE the command is written, so the very first call can say what it
+    knows instead of leaving the caller to interpret an empty response
+    (gather:G-100).
+
+    It deliberately does NOT delete a stale record, even though a dead owner
+    after a crash is the normal condition rather than an anomaly. The owner pid
+    is the only thing the reply-pid check has to compare against: deleting it
+    would turn "a survivor from an earlier run answered your command" - the
+    single most corrupting failure this bridge has - into silence. Staleness is
+    reported instead, which fixes the thing that actually hurt (a clean relaunch
+    reading as a second failure stacked on the first) without trading detection
+    for tidiness.
     """
-    owner, owner_path = _read_owner(user_data)
+    owner, path = _read_owner(user_data)
     if owner is None:
-        return ""
-    owner_pid = owner.get("pid")
-    if pid_alive(owner_pid):
-        return ""
-    try:
-        owner_path.unlink()
-    except OSError:
-        return ""
-    return "note: cleared stale %s (pid %s is gone)." % (owner_path.name, owner_pid)
+        return {"present": False, "pid": None, "alive": False, "path": path}
+    pid = owner.get("pid")
+    return {"present": True, "pid": pid, "alive": pid_alive(pid), "path": path}
 
 
 def _parse_project_godot(project_file: Path) -> dict:
@@ -468,13 +469,23 @@ def _wait_for_pickup(commands_path: Path, user_data: Path, action: str):
     owner, owner_path = _read_owner(user_data)
     owner_note = ""
     if owner is not None:
+        # "has likely exited" was a guess, and quoting it at every later call made
+        # a clean relaunch read as a second failure stacked on the first
+        # (gather:G-103). The pid is checkable, so check it and say which it is.
+        pid = owner.get("pid")
+        fate = ("that process is CONFIRMED GONE, so this is the ordinary "
+                "aftermath of a crash or quit - relaunch"
+                if not pid_alive(pid) else
+                "that process is STILL ALIVE, so it is running but not polling "
+                "THIS directory - check --userdata/--session")
         owner_note = (
             "\nOwner file {p} says pid {pid} (project {proj!r}, session {sess!r}) "
-            "last claimed this bus; that process has likely exited.".format(
+            "last claimed this bus; {fate}.".format(
                 p=owner_path.name,
-                pid=owner.get("pid"),
+                pid=pid,
                 proj=owner.get("project", ""),
                 sess=owner.get("session", ""),
+                fate=fate,
             )
         )
 
@@ -521,12 +532,9 @@ def send_command(project_path: Path, action: str, args: dict = None, timeout: fl
     commands_path = user_data / commands_name
     results_path = user_data / results_name
 
-    # Bus hygiene BEFORE the write, not after a crossed reply comes back: a dead
-    # owner is the ordinary aftermath of a crash, and leaving it in place made
-    # every subsequent call quote a process that no longer exists (G-100/G-103).
-    stale_note = _clear_stale_owner(user_data)
-    if stale_note:
-        print(stale_note, file=sys.stderr)
+    # Read the owner BEFORE writing, so a mismatch is attributable on the very
+    # first call rather than only once a crossed reply comes back (G-100).
+    owner_before = owner_status(user_data)
 
     # Clear any existing result
     if results_path.exists():
@@ -571,20 +579,38 @@ def send_command(project_path: Path, action: str, args: dict = None, timeout: fl
             # both are accepted as before.
             reply_pid = result.get("pid") if isinstance(result, dict) else None
             if isinstance(reply_pid, int):
-                owner, owner_path = _read_owner(user_data)
-                owner_pid = owner.get("pid") if isinstance(owner, dict) else None
+                owner_pid = owner_before["pid"] if owner_before["present"] else None
                 if isinstance(owner_pid, int) and owner_pid != reply_pid:
+                    # Two different situations, and conflating them is what made
+                    # the recovery path read as a second failure (G-103): a LIVE
+                    # owner means someone else legitimately holds this bus; a
+                    # DEAD one means a survivor from an earlier run answered,
+                    # which is the more corrupting case and the one that used to
+                    # be indistinguishable from a fresh instance.
+                    if owner_before["alive"]:
+                        detail = (
+                            "Another Godot instance owns this bus; use --session <id> "
+                            "(launch with `-- --devtools-session <id>`) or quit the "
+                            "other instance.")
+                    else:
+                        detail = (
+                            "The recorded owner pid {owner_pid} is GONE, so pid "
+                            "{reply_pid} is a survivor of an earlier run still "
+                            "polling this bus - not the instance you think you are "
+                            "driving. Kill it and relaunch:\n  {kill}".format(
+                                owner_pid=owner_pid, reply_pid=reply_pid,
+                                kill=("taskkill /F /PID %d" % reply_pid
+                                      if sys.platform == "win32"
+                                      else "kill -9 %d" % reply_pid)))
                     raise ForeignInstanceError(
                         "Foreign instance on the bus: the reply to '{action}' came "
                         "from pid {reply_pid}, but {owner_file} says pid {owner_pid} "
-                        "owns this bus.\n"
-                        "Another Godot instance owns this bus; use --session <id> "
-                        "(launch with `-- --devtools-session <id>`) or quit the "
-                        "other instance.".format(
+                        "owns this bus.\n{detail}".format(
                             action=action,
                             reply_pid=reply_pid,
-                            owner_file=owner_path,
+                            owner_file=owner_before["path"],
                             owner_pid=owner_pid,
+                            detail=detail,
                         )
                     )
 
@@ -1989,18 +2015,18 @@ def cmd_launch(args, project_path: Path):
     # Refuse to add a second instance to a bus a LIVE process already owns
     # (gather:G-112): two instances answering one bus is silent data corruption,
     # and the owner file already carries everything needed to detect it. A dead
-    # owner is cleared rather than obeyed - that is the normal post-crash state.
+    # owner is ignored, not obeyed - that is the normal post-crash state - but it
+    # is left on disk, because it is what the reply-pid check compares against.
     if not args.isolated:
         try:
             user_data = get_user_data_path(project_path)
         except FileNotFoundError as e:
             print(f"Error: {e}", file=sys.stderr)
             sys.exit(2)
-        _clear_stale_owner(user_data)
-        owner, owner_path = _read_owner(user_data)
-        if owner is not None and pid_alive(owner.get("pid")):
-            print(f"Error: pid {owner.get('pid')} still owns this bus "
-                  f"({owner_path.name}, session {owner.get('session', '')!r}).\n"
+        owner = owner_status(user_data)
+        if owner["present"] and owner["alive"]:
+            print(f"Error: pid {owner['pid']} still owns this bus "
+                  f"({owner['path'].name}).\n"
                   "Quit it first, or launch with --isolated to get a bus of your own.\n"
                   "Pass --allow-second-instance if you really mean to run two.",
                   file=sys.stderr)
@@ -2329,6 +2355,36 @@ def cmd_new_uid(args, project_path: Path):
         print(text)
     print(f"({len(existing) - len(made)} existing .uid sidecar(s) scanned for "
           "collisions)", file=sys.stderr)
+
+
+def cmd_reachable_ui(args, project_path: Path):
+    """What a finger or cursor could actually hit right now (bus verb:
+    reachable_ui, gather:G-129). Data keys read: controls, count, reachable,
+    viewport.
+
+    Diff this between `set-feature --touchscreen true` and `false` to catch an
+    affordance that exists on one device and not the other.
+    """
+    result = send_command(project_path, "reachable_ui", {})
+    if not result["success"]:
+        print(f"Failed: {result['message']}", file=sys.stderr)
+        sys.exit(1)
+    data = result.get("data") or {}
+    if "controls" not in data:
+        print(f"reachable-ui: the reply carried no 'controls' key. Keys: {sorted(data)}",
+              file=sys.stderr)
+        sys.exit(1)
+    print(result.get("message", ""))
+    for c in data["controls"]:
+        r = c.get("rect") or {}
+        why = ""
+        if not c.get("on_screen"):
+            why = "  OFF-SCREEN"
+        elif c.get("blocked_by"):
+            why = f"  BLOCKED BY {c['blocked_by']}"
+        label = f' "{_printable(c["text"])}"' if c.get("text") else ""
+        print(f"  {c.get('path')}{label}  [{c.get('kind')}] "
+              f"{r.get('x'):.0f},{r.get('y'):.0f} {r.get('w'):.0f}x{r.get('h'):.0f}{why}")
 
 
 def cmd_find_nodes(args, project_path: Path):
@@ -2761,6 +2817,13 @@ def main():
     p.add_argument("--exclude", action="append", metavar="NODE",
                    help="Exclude this CollisionObject2D (repeatable)")
     p.set_defaults(func=cmd_raycast)
+
+    # reachable-ui
+    p = subparsers.add_parser(
+        "reachable-ui",
+        help="Every Control a finger or cursor could actually hit this frame "
+             "(off-screen and input-blocked ones are named, not omitted)")
+    p.set_defaults(func=cmd_reachable_ui)
 
     # sample-pixels
     p = subparsers.add_parser(

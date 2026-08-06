@@ -315,7 +315,8 @@ set_game_speed, wait_frames, step_time, clear_nodes, validate_ui,
 get_ui_snapshot, get_node_bounds, save_ui_baseline, ui_snapshot_diff,
 list_commands, touch_press, touch_release, touch_drag, touch_clear, touch_list,
 set_feature, tilemap_cells, tilemap_region, scripts_seen, canvas_scale,
-set_resolution, harness_version, find_nodes, press, raycast, sample_pixels
+set_resolution, harness_version, find_nodes, press, raycast, sample_pixels,
+reachable_ui
 ```
 
 Notable behaviors:
@@ -448,6 +449,17 @@ Notable behaviors:
   meant an inline zlib/PNG reader — ~30 lines of scanline defiltering that every visual
   assertion would have to carry. This is the same capture path `screenshot` uses,
   summarized instead of saved.
+- **`reachable_ui`** returns every Control a finger or cursor could actually hit this
+  frame: `{controls: [{path, type, text, rect, on_screen, blocked_by, kind}], count,
+  reachable, viewport}`. A Control qualifies when it is effectively visible, has a
+  non-zero on-screen rect, does not ignore the mouse, and is either a `BaseButton` or
+  carries a `gui_input` connection. `blocked_by` names a **later** sibling whose rect
+  covers this one's centre and which stops input — the full-rect `MOUSE_FILTER_STOP`
+  overlay that silently eats a button. Unreachable controls are **listed with a reason**,
+  not omitted, so the answer is diffable. `validate_ui` cannot cover this: an unreachable
+  panel is not a layout fault, so it correctly reported 0 issues for a feature that had a
+  key binding, a desktop button, a passing suite and no way in on a phone. Diff this verb
+  between `set-feature --touchscreen true` and `false` and that class of bug names itself.
 - **`screenshot`** takes `region: [x,y,w,h]`, `hide: [node paths]` and
   `hide_group: [group names]`, and reports the applied `region` and the `hidden` paths.
   The crop and the hiding happen game-side inside one command, so a store capture is
@@ -524,7 +536,7 @@ touch <press|release|drag|clear|list>, set-feature, step-time,
 set-game-speed, wait-frames, clear-nodes, validate-ui, ui-snapshot,
 node-bounds, save-ui-baseline, ui-snapshot-diff, tilemap-cells,
 tilemap-region, scripts-seen, canvas-scale, set-resolution,
-find-nodes, press, raycast, sample-pixels, new-uid
+find-nodes, press, raycast, sample-pixels, reachable-ui, new-uid
 ```
 
 `new-uid` is the one subcommand that never touches the bus — see below.
@@ -557,6 +569,9 @@ Notable flags:
   repeatable; without `--mask` every layer is tested.
 - `sample-pixels [--rect X,Y,W,H]` — mean / dominant colour over a screen rect
   (default: the whole viewport).
+- `reachable-ui` — no flags. Prints every interactive Control with its rect, marking
+  each `OFF-SCREEN` or `BLOCKED BY <path>` rather than dropping it. Run it once per
+  device profile (`set-feature --touchscreen true|false`) and diff.
 - `curve --node PATH --method NAME --from N --to N [--step N] [--args JSON]
   [--arg-index N]` — the series a pure method produces over an integer range.
 - `scene-tree [--depth N] [--root PATH] [--property NAME]` — `--root` lists one subtree
