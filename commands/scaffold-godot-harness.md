@@ -351,7 +351,7 @@ fi
 
 The template section is deliberately **lean and reference-style** (a pointer /
 cheat-sheet, not a manual) because `CLAUDE.md` is always-on, per-session context.
-Keep the full procedures in `/verify`, this command, and the README.
+Keep the full procedures in `/verify`, this command, and `REFERENCE.md`.
 
 ## Step 9 — Install the devtools gaps log + its `Stop` hook
 

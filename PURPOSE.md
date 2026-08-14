@@ -92,5 +92,6 @@ the running game — this node moved, this label reads that, orphan growth was 3
 of "the diff looks right." When `/verify` can't reach the changed code at runtime, it says
 so explicitly rather than reporting a code read as verification.
 
-See `README.md` for the full reference, `CLAUDE.md` for how to work in this repo, and
+See `README.md` for the short introduction, `REFERENCE.md` for the full reference,
+`CLAUDE.md` for how to work in this repo, and
 `log-devtools.md` for what's currently missing.

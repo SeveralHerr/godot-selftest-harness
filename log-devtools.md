@@ -2772,3 +2772,122 @@ run against the real `gather` project (174 scripts, 91 global classes, 6 autoloa
 change added no false positives. The autoload mechanism was established by a standalone
 probe on 4.6.1 before any code was written, and the pause fix is checked by pausing a real
 tree over the bus rather than by reading `process_mode` back.
+
+## 2026-08-14 — README split: front door vs. reference manual
+
+- Value: **inconclusive** — a docs-only change. No Godot code moved, so `/verify` and
+  `check_templates.py` had nothing new to reach; `record_version.py --check` is the only
+  gate this touches and it is the one that ran.
+  - Cheaper: nothing. The doc-coverage rule is enforced by a script, and the script
+    names the file it enforces against, so the rename had to be made in both places.
+
+`README.md` was 1195 lines: the complete verb-by-verb manual, every CLI flag, and 30
+sharp edges — correct, and unreadable by anyone deciding in 60 seconds whether this tool
+is for them. Split into `README.md` (~90 lines: one-sentence claim, a mermaid diagram of
+the file bus, a worked example, a five-row capability table) and `REFERENCE.md` (the
+old file verbatim, `git mv`'d so history follows it).
+
+The first draft of the worked example was a list of `python tools/devtools.py …` lines,
+which is what the *implementation* looks like and not what *using it* looks like — the
+primary caller is an agent, and a reader who is deciding whether they want this needs to
+see the loop (ask in English → it picks the verbs → it reads the output → it makes a
+claim), not the argv. Replaced with a Claude Code transcript. Every line in it is the
+real print format, checked against `cmd_reachable_ui`, `cmd_set_feature` and `cmd_launch`
+in `templates/tools/devtools.py` and against the `%d of %d interactive control(s)…`
+message in `dev_tools.gd`, because a fabricated transcript in the README is a promise the
+tool then has to keep. Pointers updated in `CLAUDE.md`,
+`PURPOSE.md`, `commands/scaffold-godot-harness.md`, and — the one that had teeth —
+`DOC_RULES` in `tools/record_version.py`, which requires one doc to name all 46 bus verbs
+and all 48 CLI commands.
+
+- Gap: **nothing checks that a repo doc's internal links resolve.** `git mv README.md
+  REFERENCE.md` silently invalidated five cross-references in four files; four were found
+  by `grep -rn README`, and the fifth (`DOC_RULES`) only because it happened to be in the
+  same grep output. A rename of a doc nothing greps for by name would have shipped broken.
+  - [H-036] status: open | seen: 1 | harness: 0.12.0
+  - Improvement: a `--check` stage in `record_version.py` that resolves every relative
+    markdown link (`](foo.md)` and `` `foo.md` ``) in the repo's own docs against the
+    filesystem and exits 1 on a miss. It is ~15 lines and it runs in the gate that
+    already blocks a release.
+
+- Gap (not new, restated with evidence): **the README could not be shortened without a
+  human judging what a newcomer needs**, because nothing in the repo records who the
+  document is for. Every rule in `CLAUDE.md`'s "Docs move together" section pushes doc
+  content *in* — a verb must appear in the reference or the gate fails — and there was no
+  counter-pressure keeping any surface short. The result is the predictable one: the only
+  entry point grew to 1195 lines because growing it was always the compliant move.
+  - [H-037] status: open | seen: 1 | harness: 0.12.0
+  - Improvement: state the audience and a soft length ceiling at the top of each doc-role
+    (done for `README.md` in `CLAUDE.md` this turn: "the front door and deliberately names
+    almost none of them — don't grow it"). A ceiling nothing enforces is still better than
+    no stated intent, because a reviewer can now point at it.
+
+**Validation run this turn:** `python tools/record_version.py --check` — OK at 0.12.0,
+`46 bus verb(s) + 48 CLI command(s) documented`, which is the receipt that the coverage
+requirement followed the content to `REFERENCE.md` rather than being quietly dropped.
+`check_templates.py` was **not** run: nothing under `templates/` changed this turn.
+No version bump — no shipped file changed, so `harness_history.json` is untouched.
+
+## 2026-08-14 — Review of the bus design: one stale fact, one latent hazard
+
+No code changed this turn. A question about whether the file-bus implementation is
+sound turned into a read of `_check_for_commands`, and the read produced two things.
+
+- Value: **inconclusive** — a docs-and-log turn. `/verify` does not run in this repo and
+  no template changed, so the only gate with anything to say was
+  `record_version.py --check`.
+  - Cheaper: nothing for the hazard — it is only visible by reading the dispatch path
+    against the `_process` tick, which is exactly the reading that was done. The stale
+    line count would have been caught by `wc -l`, and never was, because nothing runs it.
+
+**Fixed this turn:** `CLAUDE.md`'s repo map called `dev_tools.gd` "~2k lines". It is
+**4,172**. A 2x miss in the one table that tells a new session what to expect is worse
+than no number, because it is believed. Replaced with the current figure, the version it
+was measured at, and the durable half of the claim ("by far the largest file here — find
+the `_cmd_<verb>` you need"). Every other factual claim in the map was checked at the same
+time: the scaffolder's "13 idempotent steps" is exactly right (`grep -c '^## Step'` = 13).
+
+- Gap: **a command that arrives while a handler is awaiting is dispatched on top of it,
+  and both replies race on the one result file.** `_process` calls
+  `_check_for_commands()` without `await` (`dev_tools.gd:230`), so an awaiting handler —
+  `step_time`, `input_tap`, any project verb that yields — returns control to `_process`
+  immediately. The next 100 ms tick re-enters `_check_for_commands`, and if a command
+  file is there it is read, deleted and dispatched while the first handler is still live.
+  Line 535 (`_current_request_id = request_id`) makes each reply carry the *right* id,
+  which is what it was written for, but it does not stop the two handlers overlapping in
+  the scene tree, and it does not stop reply A from being overwritten by reply B in
+  `user://devtools_results.json` before its client ever reads it. Reachable with a single
+  client: let a slow verb exceed the 30 s client timeout, then send another command.
+  - [H-038] status: open | seen: 1 | harness: 0.12.0
+  - **Not reproduced.** This was found by reading the dispatch path, not by hitting it,
+    and per `[H-033]` that makes the mechanism above a hypothesis until a scratch probe
+    confirms it. The probe is small: register a project verb that awaits 5 s, call it,
+    and write a second command file by hand while it runs.
+  - Improvement: a re-entrancy guard, not a queue. A `_busy` bool set around the
+    dispatch, checked at the very top of `_check_for_commands` **before** the read and
+    the delete, so a command arriving mid-await stays on disk and is picked up on the
+    next tick after the current handler returns. That is ~3 lines and it prevents the
+    overlap rather than relabeling it. Checking it after the read would be worse than
+    nothing: the file is deleted on pickup, so an early return past that point silently
+    eats the command.
+
+**Considered and rejected this turn**, recorded so it is not re-proposed:
+
+- **Making the bus concurrent.** The bus drives one process with one scene tree, and
+  every verb reads or mutates it. `press` then `get-state` only means anything in that
+  order, so serialization is the semantics, not a limitation. The real need — N agents at
+  once — is already met twice, and neither time through the bus: `--session` gives each
+  *instance* its own filenames, and `name_check.py` gives agents a full static gate that
+  opens no project at all.
+- **Dropping the 100 ms poll to per-frame.** Worth ~50 ms mean per verb by arithmetic,
+  which is perhaps 5% of a `/verify` run that already spends seconds launching Godot. And
+  the constant may be load-bearing: 60 `file_exists` syscalls/sec on Windows with an
+  antivirus filter hooking file ops is not obviously free. Measure before touching it.
+- **Splitting `dev_tools.gd`.** 4,172 lines in one file is the thing most likely to hurt
+  later, and it is still not worth a refactor that has to preserve every `_handlers`
+  registration exactly. The plugin's value is being trustworthy. Revisit with a concrete
+  reason, not a line count.
+
+**Validation run this turn:** `python tools/record_version.py --check` — OK at 0.12.0,
+11 shipped files, 46 bus verbs + 48 CLI commands documented. `check_templates.py` was
+**not** run: nothing under `templates/` changed. No version bump for the same reason.

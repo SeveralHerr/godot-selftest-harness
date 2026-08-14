@@ -60,7 +60,7 @@ _ADD_PARSER_RE = re.compile(r'add_parser\(\s*"([a-z][a-z0-9-]*)"')
 # curated subset (its primitives table), so it is not on this list.
 DOC_RULES = [
     # (doc path, which surface it must cover)
-    ("README.md", "both"),                      # the reference manual: bus verbs + CLI
+    ("REFERENCE.md", "both"),                   # the reference manual: bus verbs + CLI
     ("templates/CLAUDE.harness.md", "cli"),     # the in-project cheat sheet: CLI surface
 ]
 

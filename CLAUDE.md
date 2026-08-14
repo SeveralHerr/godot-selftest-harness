@@ -4,7 +4,8 @@
 `/verify` and `/scaffold-godot-harness` do not run against it — they run against a
 *target* Godot project. Everything under `templates/` is inert text that gets copied
 into someone else's repo. Read `PURPOSE.md` for what the project is committed to;
-`README.md` is the reference manual; this file is how to work here.
+`REFERENCE.md` is the reference manual (`README.md` is the short front door and stays
+short); this file is how to work here.
 
 ## Repo map
 
@@ -15,7 +16,7 @@ into someone else's repo. Read `PURPOSE.md` for what the project is committed to
 | `tools/record_version.py` | `--check` (stamps + mirrors + history agree with `plugin.json`) / `--record` (write this version's hashes). |
 | `commands/scaffold-godot-harness.md` | The installer. 13 idempotent steps. |
 | `commands/verify.md` | The pre-commit gate the target project runs. |
-| `templates/addons/godot_selftest/dev_tools.gd` | The bridge core + all generic verbs (~2k lines). |
+| `templates/addons/godot_selftest/dev_tools.gd` | The bridge core + all generic verbs. **By far the largest file here** (~4.2k lines as of 0.12.0) — don't expect to read it whole; find the `_cmd_<verb>` you need. |
 | `templates/addons/godot_selftest/scene_validator.gd` | Scene/UI validation, namespaced `GodotSelftest*`. |
 | `templates/tools/devtools.py` | Python CLI client — the *other half* of the wire contract. |
 | `templates/tools/lint_project.gd`, `run_tests.gd` | Headless runners. Exit `0` pass / `1` findings / `2` couldn't run. |
@@ -127,7 +128,9 @@ looks project-edited.
 A generic verb appears in up to four places. Changing the verb without changing these
 leaves a cheat-sheet that lies:
 
-- `README.md` — generic-commands list, notable behaviors, sharp edges, CLI flags.
+- `REFERENCE.md` — generic-commands list, notable behaviors, sharp edges, CLI flags.
+  This is the doc `record_version.py --check` requires to name every verb. `README.md`
+  is the front door and deliberately names almost none of them — don't grow it.
 - `templates/CLAUDE.harness.md` — the target project's always-on cheat-sheet (keep it
   lean and reference-style; it is per-session context, not a manual).
 - `commands/verify.md` — the Phase 4 primitives table.
