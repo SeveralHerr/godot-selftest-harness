@@ -576,6 +576,7 @@ def stage_runners(godot, scratch):
     if ok:
         ok = stage_vacuous_control(godot, scratch) and ok
         ok = stage_shader_control(godot, scratch) and ok
+        ok = stage_capture(godot, scratch) and ok
     return ok
 
 
@@ -720,6 +721,82 @@ def stage_vacuous_control(godot, scratch):
         return True
     finally:
         planted.unlink(missing_ok=True)
+
+
+def stage_capture(godot, scratch):
+    """capture.gd: the headless refusal, a real capture, and the flat-image control.
+
+    The refusal is the part that must never regress. Under --headless the viewport
+    texture is null, so a capture tool that does not check would write a blank file
+    (or a 0-byte one) and report success - a picture of nothing is indistinguishable
+    from a picture of a broken scene, and it would be believed.
+
+    The windowed half needs a real display. Where there is none it reports SKIPPED,
+    because a capture stage that quietly passes on a machine that cannot render is
+    the same lie one step further out.
+    """
+    shot = scratch / "harness_capture.png"
+    shot.unlink(missing_ok=True)
+    proc = run_godot(godot, scratch, ["--script", "res://tools/capture.gd",
+                                      "--", "--out", str(shot)])
+    if proc.returncode != 2:
+        return fail("capture.gd under --headless exited %d, expected 2 - it must "
+                    "refuse where there is no renderer, not write a blank image\n%s"
+                    % (proc.returncode, proc.stdout))
+    if shot.exists():
+        return fail("capture.gd refused under --headless but still wrote %s - the "
+                    "refusal has to come before the file is created" % shot.name)
+    print("stage 4 capture: headless refused (exit 2, no file written)")
+
+    # Windowed. No --headless, so this needs a display; anything else is SKIPPED.
+    def windowed(extra, timeout=GODOT_TIMEOUT):
+        return subprocess.run([str(godot), "--path", str(scratch)] + extra,
+                              capture_output=True, text=True, timeout=timeout)
+
+    try:
+        real = windowed(["--script", "res://tools/capture.gd", "--", "--out", str(shot)])
+    except subprocess.TimeoutExpired:
+        print("stage 4 capture: windowed capture SKIPPED (timed out - no display?)")
+        return True
+    if "could not run" in real.stdout and "headless" in real.stdout:
+        print("stage 4 capture: windowed capture SKIPPED (no display server available)")
+        return True
+    if real.returncode != 0:
+        return fail("windowed capture.gd exited %d\n%s" % (real.returncode, real.stdout))
+    if not shot.exists() or shot.stat().st_size == 0:
+        return fail("windowed capture.gd exited 0 but produced no usable file")
+    m = re.search(r"(\d+) distinct colour\(s\) sampled", real.stdout)
+    if not m:
+        return fail("capture.gd printed no distinct-colour count - the run cannot say "
+                    "whether anything actually drew\n%s" % real.stdout)
+    if int(m.group(1)) < 2:
+        return fail("capture of the fixture scene sampled %s colour(s) - it rendered "
+                    "nothing, or the sampler is broken" % m.group(1))
+    colours = int(m.group(1))
+
+    # Positive control for the flat-image detector. Without a scene that IS blank, a
+    # detector hard-wired to report "plenty of colours" passes every check above.
+    blank = scratch / "harness_capture_blank.tscn"
+    blank.write_text('[gd_scene format=3]\n\n[node name="Blank" type="Node2D"]\n',
+                     encoding="utf-8")
+    try:
+        flat = windowed(["--script", "res://tools/capture.gd", "--",
+                         "--scene", "res://harness_capture_blank.tscn",
+                         "--out", str(scratch / "harness_capture_blank.png"),
+                         "--fail-on-uniform"])
+        if flat.returncode != 1:
+            return fail("a scene that draws nothing exited %d under --fail-on-uniform, "
+                        "expected 1 - the flat-image check is not firing\n%s"
+                        % (flat.returncode, flat.stdout))
+        if "single flat colour" not in flat.stdout:
+            return fail("blank capture was not reported as flat\n%s" % flat.stdout)
+    finally:
+        blank.unlink(missing_ok=True)
+        (scratch / "harness_capture_blank.png").unlink(missing_ok=True)
+        shot.unlink(missing_ok=True)
+    print("stage 4 capture: windowed capture OK (%d colours), flat control fired "
+          "(exit 1 on a scene that drew nothing)" % colours)
+    return True
 
 
 # --------------------------------------------------------------------------

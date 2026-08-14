@@ -40,6 +40,7 @@ SHIPPED = [
     "tools/lint_project.gd",
     "tools/run_tests.gd",
     "tools/eval.gd",
+    "tools/capture.gd",
     "tools/devtools.py",
     "tools/check_devtools_log.py",
     "tools/upstream_gaps.py",

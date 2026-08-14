@@ -20,7 +20,8 @@ short); this file is how to work here.
 | `templates/addons/godot_selftest/scene_validator.gd` | Scene/UI validation, namespaced `GodotSelftest*`. |
 | `templates/tools/devtools.py` | Python CLI client — the *other half* of the wire contract. |
 | `templates/tools/lint_project.gd`, `run_tests.gd` | Headless runners. Exit `0` pass / `1` findings / `2` couldn't run. `lint_project.gd` also compiles every `.gdshader` and every `Shader` embedded in a `.tres` (0.13.0+) — new gates go in here as a pass, not as a fifth tool. |
-| `templates/tools/eval.gd` | Headless one-off script evaluator. Shipped and installed; easy to forget because no doc surface is required to name it. |
+| `templates/tools/eval.gd` | Headless one-off script evaluator. Shipped and installed. |
+| `templates/tools/capture.gd` | Screenshots one scene to PNG with no bridge and no running game. **The only shipped runner that must NOT be run headless** — headless has no renderer, so it exits `2` rather than writing a blank image. |
 | `templates/tools/import_check.py` | Wraps `godot --import`, which exits `0` while printing parse errors, and exits `1` on them. Runs ahead of lint in `/verify`. |
 | `templates/tools/name_check.py` | Static name resolution — **the only gate that never opens the project**, so N agents can run it at once and a never-imported worktree can run it at all. Resolves types/`class_name`s/autoloads/`preload` paths/engine members from source plus an engine API index cached per version under the user's cache dir. Runs ahead of `import_check.py` in `/verify`. |
 | `templates/tools/check_devtools_log.py` | `Stop` hook installed into the target project. Always exits 0. |

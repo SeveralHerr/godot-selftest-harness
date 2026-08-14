@@ -966,6 +966,68 @@ output contains parse/load errors, `2` couldn't run at all (no binary, no
 `devtools.py launch`: `--godot` → `$GODOT_BIN` → the config's `godot_bin`. Flags:
 `-p/--project`, `--godot`, `--json`.
 
+### Standalone runners: `tools/eval.gd` and `tools/capture.gd`
+
+Both are shipped and installed, and neither needs the bridge or a running game — they
+open the project, do one thing, and exit. Useful in a fresh worktree, on a project that
+has never launched, and when the question is about one scene rather than a session.
+
+**`eval.gd`** evaluates a single Godot `Expression` against the project:
+
+```bash
+godot --headless --path . --script res://tools/eval.gd -- --expr "Balance.xp_for_level(3)"
+```
+
+Global classes (`class_name`) bind to their loaded scripts, so constants and static
+functions resolve, and autoloads are reachable by node path after the runner awaits one
+frame. Live world state is *not* in scope — this opens the project, it does not play the
+game; anything depending on a running scene belongs on the bridge (`get-state`,
+`run-method`). Exit `0` result printed / `1` parse or execute failure / `2` no `--expr`.
+
+**`capture.gd`** writes one scene to a PNG:
+
+```bash
+godot --path . --script res://tools/capture.gd -- --scene res://ui/hud.tscn --out shot.png
+```
+
+Note the absent `--headless`, and it is the whole sharp edge. Headless Godot loads the
+dummy rendering driver, `root.get_texture()` returns **null**, and a tool that did not
+check would write a blank or zero-byte file and report success — a picture of nothing is
+indistinguishable from a picture of a broken scene, and it would be believed. So a
+headless run exits `2` and names the fix rather than producing a file. A real display is
+required; on CI that means a virtual one (`xvfb-run` and friends).
+
+| Flag | Purpose |
+|---|---|
+| `--scene <res://path>` | Scene to capture. Default: the project's main scene. |
+| `--out <path>` | Output PNG. `res://` and `user://` resolve. Default: `user://screenshots/capture_<scene>_<timestamp>.png`. |
+| `--frames N` | Frames to step before capturing (default `3`). |
+| `--size WxH` | Resize the window first, e.g. `--size 1920x1080`. |
+| `--fail-on-uniform` | Exit `1` if the capture is a single flat colour. |
+
+**`--frames` is not a formality.** Two is the floor for anything `Control`-shaped: the
+first frame is where `@onready` runs and containers get their size, so a capture taken
+earlier is a correctly-rendered picture of an unfinished layout — which looks like a
+layout bug and isn't one. Raise it for tweens, particles, or an animation you want
+settled.
+
+Every run prints scene, dimensions, frames stepped, **distinct colours sampled** and the
+output path. That colour count is the point: a flat image is what a broken scene, a
+capture taken too early, and a working solid-colour splash all produce, so the run says
+so out loud (`WARNING: the capture is a single flat colour`) instead of reporting a
+written file and stopping there. It stays exit `0` by default because a solid scene is
+legal; `--fail-on-uniform` makes it gate for callers using the capture as evidence that
+something drew.
+
+Exit `0` captured / `1` ran but produced nothing usable (scene missing or
+uninstantiable, save failed, flat under `--fail-on-uniform`) / `2` could not run
+(headless, malformed flag).
+
+This does not replace the bridge's `screenshot` verb, which photographs a **live
+session** mid-play — with its input state, spawned entities and elapsed time — and can
+crop, hide nodes, and be driven between other verbs. `capture.gd` answers the different
+question: what does this scene look like on its own.
+
 ### The run ledger (`tools/verify_ledger.py`)
 
 Phase 5 appends one row per `/verify` run to `.devtools/verify-runs.jsonl`, including

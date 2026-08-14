@@ -138,7 +138,7 @@ Same installer, for `res://tools/`:
 ```bash
 "$PY" "${CLAUDE_PLUGIN_ROOT}/tools/scaffold_install.py" files --project "$ROOT" \
   --plugin-root "${CLAUDE_PLUGIN_ROOT}" \
-  tools/lint_project.gd tools/run_tests.gd tools/eval.gd tools/devtools.py \
+  tools/lint_project.gd tools/run_tests.gd tools/eval.gd tools/capture.gd tools/devtools.py \
   tools/check_devtools_log.py tools/upstream_gaps.py tools/verify_ledger.py \
   tools/import_check.py tools/name_check.py
 chmod +x "$ROOT/tools/devtools.py" 2>/dev/null || true

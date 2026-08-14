@@ -16,7 +16,17 @@ Headless lint and unit tests need **no running game**; run them anytime:
 python tools/name_check.py                                       # names only — no engine at all
 godot --headless --path . --script res://tools/lint_project.gd   # UID + scene + dup-id lint
 godot --headless --path . --script res://tools/run_tests.gd      # unit tests (test_dir)
+godot --path . --script res://tools/capture.gd -- --scene res://ui/hud.tscn --out shot.png
 ```
+
+**`capture.gd` screenshots one scene without the bridge or a running game** — note the
+missing `--headless`. Headless has no renderer (`root.get_texture()` is null), so a
+headless run exits `2` naming the fix rather than writing a blank PNG. Flags:
+`--scene` (default: main scene), `--out`, `--frames N` (default 3 — **two is the floor**
+for `Control`s, since `@onready` and container sizing happen on the first frame),
+`--size WxH`, `--fail-on-uniform`. Every run prints the **distinct colours sampled**;
+a `WARNING: single flat colour` means the scene may have drawn nothing. For a *live*
+session mid-play use the bridge's `screenshot` verb instead.
 
 **`name_check.py` is the only gate that is safe to run in parallel.** It resolves types,
 `class_name`s, autoloads, `preload("res://…")` targets, engine classes/members and string

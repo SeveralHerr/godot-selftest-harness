@@ -1,0 +1,148 @@
+---
+name: harness-release
+description: Cut a release of the godot-selftest-harness plugin — bump the version stamps, record hashes, run the validation gates, log the turn, and commit. Use whenever shipping a change in this repo, or when asked to "release", "bump the version", "cut 0.x.0", or when a change under templates/ is finished and needs to go out. Also use to check release state without shipping.
+---
+
+# Releasing the harness
+
+Every shipped file carries a `# harness-version: X.Y.Z` stamp and a matching
+`HARNESS_VERSION` constant. They let a gap name the version it was seen on and let a
+refresh tell a stale file from a customized one, so they must never lag the release.
+This is the exact sequence, in order. Do not skip a step because the change felt small.
+
+## 0. Decide whether this is a release at all
+
+A docs-only turn that touches nothing under `templates/` **does not need a bump**, and
+saying so is a valid outcome. Check first:
+
+```bash
+git status --porcelain templates/
+```
+
+Empty means: no bump, no `check_templates.py`, and the log entry says "templates
+unchanged since last verified run". That is an honest answer; "should be fine" is not.
+
+Minor bump (`0.13.0` → `0.14.0`) for a new capability or a behavior change. Patch for a
+fix that changes no interface.
+
+## 1. Bump the stamps
+
+Only **stamp lines** change. Prose mentions of an older version elsewhere in the docs are
+historical facts ("reachable while paused since 0.12.0") and must be left alone — a blind
+find-and-replace across the repo rewrites history and is the main way this step goes
+wrong.
+
+```bash
+python .claude/skills/harness-release/bump_version.py 0.13.0 0.14.0
+```
+
+It edits the 11 shipped templates plus the `tools/upstream_gaps.py` mirror and
+`.claude-plugin/plugin.json`, and prints a per-file count. **Every file must report
+`stamp=1 const=1`.** A `0` means a file drifted out of the expected shape — go look
+before continuing.
+
+## 2. Record and check
+
+```bash
+python tools/record_version.py --record   # write this version's hashes
+python tools/record_version.py --check    # exits 1 on any drift
+```
+
+`--check` verifies three things at once: every stamp and constant equals
+`plugin.json`'s version, `tools/upstream_gaps.py` is byte-identical to its template, and
+`harness_history.json` holds current hashes for this version.
+
+**Never edit or delete a past entry in `harness_history.json`.** The scaffolder uses it
+to recognize files it shipped; a rewritten hash turns a pristine file into one that looks
+project-edited and starts getting backed up on every refresh.
+
+## 3. Run the gates
+
+```bash
+python tools/check_templates.py           # required if anything under templates/ changed
+python -m unittest discover -s tools      # scaffold/install unit tests
+```
+
+`check_templates.py` needs a real Godot binary. On this machine it resolves
+`C:\Users\gotmi\Documents\Godot_v4.7.1-stable_win64.exe` by default. If it prints
+`WARNING: no Godot binary found ... This is not a pass`, it returned **2** and you have
+verified nothing — do not proceed.
+
+`python3` on Windows is the Microsoft Store alias stub: it satisfies `command -v` and then
+refuses to run. Use `python`.
+
+If the change touched a **static analysis** template (`name_check.py`, the lint passes),
+also run it against a real scaffolded project and report the finding count. The scratch
+project is small and synthetic and cannot measure a false-positive rate — `name_check.py`
+once passed every stage while emitting 466 bogus warnings on a real project. Candidates
+with the harness installed: `../gather`, `../findmyballs`, `../moving-in`.
+
+If you added a check, it must **plant the defect it claims to detect** and be confirmed
+to fail before shipping. A stage that can only report success is not a stage.
+
+## 4. Log the turn
+
+Append to `log-devtools.md` — this repo's own gaps log, at harness-development level.
+The entry ends with a validation line naming what actually ran:
+
+```markdown
+**Validation run this turn:** `python tools/check_templates.py` — OK, including <the new
+line it printed>. `python tools/record_version.py --record` then `--check` — OK at
+`X.Y.Z`, 11 shipped files, N bus verbs + M CLI commands documented.
+```
+
+Close any gap this release fixed by editing its status line **in this log** to
+`status: fixed | fixed-in: X.Y.Z`. A project's copy of a pooled gap stays open until that
+project refreshes and confirms it. New gaps get
+`- [H-NNN] status: open | seen: 1 | harness: X.Y.Z` with the next free `H-` number:
+
+```bash
+grep -oE '\[H-[0-9]+\]' log-devtools.md | sort -u | tail -1
+```
+
+An honest "no gaps this turn" line counts — it is what distinguishes an absent gap from a
+forgotten log.
+
+## 5. Reconcile beads
+
+Close what shipped, and file what you found. Harness-native gaps should exist in both the
+log and beads; they drift apart quietly.
+
+```bash
+bd close <id> --reason="<what shipped, and how it was verified>"
+bd list --status=open
+```
+
+## 6. Commit and push
+
+Only when the user has asked. This repo commits directly to `master` — all releases do.
+
+The commit message is the release note: what shipped, **why the obvious implementation
+was not used** if it wasn't, how it was validated, and what was considered and rejected.
+Recording a rejected option is worth as much as recording a shipped one — it is cheaper to
+re-read than to re-refute.
+
+```bash
+git add -A && git commit -F - <<'EOF'
+release X.Y.Z: <the one-line claim>
+
+...
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+EOF
+git push origin master
+bd dolt push        # beads sync is separate from git; ask before running it
+```
+
+## Docs that must move with the code
+
+Changing a verb without these leaves a cheat-sheet that lies:
+
+| Surface | When |
+|---|---|
+| `REFERENCE.md` | always — `record_version.py --check` requires it to name every verb |
+| `templates/CLAUDE.harness.md` | always — the target's per-session cheat-sheet; keep it lean |
+| `commands/verify.md` | if the Phase 4 primitives table or the workflow changed |
+| `commands/scaffold-godot-harness.md` | only if the config schema or install set changed |
+| `templates/addons/godot_selftest/devtools_config.json` | new config key |
+| `README.md` | almost never — it is the front door and names few verbs by design |

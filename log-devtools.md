@@ -3046,3 +3046,65 @@ decoy and also exits `1`. A stage that only reports success is not a stage ([H-0
 nothing — not `check_templates.py`, not `CLAUDE.md`, not any command. It only ran this
 turn because it was gone looking for. A suite nothing invokes is a suite that will rot
 without anyone noticing, which is the same class of problem as a gate that cannot fail.
+
+## 2026-08-14 — A release skill, and standalone scene capture (0.15.0)
+
+**Added `.claude/skills/harness-release/`.** The release sequence had been run by hand
+three times in one day — bump stamps, `--record`, `--check`, `check_templates.py`, log
+entry, close beads, commit — and it is fixed enough to encode. The skill carries
+`bump_version.py`, which rewrites *only* the two stamp shapes and leaves prose mentions
+of older versions alone (a line like "reachable while paused since 0.12.0" is a
+historical fact, and a repo-wide replace turns it into a lie — the way this step actually
+goes wrong).
+
+It found a bug in itself within the hour. `bump_version.py` shipped with its own copy of
+the shipped-file list, `capture.gd` was added to `record_version.py`'s `SHIPPED` and not
+to that copy, and the bump silently left the new tool a version behind. `--check` caught
+it (`tools/capture.gd: stamp 0.14.0 != plugin.json 0.15.0`), which is the gate doing its
+job — but the right fix was deleting the duplicate: `bump_version.py` now imports
+`SHIPPED` and `MIRRORED` from `record_version.py`, so there is one list and it lives with
+the checker that enforces it. A partial bump also now re-runs cleanly, printing
+`already at X.Y.Z` instead of reporting every finished file as a failure — which is
+precisely the state someone is in when they need that output to be readable.
+
+**Added `templates/tools/capture.gd`**, from another session's feedback: it hand-rolled a
+`capture.gd` (SceneTree, frame-stepped, `root.get_texture().get_image().save_png()`) and
+noted that this is the boilerplate every visual Godot check needs. It is — and the fact
+that a session had to write it is the finding. The harness could photograph a *running
+session* through the bridge and had no way at all to photograph *a scene*, so the ask
+landed as a shipped tool rather than a skill carrying a snippet: a template gets a
+version stamp, a `harness_history` hash, a `check_templates` stage, and installation into
+every scaffolded project. A skill would have told the next agent how to write the file
+again.
+
+The sharp edge is that **it must not run headless**, which inverts the rule every other
+runner here follows. Probed on Godot 4.7.1 (scratchpad/shotprobe): under `--headless`
+`DisplayServer.get_name()` is `"headless"`, `root.get_texture()` returns **null**, and a
+naive implementation would write a blank or zero-byte PNG and report success. Windowed,
+the same script captured 320x200 with `pixel(10,10)` equal to the exact colour painted
+into the fixture — so it is genuinely rendering, not reading a cleared buffer. The tool
+therefore exits `2` under headless, before doing any work, naming the fix.
+
+Every run prints the **distinct colours sampled**, because a flat image is what a broken
+scene, a capture taken too early, and a working solid-colour splash all produce, and only
+the first two are bugs. Default is a loud `WARNING` at exit `0` (a solid scene is legal);
+`--fail-on-uniform` makes it gate. `--frames` defaults to 3 and the docs say why two is
+the floor: `@onready` and container sizing land on the first frame, so an earlier capture
+is a correctly-rendered picture of an unfinished layout — which reads as a layout bug and
+is not one.
+
+- Also fixed a documentation gap `CLAUDE.md` had already flagged about itself: `eval.gd`
+  was shipped and installed but named in **no** doc surface ("easy to forget because no
+  doc surface is required to name it"). `REFERENCE.md` now has a *Standalone runners*
+  section covering both it and `capture.gd`.
+
+**Validation run this turn:** `python tools/check_templates.py` — **OK**, with the new
+`stage 4 capture` proving all three cases: headless refused (exit `2`, **no file
+written**), a real windowed capture (3 colours), and the flat control firing (exit `1` on
+a scene that draws nothing). That last one is the [H-035] point — without a genuinely
+blank scene, a colour counter hard-wired to report "plenty" passes every other check.
+`python .claude/skills/harness-release/bump_version.py 0.14.0 0.15.0` then
+`record_version.py --record` / `--check` — OK at `0.15.0`, **12** shipped files, 46 bus
+verbs + 48 CLI commands documented.
+
+No new gaps this turn beyond the one closed above.
