@@ -224,9 +224,13 @@ half of an invariant pair is a latent trap — a `set_combo` that sets the count
 the combo window tests nothing the moment the readout starts fading on that timer.
 
 ### Gotchas
-- **One command at a time.** The bus is one command file / one result file. Requests
-  carry an id the game echoes, so a crossed reply now errors (`Crossed replies: …`)
+- **One command at a time, enforced.** The bus is one command file / one result file.
+  Requests carry an id the game echoes, so a crossed reply errors (`Crossed replies: …`)
   instead of silently returning another request's data — detection, not concurrency.
+  A command sent while a handler is still running (`step_time`, `input_tap`, a project
+  verb that awaits) waits on disk and runs when that handler returns; it is deferred,
+  never dropped and never run alongside. So a timeout can now mean *your command never
+  started* — the error says which, and naming the verb that is hogging the bus.
   For *parallel* instances give each its own bus: `launch --isolated`, or launch with
   `-- --devtools-session <id>` and call with `--session <id>`. That isolates the **bus
   only** — Godot has no switch for `user://`, so saves, screenshots, UI baselines and the

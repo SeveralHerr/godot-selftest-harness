@@ -2858,11 +2858,12 @@ time: the scaffolder's "13 idempotent steps" is exactly right (`grep -c '^## Ste
   the scene tree, and it does not stop reply A from being overwritten by reply B in
   `user://devtools_results.json` before its client ever reads it. Reachable with a single
   client: let a slow verb exceed the 30 s client timeout, then send another command.
-  - [H-038] status: open | seen: 1 | harness: 0.12.0
-  - **Not reproduced.** This was found by reading the dispatch path, not by hitting it,
-    and per `[H-033]` that makes the mechanism above a hypothesis until a scratch probe
-    confirms it. The probe is small: register a project verb that awaits 5 s, call it,
-    and write a second command file by hand while it runs.
+  - [H-038] status: fixed | fixed-in: 0.16.0 | seen: 1 | harness: 0.12.0
+  - **Reproduced before fixing, as `[H-033]` requires.** The probe was the one described
+    here: `step_time 5s`, then a `ping` command file written by hand 1 s later. The ping's
+    reply appeared at 1.26 s — inside the still-running `step_time` — and the `step_time`
+    reply overwrote it at 5.12 s. The read of the dispatch path was right in every
+    particular.
   - Improvement: a re-entrancy guard, not a queue. A `_busy` bool set around the
     dispatch, checked at the very top of `_check_for_commands` **before** the read and
     the delete, so a command arriving mid-await stays on disk and is picked up on the
@@ -3108,3 +3109,73 @@ blank scene, a colour counter hard-wired to report "plenty" passes every other c
 verbs + 48 CLI commands documented.
 
 No new gaps this turn beyond the one closed above.
+
+## 2026-08-14 — H-038: the bridge now actually serves one command at a time (0.16.0)
+
+`[H-038]` was logged as read-not-run, so the first move was the probe `[H-033]` requires,
+and it landed the hypothesis exactly. `step_time 5s`, then a `ping` command file written
+by hand 1 s later:
+
+```
+  0.00s  wrote A = step_time 5s
+  1.16s  wrote B = ping
+  1.26s  RESULT FILE -> id=B action=ping        <- inside the still-running step_time
+  5.12s  RESULT FILE -> id=A action=step_time   <- overwrites B before any client reads it
+```
+
+Two handlers in one scene tree, and B's reply destroyed by A's. The fix is the guard the
+gap proposed — a `_dispatch_busy` bool set around the dispatch and checked at the very top
+of `_check_for_commands`, before the read and the delete — and after it the same probe
+shows A at 5.09 s and B at 5.19 s: deferred by one poll tick, not dropped.
+
+**The one-line fix was not one line, because the guard makes a previously true statement
+false.** `devtools.py`'s 2 s liveness precheck read "command file still on disk" as proof
+that nothing is polling, and a deferred command sits on disk *on purpose*. Shipping the
+guard alone would have made every command sent during a slow verb die instantly with
+`game not running` — a confidently wrong diagnosis, the failure mode this repo has paid
+for more than once. Proven, not assumed: with the guard in and the client untouched, the
+new stage fails with `send_command('ping') raised GameNotRunningError while the game was
+alive and busy inside step_time`. The discriminator is the breadcrumb file plus a fresh
+owner heartbeat (`_handler_in_flight`) — breadcrumb alone is ambiguous by design, since
+the same file is what names the verb that took a game *down*. A timeout now also says
+which case it hit and withdraws the queued command rather than letting it fire minutes
+later against changed state.
+
+The guard also needed an escape it was not asked for. A GDScript runtime error inside an
+`await` does not raise — the coroutine simply never resumes — so the line clearing the
+flag would never run and the bus would go deaf until restart, silently. That is worse
+than the race it prevents, so a 300 s watchdog releases the guard with a log line naming
+the verb. The ceiling clears the longest legitimate handler (`step_time` 60 s,
+`validate_all` ~90 s) on purpose: a slow handler must never trip it.
+
+- **A check that watches the result file for both replies cannot work, and looked like it
+  did.** The first version of the stage polled `devtools_results.json` at 20 ms for the
+  two replies in order. The second command is picked up within one ~100 ms poll of the
+  first reply being written, so the first reply exists on disk for a few milliseconds —
+  the stage missed it roughly half the time and reported the *passing* implementation as
+  the bug, with a confident message about handlers sharing the tree. The game's log had
+  the truth all along (`Executing: step_time` frame 271, `Executing: ping` frame 706,
+  3.01 s apart). The stage now reads those durable timestamps and answers by subtraction
+  instead of by winning a race; 4 consecutive runs report 3.10–3.11 s.
+  - [H-041] status: fixed | fixed-in: 0.16.0 | seen: 1 | harness: 0.16.0
+  - Worth keeping as a rule: **when asserting ordering on this bus, assert against the
+    log, not the result file.** The result file is last-writer-wins by design and holds
+    any given reply only until the next one lands.
+- **Two concurrent `send_command`s are not a way to test anything**, and the second draft
+  of the client check used them. Both clients poll the one result file, so whichever
+  reads second finds its reply already consumed and times out after 30 s — the
+  single-client hazard `REFERENCE.md` documents, reproduced by the test rather than by
+  the code under test. The slow verb is now started by writing its command file directly,
+  leaving exactly one real client on the bus.
+
+**Validation run this turn:** `python tools/check_templates.py --full` — **OK**, with two
+new lines under stage 5: the deferral gap (`ping sent 0.5s into a 3s step_time was
+dispatched 3.10s in`) and the client surviving it (`answered after 2.6s instead of failing
+the 2s liveness precheck`). Both were confirmed to **fail** first, in all three ways they
+can ([H-035]): guard removed → `dispatched ON TOP ... ping started 0.52s after step_time
+began`; guard moved after the read/delete → `the deferred command was EATEN`; client
+precheck reverted → `GameNotRunningError while the game was alive and busy`.
+`python -m unittest discover -s tools` — 17 tests OK. `record_version.py --record` then
+`--check` — OK at `0.16.0`, 12 shipped files, 46 bus verbs + 48 CLI commands documented.
+
+No new gaps this turn beyond the two closed above.

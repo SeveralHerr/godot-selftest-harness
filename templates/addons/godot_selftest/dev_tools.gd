@@ -14,14 +14,14 @@ extends Node
 ## extension loads AFTER the generic handlers, a project may override a generic
 ## verb by registering the same action string (last-writer-wins).
 
-# harness-version: 0.15.0
+# harness-version: 0.16.0
 # --- Constants ---
 
 ## Version of the godot-selftest-harness these files were copied from. Reported by the
 ## `harness_version` verb and stamped into every copied tool script, so a gap logged
 ## against a project can name the version it was seen on, and a refresh can tell a
 ## stale file from a customized one. Bump with .claude-plugin/plugin.json.
-const HARNESS_VERSION: String = "0.15.0"
+const HARNESS_VERSION: String = "0.16.0"
 
 ## Default bus filenames. With a session id (see _resolve_session) the id is spliced in
 ## before the extension, so two instances can each own a bus in the same user:// dir.
@@ -62,6 +62,19 @@ const ORPHAN_BASELINE_FRAMES: int = 30
 ## Hard ceiling on a single step_time request. The bridge serves one command at a
 ## time, so a typo'd "seconds" would otherwise wedge it for as long as the typo says.
 const STEP_TIME_MAX_SECONDS: float = 60.0
+
+## How long a single dispatch may hold the re-entrancy guard before the guard is
+## force-released (H-038). This is a deadlock escape, NOT a command timeout: the
+## handler is not cancelled (GDScript cannot), it is simply no longer allowed to
+## keep the bus deaf.
+##
+## The ceiling has to clear the longest LEGITIMATE handler or it would reintroduce
+## the overlap it exists to prevent -- step_time alone may run 60s, and validate_all
+## over a large project has been measured near 90s. 300s is well past both, which is
+## the correct bias: a live-but-slow handler must never trip this, while a handler
+## killed by a runtime error mid-await (which never resumes, so it never clears the
+## guard) must not brick the bus until the game is restarted.
+const DISPATCH_WATCHDOG_MSEC: int = 300000
 
 ## Default configuration, used verbatim when CONFIG_PATH is missing. Keys read by
 ## this core: validator_script, extension_script, hud_layer_name, scan_root,
@@ -163,6 +176,23 @@ var _scripts_seen: Dictionary = {}
 ## silently parsing another request's payload and reporting a missing key. Driving
 ## the bridge from two threads is still wrong; it is now merely loud about it.
 var _current_request_id: String = ""
+## True from the moment a handler is dispatched until it returns (H-038).
+##
+## _process calls _check_for_commands() WITHOUT await, so an awaiting handler --
+## step_time, input_tap, any project verb that yields -- hands control straight back
+## to _process. The next 100 ms tick would then read, DELETE and dispatch whatever
+## command file had arrived, running a second handler on top of the first in the same
+## scene tree and racing both replies onto the one result file. Measured, not
+## theorised: step_time 5s + a ping 1s later produced the ping's reply at 1.26s and
+## the step_time reply overwriting it at 5.12s.
+##
+## _current_request_id fixes neither half of that; it only makes a crossed reply
+## detectable after the fact. The guard prevents the overlap instead, and it must be
+## checked BEFORE the read and the delete -- checking it after would eat the command,
+## since pickup deletes the file.
+var _dispatch_busy: bool = false
+var _dispatch_busy_since_msec: int = 0
+var _dispatch_busy_action: String = ""
 # Live reference to the instantiated registry extension. MUST be held so the
 # Callables it bound (via register_command) are not freed out from under us.
 var _extension: RefCounted = null
@@ -492,6 +522,14 @@ func _load_extension() -> void:
 # --- Command Processing ---
 
 func _check_for_commands() -> void:
+	# Re-entrancy guard (H-038). FIRST, ahead of the existence test and well ahead of
+	# the read/delete below: a command that arrives mid-await stays on disk and is
+	# picked up on the tick after the current handler returns. Deferring is the whole
+	# point -- the command is not dropped, only delayed.
+	if _dispatch_busy:
+		_check_dispatch_watchdog()
+		return
+
 	if not FileAccess.file_exists(_commands_path):
 		return
 
@@ -531,13 +569,38 @@ func _check_for_commands() -> void:
 	_write_breadcrumb(action, args, request_id)
 
 	var handler: Callable = _handlers[action]
+	_dispatch_busy = true
+	_dispatch_busy_since_msec = Time.get_ticks_msec()
+	_dispatch_busy_action = action
 	var result: Dictionary = await handler.call(args)
+	_dispatch_busy = false
+	_dispatch_busy_action = ""
 	_clear_breadcrumb()
-	# A command that arrived while this one was awaiting (step_time, input_tap, a
-	# long project verb) would have moved _current_request_id. Restore ours so this
-	# reply carries the id of the request it actually answers.
+	# Belt and braces on the id (H-038 made the overlap unreachable, but the watchdog
+	# can still release the guard under a wedged handler that later resumes). Restore
+	# ours so this reply carries the id of the request it actually answers.
 	_current_request_id = request_id
 	_write_result(action, result)
+
+
+## Releases a guard that a handler has held past DISPATCH_WATCHDOG_MSEC.
+##
+## A GDScript runtime error inside an awaiting handler does not raise -- the coroutine
+## simply never resumes -- so the line that clears _dispatch_busy would never run and
+## the bus would stay deaf until the game was restarted, with nothing on the wire
+## saying why. That is strictly worse than the overlap this guard prevents: a silent
+## permanent outage versus a rare race. So the guard has an escape, and the escape is
+## LOUD -- it names the verb, which the client also has from the breadcrumb file.
+func _check_dispatch_watchdog() -> void:
+	var held_msec: int = Time.get_ticks_msec() - _dispatch_busy_since_msec
+	if held_msec < DISPATCH_WATCHDOG_MSEC:
+		return
+	var stuck_action: String = _dispatch_busy_action
+	_dispatch_busy = false
+	_dispatch_busy_action = ""
+	_write_log("error", "Dispatch guard force-released after %.1fs in '%s'; that handler never returned (a runtime error inside an await never resumes). Accepting commands again -- if '%s' does resume, its reply may cross another." % [
+		held_msec / 1000.0, stuck_action, stuck_action,
+	])
 
 
 ## Writes the single result file. `id` is always present -- the request's id verbatim,

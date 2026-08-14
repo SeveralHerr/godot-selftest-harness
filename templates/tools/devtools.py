@@ -89,11 +89,11 @@ from pathlib import Path
 from typing import Optional  # noqa: F401
 
 
-# harness-version: 0.15.0
+# harness-version: 0.16.0
 # Version of the godot-selftest-harness this client was copied from. Compared against
 # the running game's own stamp by the `harness-version` verb, so a half-refreshed
 # install (new client, old autoload) is visible instead of mysterious.
-HARNESS_VERSION = "0.15.0"
+HARNESS_VERSION = "0.16.0"
 
 COMMANDS_FILE = "devtools_commands.json"
 RESULTS_FILE = "devtools_results.json"
@@ -192,6 +192,32 @@ def _breadcrumb_note(user_data: Path) -> str:
             file=_breadcrumb_path(user_data).name,
         )
     )
+
+
+def _handler_in_flight(user_data: Path) -> bool:
+    """Is a live game currently INSIDE a handler, with our command deferred behind it?
+
+    Two facts, and both are needed (H-038):
+
+      - a breadcrumb exists, so some process entered a handler and has not come back
+        out of it. On its own this is ambiguous by design - the same file is what
+        names the verb that took a game DOWN (gather:G-103), and a corpse leaves it
+        behind forever.
+      - the owner's heartbeat is fresh, so that process is still polling. _process
+        keeps ticking (and keeps writing last_poll_unix) while a handler awaits, so a
+        busy game is live-and-listening; a dead one goes stale within seconds.
+
+    An owner with no heartbeat at all is a pre-0.12.0 game: unknown, never assumed
+    live. Those builds have no re-entrancy guard either, so they never defer, and the
+    old fail-fast behavior is the right one for them.
+    """
+    if not _read_breadcrumb(user_data):
+        return False
+    owner, _ = _read_owner(user_data)
+    if owner is None:
+        return False
+    age = poll_age(owner)
+    return age is not None and age <= POLL_STALE_AFTER_SEC
 
 
 class BridgeError(TimeoutError):
@@ -515,14 +541,25 @@ def _wait_for_pickup(commands_path: Path, user_data: Path, action: str):
     existing after the grace period is proof that no game is watching this
     directory. That distinguishes "game is dead" from "command is slow" without
     sending an extra ping.
+
+    ONE exception, and it is not an edge case (H-038): since the re-entrancy guard
+    landed, a game that is polling normally deliberately leaves the command file on
+    disk while a handler is in flight, and picks it up on the tick after that handler
+    returns. `step_time 5s` followed by anything else hits this every time. The
+    breadcrumb plus a fresh heartbeat is the discriminator (see _handler_in_flight),
+    so "file still here AND a live game is inside a handler" means alive and busy,
+    not dead, and the wait belongs to the caller's timeout budget rather than to this
+    2s liveness grace.
     """
     deadline = time.time() + PRECHECK_SECONDS
     while time.time() < deadline:
         if not commands_path.exists():
             return
+        if _handler_in_flight(user_data):
+            return
         time.sleep(_PRECHECK_POLL)
 
-    if not commands_path.exists():
+    if not commands_path.exists() or _handler_in_flight(user_data):
         return
 
     # Don't leave our command lying around for a future launch to pick up.
@@ -722,6 +759,28 @@ def send_command(project_path: Path, action: str, args: dict = None, timeout: fl
         )
 
     if _PRECHECK_ENABLED:
+        # The precheck can now clear on "alive but inside a handler" as well as on
+        # "consumed" (H-038), so which of those happened has to be re-read here
+        # rather than assumed. Claiming the command was picked up when it is still
+        # sitting on disk behind a long verb would send the reader hunting for a bug
+        # in a handler that has not started.
+        if commands_path.exists():
+            crumb = _read_breadcrumb(user_data) or {}
+            # Abandon it rather than leave it queued. We have given up waiting, and a
+            # mutating verb that lands minutes later against changed state is worse
+            # than one that did not run - same reasoning as the precheck's unlink.
+            try:
+                commands_path.unlink()
+            except OSError:
+                pass
+            raise NoReplyError(
+                "No response from Godot after {t}s. '{action}' was never picked up, "
+                "but the game is ALIVE and busy: it is still inside '{busy}' and the "
+                "bridge serves one command at a time, so yours was queued behind it. "
+                "The queued command has been withdrawn; raise --timeout and re-send, "
+                "or wait for that verb to finish.".format(
+                    t=timeout, action=action, busy=crumb.get("action", "another verb"))
+            )
         # The precheck proved the game consumed the command, so this is a
         # handler problem, not a liveness problem.
         raise NoReplyError(

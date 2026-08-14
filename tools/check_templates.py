@@ -1083,6 +1083,166 @@ def check_paused_bridge(client, scratch):
     return True
 
 
+def check_dispatch_reentrancy(client, scratch):
+    """A command arriving mid-await must be DEFERRED, not run on top (H-038).
+
+    Plants the defect the guard exists to stop, because there is no other way to
+    reach it: send_command is one-at-a-time by construction, so this writes the two
+    command files itself with its own timing. Before the guard, _process re-entered
+    _check_for_commands during the await and the second command was read, deleted and
+    dispatched into the same scene tree - measured as ping answering at 1.26s inside a
+    5s step_time, then having its reply overwritten at 5.12s.
+
+    The verdict is read from the GAME's log, not from the shared result file. The
+    obvious version of this check watched user://devtools_results.json for the two
+    replies in order, and it was wrong in a way worth recording: the second command is
+    picked up within one ~100ms poll of the first one's reply being written, so the
+    first reply exists on disk for a few milliseconds before being overwritten. Polling
+    for it missed roughly half the time and reported the pass as the bug. The log's
+    `Executing:` entries are durable and carry timestamps, so the question "was the
+    second handler dispatched while the first was still running" is answered by
+    subtraction instead of by winning a race.
+
+    Three outcomes are distinguished and only one passes: a gap shorter than the slow
+    verb means B ran on top of A (the bug); no B entry at all means the guard ATE the
+    deferred command (what checking it after the read/delete would do); a gap of at
+    least the slow verb's duration is correct.
+    """
+    user_data = Path(client.get_user_data_path(scratch))
+    commands_name, results_name, log_name = client.bus_filenames()
+    commands_path = user_data / commands_name
+    results_path = user_data / results_name
+    log_path = user_data / log_name
+
+    def dispatches():
+        """(action, timestamp) for every command the game has dispatched."""
+        out = []
+        try:
+            lines = log_path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            return out
+        for line in lines:
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            msg = row.get("message", "")
+            if row.get("category") == "command" and msg.startswith("Executing: "):
+                out.append((msg[len("Executing: "):], row.get("timestamp", 0.0)))
+        return out
+
+    before = len(dispatches())
+    if results_path.exists():
+        results_path.unlink()
+    id_a, id_b = "h038a", "h038b"
+    slow_seconds = 3.0
+
+    def put(action, args, ident):
+        commands_path.write_text(
+            json.dumps({"id": ident, "action": action, "args": args}), encoding="utf-8")
+
+    t0 = time.time()
+    put("step_time", {"seconds": slow_seconds}, id_a)
+    while commands_path.exists():
+        if time.time() - t0 > 10:
+            return fail("stage 5 reentrancy: the slow command was never picked up")
+        time.sleep(0.02)
+    time.sleep(0.5)                      # A is provably mid-await now
+    put("ping", {}, id_b)
+
+    # Wait for the deferred command to be consumed, plus a beat for its log line.
+    deadline = time.time() + slow_seconds + 20
+    while time.time() < deadline:
+        if not commands_path.exists() and len(dispatches()) >= before + 2:
+            break
+        time.sleep(0.05)
+    time.sleep(0.2)
+
+    new = dispatches()[before:]
+    actions = [a for a, _ in new]
+    if actions[:1] != ["step_time"]:
+        return fail("stage 5 reentrancy: expected step_time to be dispatched first, "
+                    "got %s" % actions)
+    if "ping" not in actions:
+        return fail(
+            "stage 5 reentrancy: the deferred command was EATEN - the game dispatched "
+            "%s and never ran the ping that arrived mid-await. The guard must be "
+            "checked BEFORE the read and the delete, or pickup consumes the command it "
+            "declines to run (H-038)" % actions)
+    gap = new[actions.index("ping")][1] - new[0][1]
+    if gap < slow_seconds - 0.25:
+        return fail(
+            "stage 5 reentrancy: the mid-await command was dispatched ON TOP of the "
+            "running handler - ping started %.2fs after step_time began, inside a %.1fs "
+            "step, so two handlers shared the scene tree and raced their replies onto "
+            "the one result file (H-038)" % (gap, slow_seconds))
+    print("stage 5 bridge: a command arriving mid-await was deferred, not overlapped "
+          "(ping sent 0.5s into a %.0fs step_time was dispatched %.2fs in, i.e. after "
+          "it finished)" % (slow_seconds, gap))
+    return check_deferred_client(client, scratch)
+
+
+def check_deferred_client(client, scratch):
+    """The CLIENT must survive its own command being deferred (H-038).
+
+    The check above drives raw command files, which proves the game half and nothing
+    about devtools.py - and testing one half against a hand-rolled stand-in for the
+    other is exactly what let 0.4.0 ship three wire mismatches green. So this one goes
+    through the real send_command.
+
+    The guard made a true statement false: the 2s liveness precheck read "command file
+    still on disk" as proof that nothing is polling, and a deferred command sits on
+    disk on purpose. Unfixed, every command sent during a slow verb dies instantly
+    with `game not running` - a confidently wrong diagnosis, which this repo has
+    repeatedly paid more for than for silence.
+
+    The slow verb is started by writing its command file directly rather than from a
+    second thread. Two concurrent send_commands would be a second CLIENT on a bus that
+    documents itself as single-client, and it fails for an unrelated reason: both poll
+    the one result file, so whichever reads second finds its reply already consumed and
+    times out. That is the documented hazard, not a regression, and a check that trips
+    over it is testing the wrong thing.
+    """
+    user_data = Path(client.get_user_data_path(scratch))
+    commands_name, _, _ = client.bus_filenames()
+    commands_path = user_data / commands_name
+    slow_seconds = 3.0
+
+    commands_path.write_text(json.dumps(
+        {"id": "h038slow", "action": "step_time", "args": {"seconds": slow_seconds}}),
+        encoding="utf-8")
+    picked_up = time.time() + 10
+    while commands_path.exists():
+        if time.time() > picked_up:
+            return fail("stage 5 reentrancy: the slow command was never picked up")
+        time.sleep(0.02)
+
+    time.sleep(0.5)                      # the slow verb is in its handler now
+    started = time.time()
+    try:
+        reply = client.send_command(scratch, "ping", {}, timeout=30.0)
+    except Exception as exc:
+        return fail(
+            "stage 5 reentrancy: send_command('ping') raised %s while the game was "
+            "alive and busy inside step_time. The 2s liveness precheck is reading a "
+            "DEFERRED command as a dead game - it must also require that no handler "
+            "is in flight (H-038): %s" % (type(exc).__name__, exc))
+    waited = time.time() - started
+
+    if not reply.get("success"):
+        return fail("stage 5 reentrancy: the deferred ping came back success=false: %s"
+                    % reply.get("message"))
+    if waited < 1.0:
+        return fail(
+            "stage 5 reentrancy: the deferred ping answered in %.2fs, too fast to have "
+            "waited out the %.1fs step_time it was sent into - the bridge served two "
+            "commands at once" % (waited, slow_seconds))
+    print("stage 5 bridge: devtools.py survives its own command being deferred "
+          "(ping sent mid-step_time answered after %.1fs instead of failing the 2s "
+          "liveness precheck)" % waited)
+    return True
+
+
 def stage_bridge(godot, scratch, full):
     client = load_client(scratch)
     out_log = scratch / "game_stdout.log"
@@ -1111,6 +1271,7 @@ def stage_bridge(godot, scratch, full):
 
         ok = check_ui_baseline(client, scratch) and ok
         ok = check_paused_bridge(client, scratch) and ok
+        ok = check_dispatch_reentrancy(client, scratch) and ok
 
         if full:
             passed = 0

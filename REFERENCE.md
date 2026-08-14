@@ -215,7 +215,7 @@ The wire contract:
   "timestamp": 1785592028.4, "status": { ... } }   // "status" only if a provider is registered
 ```
 
-Two properties fall out of this and both matter:
+Three properties fall out of this and all of them matter:
 
 - **`id` makes a crossed reply detectable.** The client refuses a reply stamped for
   a different request rather than returning it. A response with no `id` key at all is
@@ -223,7 +223,20 @@ Two properties fall out of this and both matter:
 - **Deleting the command file on pickup is the liveness signal.** If the file is still
   there ~2 s later, nothing is polling that directory — the game is dead, or the client
   is polling the wrong `user://`. That is why a dead game now fails in seconds rather
-  than at the end of a 30–60 s timeout.
+  than at the end of a 30–60 s timeout. **One exception**: a command that arrives while
+  a handler is running is deliberately left on disk (below), so the client only calls
+  the bus dead when there is *also* no handler in flight — no breadcrumb file, or an
+  owner heartbeat older than 5 s.
+- **The bridge is strictly one command at a time, by deferral rather than by luck**
+  (0.16.0). `_process` polls without `await`, so an awaiting handler — `step_time`,
+  `input_tap`, any project verb that yields — hands control straight back to the poll.
+  A re-entrancy guard makes the next tick leave an arriving command *on disk* until the
+  current handler returns, instead of dispatching a second handler into the same scene
+  tree and racing both replies onto the one result file. The deferred command runs on
+  the tick after the first one finishes; nothing is dropped. A handler that never
+  returns (a runtime error inside an `await` never resumes) releases the guard after
+  300 s with a loud log line naming the verb, so a wedged handler cannot silently make
+  the bus deaf until restart.
 
 ## The registry-extension pattern
 
@@ -1302,7 +1315,18 @@ Run it after any script/scene/gameplay change, before committing.
   case where it was never attempted.
 - **Single-client file bus.** The bridge is one command file / one result file
   with no locking. Concurrent clients on the **same** bus still race and clobber
-  each other's commands; request ids make the resulting crossed reply an error rather
-  than silent corruption, but they do not make it safe. Drive one bus from **one**
-  client at a time, and give genuinely parallel instances separate buses with
-  `--session` (above).
+  each other's commands *before the game ever sees them* — a second client's write
+  overwrites the first's command file — and request ids make the resulting crossed
+  reply an error rather than silent corruption without making it safe. Drive one bus
+  from **one** client at a time, and give genuinely parallel instances separate buses
+  with `--session` (above). What the 0.16.0 re-entrancy guard fixes is the *game* side
+  of this: whatever commands do reach the game are now served strictly one at a time,
+  so a second client (or a client that gave up on a slow verb and sent another
+  command) can no longer get two handlers running in the same scene tree. That is a
+  narrower guarantee than a safe multi-client bus, and it is not one.
+- **A slow verb blocks the bus for its whole duration** (0.16.0). This is the intended
+  consequence of the guard above, but it changes what a client-side timeout means:
+  the command you sent may never have started. `devtools.py` now says which case it
+  hit — "was never picked up, but the game is ALIVE and busy: it is still inside
+  `<verb>`" — and withdraws the queued command rather than leaving it to fire minutes
+  later against changed state. `step_time` is capped at 60 s for this reason.
