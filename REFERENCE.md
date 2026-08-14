@@ -786,6 +786,7 @@ The linter's flags (pass after `--`):
 | `--baseline-write PATH` | Write the current finding set to `PATH` and exit 0. |
 | `--baseline PATH` | Group findings into `NEW` (drives the exit code) and `PRE-EXISTING`. |
 | `--find-orphans` | Warn on public functions whose only outside callers are tests. Advisory; never fails. |
+| `--no-shaders` | Skip the shader compile pass. |
 
 Baseline keys are `file|rule|subject` with no line numbers, so a finding survives
 unrelated edits to the same file. This exists because deciding whether a warning is
@@ -829,6 +830,46 @@ anywhere in the project and `ClassDB` knows no such engine member. It is the
 is always on, because the entire failure mode is that nobody knew to look. It is
 **advisory** and always will be; see the sharp edge below for what it structurally
 cannot see.
+
+The **shader compile** pass (`shader_compile_failed`, `shader_embedded_compile_failed`)
+compiles every `.gdshader` under `scan_root` plus every `Shader` embedded in a `.tres`.
+A broken shader is a runtime-only failure that nothing else here sees: the scene holding
+it loads fine, lint was clean, tests were green, and the magenta fallback only appears
+when that scene is on screen and someone is looking.
+
+The detection is not the obvious one, because the obvious one does not work. `load()` on
+an unparseable shader still returns a `Shader` object — the same trap as `load()` on an
+unparseable script — so load success proves nothing. Instead a sentinel uniform is
+appended to the source and assigned to a bare `Shader`. Assigning `Shader.code` runs the
+real `ShaderLanguage` parser even under `--headless` (the dummy rendering driver still
+reports `Shader compilation failed`), and `RenderingServer.get_shader_parameter_list()`
+returns `[]` for a shader that did not compile — so the sentinel coming back is the pass
+signal. No `SubViewport`, no node, and no render is involved. If the sentinel name
+already occurs in the source it is suffixed until unique, so a shader cannot collide its
+way to green.
+
+`#include` of a `.gdshaderinc` resolves normally from raw source, so an error inside an
+include is caught through its includers. The `.gdshaderinc` files themselves declare no
+`shader_type` and cannot compile standalone: they are counted and reported as **skipped**,
+never as passed. Shaders embedded in a `.tscn` are **not** covered — only `.gdshader`
+files and `.tres` resources. The summary line always names its denominators
+(`Shaders: 41 of 42 compiled OK (29 file, 13 embedded)`), because `Shaders: OK` over a
+project the pass never found a shader in is the report lying about what it looked at.
+
+### On `gdlint`
+
+`gdlint` (from `gdtoolkit`) is **deliberately not wired into `/verify`**, and the reason
+is a measurement rather than a preference. Run against a real 169-file project it
+produced **1,420 findings**: `class-definitions-order` 579, `max-line-length` 398,
+`trailing-whitespace` 206, naming rules 173 — about 96% pure style. The
+correctness-adjacent remainder was 33 findings (2.3%), none of them a bug.
+
+That is the "gate that cries wolf on install day gets ignored" shape, it would be this
+harness's first non-stdlib Python dependency, and `name_check.py` plus `lint_project.gd`
+already cover the correctness ground `gdlint` does not. A project that wants enforced
+formatting should adopt `gdlint` directly with its own `gdlintrc` — that is a house-style
+decision, and it does not belong in a shared pre-commit gate that every installing
+project inherits.
 
 ### `tools/name_check.py` — the gate that never opens the project
 

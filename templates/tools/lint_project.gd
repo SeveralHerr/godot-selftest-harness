@@ -13,6 +13,7 @@ extends SceneTree
 #   --json                Emit the full result dictionary as JSON.
 #   --uids-only           Skip the scene-configuration pass.
 #   --warnings-only       Skip the UID / duplicate-id pass.
+#   --no-shaders          Skip the shader compile pass.
 #   --strict              Count warnings towards the exit code.
 #   --fail-on-warn        Alias for --strict, kept for older callers.
 #   --baseline-write <p>  Write the current finding keys to <p> as JSON, exit 0.
@@ -55,6 +56,29 @@ extends SceneTree
 #                        never been imported). Reported once, not once per class:
 #                        that is one condition, not N findings.
 #
+# Shader compile check, rules `shader_compile_failed` (a .gdshader file) and
+# `shader_embedded_compile_failed` (a Shader stored inside a .tres). A broken
+# shader is a runtime-only failure: nothing else in this harness sees it, the
+# scene it is attached to loads fine, and the game renders the fallback magenta
+# only when that scene is on screen.
+#
+# How it detects failure, and why it is not the obvious way: `load()` on an
+# unparseable shader still returns a Shader object, exactly like `load()` on an
+# unparseable script - so load success proves nothing. Instead a sentinel uniform
+# is appended to the source and the code is assigned to a bare Shader. Assigning
+# `Shader.code` runs the real ShaderLanguage parser even under --headless (the
+# dummy rendering driver still reports `Shader compilation failed`), and
+# RenderingServer.get_shader_parameter_list() then returns [] for a shader that
+# did not compile. The sentinel coming back is the pass signal. No SubViewport,
+# no node, and no render is needed - if the sentinel name already occurs in the
+# source it is suffixed until unique, so a shader cannot collide its way green.
+#
+# `#include` of a .gdshaderinc resolves normally from raw source, so an error
+# inside an include is caught through its includers. The .gdshaderinc files
+# themselves declare no shader_type and cannot compile standalone: they are
+# counted and reported as skipped, never as passed. Shaders embedded in a .tscn
+# are NOT covered - only .gdshader files and .tres resources.
+#
 # String-literal reference check, rule `string_ref_unresolved`: the name inside
 # has_method("x") / has_signal("x") / emit_signal("x") / call("x") /
 # call_deferred("x") / connect("x", ...) is flagged when no `func x` and no
@@ -80,10 +104,10 @@ extends SceneTree
 # console. Redirect to a file and read it back. Every line this script emits goes
 # to stdout via print(), so one redirect captures the whole report.
 
-# harness-version: 0.12.0
+# harness-version: 0.13.0
 ## Harness revision these files were copied from. Printed in the header of every run so
 ## a lint result, and any gap logged from it, can name the version it was produced on.
-const HARNESS_VERSION: String = "0.12.0"
+const HARNESS_VERSION: String = "0.13.0"
 
 const CONFIG_PATH: String = "res://addons/godot_selftest/devtools_config.json"
 const DEFAULT_SCAN_ROOT: String = "res://"
@@ -114,6 +138,11 @@ const EXTRA_ENGINE_NAMES: Array[String] = [
 	"_iter_init", "_iter_next", "_iter_get",
 ]
 
+## Uniform appended to a shader's source to detect that it compiled. Deliberately
+## ugly: the pass suffixes it on collision, but a name nothing would ever write
+## means that path is close to unreachable in the first place.
+const SHADER_SENTINEL: String = "_gdst_shader_compiles"
+
 const EXIT_OK: int = 0
 const EXIT_LINT_ERRORS: int = 1
 const EXIT_LINTER_FAILED: int = 2
@@ -135,6 +164,7 @@ func _initialize() -> void:
 	var strict := false
 	var uids_only := false
 	var warnings_only := false
+	var no_shaders := false
 	var find_orphans := false
 	var baseline_read := ""
 	var baseline_write := ""
@@ -157,6 +187,8 @@ func _initialize() -> void:
 				uids_only = true
 			"--warnings-only":
 				warnings_only = true
+			"--no-shaders":
+				no_shaders = true
 			"--find-orphans":
 				find_orphans = true
 			"--baseline":
@@ -235,6 +267,8 @@ func _initialize() -> void:
 		# its own symptoms is a cause nobody reads.
 		_check_class_cache(gd_files, uid_ignore, results)
 		_check_scripts_compile(gd_files, uid_ignore, results)
+		if not no_shaders:
+			_check_shaders(scan_root, uid_ignore, results)
 		_check_string_refs(scan_root, gd_files, uid_ignore, results)
 
 	# Scene configuration warnings for selected scenes, unless uids-only
@@ -359,6 +393,14 @@ func _initialize() -> void:
 					print("ERROR: %s: %s" % [fs["path"], fs["message"]])
 				if sc["failed"].size() >= 3:
 					print("hint: many scripts failing together usually means a stale class cache - run `godot --headless --path . --import` and re-lint")
+			if not no_shaders:
+				# Always prints its denominators, failures or not: "Shaders: OK" over
+				# a project the pass never found a shader in is the report lying about
+				# what it looked at.
+				var sh: Dictionary = results.get("shaders", {})
+				for fsh in sh.get("failed", []):
+					print("ERROR: %s: %s" % [fsh["path"], fsh["message"]])
+				print(_shader_summary_line(sh))
 			# "UIDs: OK" is only printed when BOTH passes are clean. It used to print
 			# while a script sat there with no sidecar at all, which is the report
 			# lying about what it checked.
@@ -647,6 +689,122 @@ func _check_scripts_compile(gd_files: Array[String], ignore: Array, results: Dic
 			failed.append({"path": p, "message": detail})
 			_add_finding(p, "script_parse_failed", p, "error", detail)
 	results["scripts"] = {"checked": checked, "failed": failed}
+
+
+# --- Shader compile check ---
+# See the header block for why the sentinel-uniform trick is the oracle here and
+# load() is not. Everything below runs under --headless with no render at all.
+func _check_shaders(scan_root: String, ignore: Array, results: Dictionary) -> void:
+	var checked := 0
+	var embedded_checked := 0
+	var failed: Array = []
+	var includes_skipped: Array = []
+
+	for p in _scan(scan_root, ["gdshader"]):
+		if p.begins_with("res://addons/") and _is_uid_ignored(p, ignore):
+			continue
+		checked += 1
+		var code := FileAccess.get_file_as_string(p)
+		if code == "":
+			var read_msg := "shader file is empty or could not be read"
+			failed.append({"path": p, "message": read_msg})
+			_add_finding(p, "shader_compile_failed", p, "error", read_msg)
+			continue
+		var detail := _compile_shader_source(code)
+		if detail != "":
+			failed.append({"path": p, "message": detail})
+			_add_finding(p, "shader_compile_failed", p, "error", detail)
+
+	# Include files declare no shader_type, so compiling one standalone would fail
+	# for a reason that is not a defect. Counted and named as skipped rather than
+	# quietly dropped - an error inside one still surfaces through its includers.
+	for p in _scan(scan_root, ["gdshaderinc"]):
+		if p.begins_with("res://addons/") and _is_uid_ignored(p, ignore):
+			continue
+		includes_skipped.append(p)
+
+	# Shaders stored inside a .tres (the ShaderMaterial-with-embedded-Shader case).
+	# The text pre-filter keeps this from load()ing every resource in the project
+	# just to discover it holds no shader.
+	for p in _scan(scan_root, ["tres"]):
+		if p.begins_with("res://addons/") and _is_uid_ignored(p, ignore):
+			continue
+		var text := FileAccess.get_file_as_string(p)
+		if not text.contains("type=\"Shader\""):
+			continue
+		var res: Resource = ResourceLoader.load(p, "", ResourceLoader.CACHE_MODE_IGNORE)
+		if res == null:
+			continue
+		for sh in _embedded_shaders(res):
+			embedded_checked += 1
+			var detail := _compile_shader_source(sh.code)
+			if detail != "":
+				failed.append({"path": p, "message": detail})
+				_add_finding(p, "shader_embedded_compile_failed", p, "error", detail)
+
+	results["shaders"] = {
+		"checked": checked,
+		"embedded_checked": embedded_checked,
+		"failed": failed,
+		"includes_skipped": includes_skipped,
+	}
+
+
+## "" when the source compiles, otherwise the failure message. The sentinel is
+## suffixed until it does not already occur in the source, so a shader that
+## happens to declare the probe's own name cannot collide its way to a false pass.
+func _compile_shader_source(code: String) -> String:
+	var sentinel := SHADER_SENTINEL
+	var n := 0
+	while code.contains(sentinel):
+		n += 1
+		sentinel = "%s%d" % [SHADER_SENTINEL, n]
+	var shader := Shader.new()
+	shader.code = "%s\nuniform float %s;" % [code, sentinel]
+	for prop in RenderingServer.get_shader_parameter_list(shader.get_rid()):
+		if String(prop.get("name", "")) == sentinel:
+			return ""
+	return "shader failed to compile - see the SHADER ERROR lines on stderr for the offending line"
+
+
+## Shaders reachable from a loaded resource: the resource itself, a ShaderMaterial's
+## shader, or either of those held one property deep (a custom Resource with a
+## `material` export, say). One level only - this is a lint pass, not a graph walk.
+func _embedded_shaders(res: Resource) -> Array[Shader]:
+	var out: Array[Shader] = []
+	if res is Shader:
+		out.append(res)
+		return out
+	if res is ShaderMaterial and (res as ShaderMaterial).shader != null:
+		out.append((res as ShaderMaterial).shader)
+		return out
+	for prop in res.get_property_list():
+		if int(prop.get("type", TYPE_NIL)) != TYPE_OBJECT:
+			continue
+		var val: Variant = res.get(String(prop.get("name", "")))
+		if val is Shader:
+			out.append(val)
+		elif val is ShaderMaterial and (val as ShaderMaterial).shader != null:
+			out.append((val as ShaderMaterial).shader)
+	return out
+
+
+## Always names its denominators. "Shaders: OK" over a project the pass found no
+## shader in is the report lying about what it looked at.
+func _shader_summary_line(sh: Dictionary) -> String:
+	var checked := int(sh.get("checked", 0))
+	var embedded := int(sh.get("embedded_checked", 0))
+	var failed_count: int = (sh.get("failed", []) as Array).size()
+	var skipped: int = (sh.get("includes_skipped", []) as Array).size()
+	var total := checked + embedded
+	if total == 0 and skipped == 0:
+		return "Shaders: none found"
+	var tail := ""
+	if skipped > 0:
+		tail = " (%d .gdshaderinc skipped - not standalone-compilable)" % skipped
+	return "Shaders: %d of %d compiled OK (%d file, %d embedded)%s" % [
+		total - failed_count, total, checked, embedded, tail
+	]
 
 
 # --- Global class cache check (G-090) ---

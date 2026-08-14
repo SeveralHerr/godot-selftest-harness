@@ -241,6 +241,48 @@ def stage_assemble(scratch, user_dir_name):
             'script = ExtResource("1_fixture")',
             "",
         ]), encoding="utf-8")
+    # Shader fixtures for the lint shader pass. All three shapes it claims to
+    # cover are present so the clean run has a real denominator to report: a
+    # plain .gdshader, one that pulls in a .gdshaderinc, and a Shader embedded
+    # in a .tres. Without these the pass prints "Shaders: none found" and a
+    # broken pass is indistinguishable from a working one.
+    shaders = scratch / "shaders"
+    shaders.mkdir(parents=True, exist_ok=True)
+    (shaders / "plain.gdshader").write_text(
+        "shader_type canvas_item;\n"
+        "uniform float amount : hint_range(0.0, 1.0) = 0.5;\n"
+        "void fragment() {\n"
+        "\tCOLOR = vec4(amount, 0.0, 0.0, 1.0);\n"
+        "}\n",
+        encoding="utf-8")
+    (shaders / "lib.gdshaderinc").write_text(
+        "float harness_tint() {\n"
+        "\treturn 0.75;\n"
+        "}\n",
+        encoding="utf-8")
+    (shaders / "with_include.gdshader").write_text(
+        "shader_type spatial;\n"
+        '#include "res://shaders/lib.gdshaderinc"\n'
+        "void fragment() {\n"
+        "\tALBEDO = vec3(harness_tint());\n"
+        "}\n",
+        encoding="utf-8")
+    (shaders / "embedded.tres").write_text(
+        "\n".join([
+            "[gd_resource type=\"ShaderMaterial\" load_steps=2 format=3]",
+            "",
+            "[sub_resource type=\"Shader\" id=\"Shader_harness\"]",
+            'code = "shader_type canvas_item;',
+            "void fragment() {",
+            "\tCOLOR = vec4(0.0, 1.0, 0.0, 1.0);",
+            "}",
+            '"',
+            "",
+            "[resource]",
+            'shader = SubResource("Shader_harness")',
+            "",
+        ]), encoding="utf-8")
+
     (scratch / "project.godot").write_text(
         "\n".join([
             "config_version=5",
@@ -445,9 +487,80 @@ def stage_runners(godot, scratch):
             print("stage 4 %s: exit 0 (%s)" % (name, tail[-1] if tail else "no output"))
             if name == "tests":
                 ok = check_test_denominators(proc.stdout) and ok
+            if name == "lint":
+                ok = check_shader_denominator(proc.stdout) and ok
     if ok:
         ok = stage_vacuous_control(godot, scratch) and ok
+        ok = stage_shader_control(godot, scratch) and ok
     return ok
+
+
+def check_shader_denominator(out):
+    """The shader pass must name what it compiled, not merely stay quiet.
+
+    stage_assemble plants four shaders in three shapes; a pass that scanned
+    nothing prints "Shaders: none found" and is otherwise indistinguishable
+    from a clean one, which is the [H-035] shape.
+    """
+    m = re.search(r"Shaders: (\d+) of (\d+) compiled OK \((\d+) file, (\d+) embedded\)", out)
+    if not m:
+        return fail("lint printed no `Shaders: N of M` line over a scratch project "
+                    "holding four shaders - the shader pass is not running\n%s" % out)
+    passed, total, files, embedded = (int(g) for g in m.groups())
+    if passed != total:
+        return fail("lint reports %d of %d shaders compiling on the pristine scratch "
+                    "project - the fixtures themselves are broken" % (passed, total))
+    if files < 2 or embedded < 1:
+        return fail("shader pass saw %d file / %d embedded shader(s); the fixtures "
+                    "provide 2 files and 1 embedded, so a shape is being missed"
+                    % (files, embedded))
+    if ".gdshaderinc skipped" not in out:
+        return fail("shader pass did not report the planted .gdshaderinc as skipped - "
+                    "an include file it silently passed would be a false green")
+    print("stage 4 lint: shaders %d of %d compiled (%d file, %d embedded), include skipped"
+          % (passed, total, files, embedded))
+    return True
+
+
+def stage_shader_control(godot, scratch):
+    """Positive control: plant a shader that cannot compile.
+
+    A broken shader is the failure the pass exists for and nothing else in the
+    harness sees it - the scene holding it still loads. The scratch project
+    lints clean with or without a working pass, so planting the defect is the
+    only thing that tells the two apart.
+    """
+    planted = scratch / "shaders" / "harness_shader_control.gdshader"
+    planted.write_text(
+        "shader_type canvas_item;\n"
+        "void fragment() {\n"
+        "\tCOLOR = vec4(harness_control_undefined_symbol, 0.0, 0.0, 1.0);\n"
+        "}\n",
+        encoding="utf-8")
+    try:
+        proc = run_godot(godot, scratch, ["--script", "res://tools/lint_project.gd"])
+        out = proc.stdout
+        if proc.returncode != 1:
+            return fail("planted uncompilable shader exited %d, expected 1 - a shader "
+                        "that fails to compile is being reported as clean\n%s"
+                        % (proc.returncode, out))
+        if "harness_shader_control.gdshader" not in out:
+            return fail("planted shader failed the run without the report naming it\n%s" % out)
+        # --no-shaders must actually turn the pass off, or the flag is decoration
+        # and the pass cannot be escaped by a project that needs to.
+        off = run_godot(godot, scratch, ["--script", "res://tools/lint_project.gd",
+                                         "--", "--no-shaders"])
+        if off.returncode != 0:
+            return fail("--no-shaders still failed on the planted shader (exit %d) - "
+                        "the flag does not skip the pass\n%s" % (off.returncode, off.stdout))
+        if "Shaders:" in off.stdout:
+            return fail("--no-shaders still printed a `Shaders:` line")
+        print("stage 4 lint: shader control fired (exit 1 naming the planted file; "
+              "--no-shaders exits 0 and prints nothing)")
+        return True
+    finally:
+        planted.unlink(missing_ok=True)
+        (planted.parent / (planted.name + ".uid")).unlink(missing_ok=True)
 
 
 def check_test_denominators(out):

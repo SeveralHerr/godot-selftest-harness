@@ -125,8 +125,8 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
-# harness-version: 0.12.0
-HARNESS_VERSION = "0.12.0"
+# harness-version: 0.13.0
+HARNESS_VERSION = "0.13.0"
 
 LEDGER_PATH = Path(".devtools") / "verify-runs.jsonl"
 

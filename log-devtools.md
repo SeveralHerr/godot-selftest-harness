@@ -2891,3 +2891,105 @@ time: the scaffolder's "13 idempotent steps" is exactly right (`grep -c '^## Ste
 **Validation run this turn:** `python tools/record_version.py --check` — OK at 0.12.0,
 11 shipped files, 46 bus verbs + 48 CLI commands documented. `check_templates.py` was
 **not** run: nothing under `templates/` changed. No version bump for the same reason.
+
+## 2026-08-14 — Comparison against tea-leaves, and what it paid for (0.13.0)
+
+Prompted by cloning [tea-leaves](https://github.com/cleak/tea-leaves), the project this
+one was inspired by, and asking which does it better. Four improvements came out of the
+comparison. One shipped, two were **reversed by evidence**, one was already rejected here
+on better grounds. Recording all four, because a recommendation that dies to measurement
+is worth as much as one that ships and is cheaper to re-propose than to re-refute.
+
+**Shipped: the shader compile pass.** tea-leaves has `tools/lint_shaders.gd`; this repo
+had no shader gate at all, and `REFERENCE.md` filed shaders under `not_applicable` for
+reach. A broken shader is precisely the runtime-only failure `PURPOSE.md` names as the
+reason this project exists: the scene holding it loads clean, lints clean, tests green,
+and shows magenta only when it is on screen with someone looking.
+
+It landed as a **pass inside `lint_project.gd`**, not a fifth tool. That file already
+owns tree walking, `.gdignore`/vendored skipping, the finding/baseline/severity model,
+`--json` and the `0`/`1`/`2` contract; a separate script re-implements all of it and buys
+a fifth row in four doc surfaces. ~120 lines instead of ~400, and one fewer Godot launch
+per `/verify`.
+
+The mechanism is not tea-leaves'. Their version builds a `SubViewport`, a `Sprite2D` or
+`MeshInstance3D` per shader type, adds a camera for spatial, and forces a render. A
+40-second scratch probe ([H-033]'s rule, applied to an upstream design rather than a
+pooled gap) showed **none of that is needed**: assigning `Shader.code` runs the real
+`ShaderLanguage` parser even under the dummy rendering driver
+(`servers/rendering/dummy/storage/material_storage.cpp:192` prints `Shader compilation
+failed`), and `RenderingServer.get_shader_parameter_list()` returns `[]` on failure. Set
+the code with a sentinel uniform appended, check the sentinel came back. No viewport, no
+node, no render — and it covers every `shader_type` uniformly instead of needing a `match`
+arm per type. The probe also established two things worth keeping:
+
+- **`load()` on a broken shader still returns a `Shader`.** Same trap as `load()` on an
+  unparseable script, already in `CLAUDE.md`'s gotcha list. Load success is not an oracle.
+- **`#include` resolves from raw source**, so errors inside a `.gdshaderinc` surface
+  through the includers. The include files themselves have no `shader_type` and are
+  reported as *skipped*, never as passed.
+
+Beyond tea-leaves' coverage: shaders embedded in a `.tres` are compiled too, found by a
+text pre-filter on `type="Shader"` so the pass does not `load()` every resource in the
+project to discover it holds no shader.
+
+- Validated per [H-035]: `check_templates.py` gained `stage_shader_control`, which plants
+  an uncompilable shader and requires exit `1` naming the file, plus
+  `check_shader_denominator`, which requires the clean run to report `Shaders: N of M`
+  over fixtures in all three shapes. `Shaders: none found` and a broken pass are otherwise
+  the same output.
+- **False-positive rate on real projects: 0.** `gather` (3 shaders) and `BoomerShooter`
+  (28 files + 13 embedded) both report every shader compiling. Planting one broken shader
+  in BoomerShooter took it to `41 of 42` and exit `1`. This is the [H-030] discipline —
+  the scratch project cannot measure a false-positive rate.
+
+**Reversed by measurement: `gdlint`.** tea-leaves runs it; the recommendation was to
+copy that. Run against `gather` (169 non-addon `.gd` files) it produced **1,420 findings**
+— `class-definitions-order` 579, `max-line-length` 398, `trailing-whitespace` 206, naming
+rules 173. About 96% pure style; the correctness-adjacent remainder was 33 findings
+(2.3%), none of them a bug. That is the "gate that cries wolf on install day gets ignored"
+shape verbatim, plus this harness's first non-stdlib Python dependency, to cover ground
+`name_check.py` and `lint_project.gd` already hold. tea-leaves benefits because it has
+neither of those. Documented in `REFERENCE.md` *with the numbers*, so the next person to
+propose it re-reads a measurement instead of re-running one.
+
+**Reversed by its own data: cutting `verify_ledger.py`.** The proposal was to cut 1,103
+lines unless reach had ever changed a decision. It has not — across 54 recorded runs in
+`gather`, 50 had unreached files and not one changed the verdict. But that evidence
+measures a **broken version of the metric**: 53 of the 54 runs are harness `0.7.0`/`0.8.0`
+and predate the `test_scripts` exclusion (the key is absent from every row), and in them
+`test/unit/*.gd` and `devtools_ext/commands.gd` dominate the unreached lists — up to 11 of
+19 files in one run. The post-fix sample is **n=1**. Cutting a metric on numbers produced
+by its own already-fixed bug is the wrong inference, so it stays.
+
+- Gap: **reach still scores headless-only tooling as unreached.** In the one post-fix run
+  (harness `0.10.0`, 2026-08-06), 4 of the 7 `unreached` entries were
+  `tools/eval.gd`, `tools/lint_project.gd`, `tools/run_tests.gd` and
+  `addons/godot_selftest/scene_validator.gd` — scripts that only ever run under
+  `godot --headless --script` and are structurally incapable of appearing in a scene-tree
+  snapshot of a game session. An earlier run charged `tools/generate_placeholder_art.gd`
+  the same way. This is the identical mechanism `REFERENCE.md` already names for test
+  scripts: "a metric that reports a file as unreached when it demonstrably ran teaches its
+  readers to discount the number."
+  - [H-039] status: open | seen: 1 | harness: 0.13.0
+  - Improvement: a `headless_tools` sub-list of `not_applicable`, driven by a configurable
+    `reach_headless_dirs` defaulting to `["tools/"]` — mirroring `uid_check_ignore`, which
+    already treats `tools/` as not-game-code. Leave `addons/` alone: `dev_tools.gd`
+    resolves via `reached_implicit` already, and `scene_validator.gd` showing unreached
+    after `validate_ui` ran is an *observation* gap in `scripts_seen`, not a
+    classification one — confirm that separately before folding the two together.
+
+**Considered and rejected, again:** splitting `dev_tools.gd`. Re-proposed this turn on a
+line count (4,172), which is exactly what the 0.12.0 entry said not to do: "Revisit with a
+concrete reason, not a line count." Looking for one turned up nothing — the file is
+sectioned, every verb greps as `_cmd_<verb>`, and no session in this log has lost time to
+its size. Against that, a split re-introduces the freed-`Callable` hazard that already bit
+this repo once through `_extension`, across the 45-verb surface named as the risk surface.
+Standing rejection; reopen only with a session that actually lost time.
+
+**Validation run this turn:** `python tools/check_templates.py` — **OK**, including both
+new lines (`shaders 3 of 3 compiled (2 file, 1 embedded), include skipped` and `shader
+control fired`). `python tools/record_version.py --record` then `--check` — OK at
+`0.13.0`, 11 shipped files, 46 bus verbs + 48 CLI commands documented. Shader pass also
+run against two real projects (`gather`, `BoomerShooter`) for the false-positive count
+above.

@@ -52,7 +52,14 @@ runner awaits a frame first, so what you test is what ships.)
 Godot generates alongside the script.
 Lint flags (after `--`): `--strict` (warnings fail), `--baseline-write PATH` /
 `--baseline PATH` (split findings into `NEW` vs `PRE-EXISTING` so repo debt isn't re-triaged
-by hand), `--find-orphans` (public functions called only from tests — advisory).
+by hand), `--find-orphans` (public functions called only from tests — advisory),
+`--no-shaders` (skip the shader pass).
+Lint also **compiles every `.gdshader` and every `Shader` embedded in a `.tres`** and prints
+`Shaders: N of M compiled OK (X file, Y embedded)`. Read the denominator: `Shaders: none
+found` means there are no shaders, not that shaders passed, and `.gdshaderinc` files are
+reported as *skipped* (no `shader_type`, so they're checked through their includers). This is
+the only gate for a broken shader — the scene holding one loads clean, lints clean and tests
+green, and shows magenta only on screen.
 
 **Writing tests.** Alongside `_T.assert_*`, use `await _T.instantiate_ui(scene, Vector2i(w, h))`
 / `_T.free_ui(node)` for anything `Control`-shaped: headless pumps no frames, so without it
