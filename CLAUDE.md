@@ -72,15 +72,27 @@ files; the extension loads last so a project can override a generic verb.
    `test/`, a minimal `project.godot` with the `DevTools` autoload).
 2.5. Run `name_check.py` on that scratch project **before `--import`** — with no index
    (must report the engine checks SKIPPED, not passed), under `--require-api` (must exit
-   `2`), after `--refresh-api` (must leave no `.godot/` behind), and with a planted
-   bad-names file (must exit `1` naming the right rules). The positive control is the
-   point: a checker that reports clean on everything looks exactly like one that is not
-   running.
+   `2`), after `--refresh-api` (must leave no `.godot/` behind), with a planted
+   bad-names file (must exit `1` naming the right rules), and with a planted
+   engine-version mismatch (must warn). The positive control is the point: a checker
+   that reports clean on everything looks exactly like one that is not running.
 3. Parse-check every `.gd` under it.
-4. Run both headless runners; expect exit `0` from each.
+4. Run both headless runners; expect exit `0` from each, assert the runner's own
+   denominators (`Autoloads: N of M ready`, `Assertions: N executed`), and plant a
+   vacuous test to prove exit `1`.
 5. Launch the scratch project and drive the bridge over the real file bus with the real
    `devtools.py`. Testing one half against a fake of the other is the thing that failed
-   before, and this stage is why the check is worth its runtime.
+   before, and this stage is why the check is worth its runtime. It also runs the
+   `validate_ui` baseline round-trip against **planted** UI defects and pauses a real
+   tree, because both of those pass trivially against an implementation that does
+   nothing.
+
+**Every stage must plant the defect it claims to detect** ([H-035]). This has now caught
+three checks that reported clean while doing nothing — `name_check.py`'s string-literal
+anchors ([H-031]), its engine-skew warning (an `re.match` that never matched an index's
+`Godot Engine v4.7.1…` banner), and a `validate_ui` baseline that round-tripped
+NEW→PRE→pass over an empty finding set. The printed line must name what fired. A stage
+that can only report success is not a stage.
 
 **The scratch project cannot measure a false-positive rate** — it is small and synthetic,
 and `name_check.py` passed every stage on it while emitting 466 bogus warnings on a real
@@ -140,6 +152,13 @@ python tools/upstream_gaps.py ../<game>/log-devtools.md   # deduped by id, safe 
 
 Closing a gap means editing its status line to `status: fixed | fixed-in: <version>` in
 **this** log — the project's copy stays open until that project refreshes and confirms it.
+
+**Reproduce a pooled gap's mechanism before implementing its `Improvement:` line**
+([H-033]). That line is a hypothesis written by someone who was working around the
+problem, not a diagnosis. `findmyballs:G-002` asked for autoloads to be added to the tree;
+they were already in it, and building to the report would have added a second instance
+beside the live one — passing review, passing lint, fixing nothing. A 40-second scratch
+probe is what found that, and the fix it produced was one line instead of a pass.
 
 ## Gotchas that have already cost time
 
