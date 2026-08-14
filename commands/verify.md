@@ -67,8 +67,8 @@ The installed harness can silently diverge from the plugin's templates — a pro
 DRIFTED=""
 for f in addons/godot_selftest/dev_tools.gd addons/godot_selftest/scene_validator.gd \
          tools/devtools.py tools/lint_project.gd tools/run_tests.gd tools/eval.gd \
-         tools/import_check.py tools/check_devtools_log.py tools/upstream_gaps.py \
-         tools/verify_ledger.py; do
+         tools/import_check.py tools/name_check.py tools/check_devtools_log.py \
+         tools/upstream_gaps.py tools/verify_ledger.py; do
   src="${CLAUDE_PLUGIN_ROOT}/templates/$f"
   [ -f "$src" ] && [ -f "$f" ] || continue
   diff -q <(tr -d '\r' < "$src") <(tr -d '\r' < "$f") >/dev/null || { echo "DRIFT: $f"; DRIFTED="$DRIFTED $f"; }
@@ -109,15 +109,51 @@ git diff HEAD --stat
 | Diff is… | Tier | What runs |
 |---|---|---|
 | (a) Nothing Godot loads: only docs/`.md` outside code, `.beads/`, `log-devtools.md`, CI/git files | **Nothing** | Print "nothing to verify". Write **no** ledger row. Log the Phase 6 entry with `Value: **overkill** — avoided: triaged out at Phase 0.5, no res:// change` and **STOP the run here.** |
-| (b) Only comments/docstrings inside `.gd`/`.tscn` files, or `.md` files in code dirs | **Lint-only** | Phase 1 import gate + lint. Skip tests and runtime; say so in the summary. |
-| (c) Only `static func`s or `const` tables that existing unit tests cover | **Headless-only** | Phase 1 (import gate + lint + tests). Skip runtime; the Phase 6 entry must **name which tests** stood in for runtime. |
+| (b) Only comments/docstrings inside `.gd`/`.tscn` files, or `.md` files in code dirs | **Lint-only** | Phase 1 name gate + import gate + lint. Skip tests and runtime; say so in the summary. |
+| (c) Only `static func`s or `const` tables that existing unit tests cover | **Headless-only** | Phase 1 (name gate + import gate + lint + tests). Skip runtime; the Phase 6 entry must **name which tests** stood in for runtime. |
 | Anything else — instance methods, signals, scenes, exports, node paths, config | **Full run** | All phases. |
+
+The name gate is cheap enough that it runs on every tier that reaches Phase 1, including lint-only — it costs no engine launch and catches the class of failure (a `class_name` that arrived from a rebase) the diff cannot show you.
 
 Rules: when in doubt, full run. Tier (c) requires you to have *checked* the tests exist and exercise the changed functions (`--filter` them in Phase 1), not assumed it. Tiers (b) and (c) still write a ledger row in Phase 5 — use `--no-reach` (there is no session to observe) and `value: overkill` with `cheaper_alternative` naming the tier. Record `found: []` unless the lint or test gate actually caught something, in which case record that finding with its `phase` — a tier that catches a real defect is the strongest possible evidence the cheaper tier was the right call.
 
-## Phase 1: Headless Gates — Import, Lint & Unit Tests (no game running)
+## Phase 1: Headless Gates — Names, Import, Lint & Unit Tests (no game running)
 
-### Import gate (before lint)
+### Name gate (before everything, and the only gate that is safe in parallel)
+
+```bash
+"$PY" tools/name_check.py; echo "exit=$?"
+```
+
+`name_check.py` resolves every name the scripts mention — types, `class_name`s,
+autoloads, `preload("res://…")` targets, engine classes and their members, and the
+method/signal names inside string literals — against the project's own declarations plus
+an engine API index cached per engine version under the user's cache dir. It opens no
+project, writes nothing to `.godot/`, and takes no lock, so it is the one gate that N
+agents can run at the same time on the same checkout. Exit codes are the usual contract:
+`0` clean, `1` findings that count, `2` could not run.
+
+It runs first because it is the cheapest gate and it names its causes directly. The
+import gate below tells you a cascade happened; this one tells you which identifier
+started it, and it does so on a working tree the import gate cannot even reach.
+
+**In a fresh worktree, this is the only Phase 1 gate that works at all.** A never-imported
+worktree has no class cache, so lint reports a thousand `Identifier "X" not declared`
+errors and still exits 0, and the test runner prints `[PASS]` for tests whose first
+statement errored. `name_check.py` does not care: it never needed the cache. Run it, fix
+what it finds, and only then decide whether the worktree is worth importing.
+
+If it reports `engine index: NONE`, the engine-name half was **skipped, not passed** —
+seed it once with `"$PY" tools/name_check.py --refresh-api` (runs Godot in a temp dir with
+no project; safe while other agents are mid-verify). Pass `--require-api` to make a
+missing index an exit `2` rather than a quiet downgrade.
+
+Useful here: `--only <prefix>` reports just your own files while still resolving names
+across the whole project, which is what a fan-out agent wants; `--strict` counts warnings;
+`--baseline`/`--baseline-write` adopt the checker on a project with pre-existing findings
+so only NEW ones gate.
+
+### Import gate (after names, before lint)
 
 `godot --headless --path . --import` **exits 0 while printing parse errors.** Real captured output:
 

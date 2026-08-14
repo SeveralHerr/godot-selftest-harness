@@ -140,7 +140,7 @@ Same installer, for `res://tools/`:
   --plugin-root "${CLAUDE_PLUGIN_ROOT}" \
   tools/lint_project.gd tools/run_tests.gd tools/eval.gd tools/devtools.py \
   tools/check_devtools_log.py tools/upstream_gaps.py tools/verify_ledger.py \
-  tools/import_check.py
+  tools/import_check.py tools/name_check.py
 chmod +x "$ROOT/tools/devtools.py" 2>/dev/null || true
 ```
 
@@ -250,6 +250,8 @@ Detect:
   "test_dir": "res://test/unit",
   "scan_root": "res://",
   "uid_check_ignore": ["res://addons/", "res://tools/"],
+  "name_check_extra_types": [],
+  "name_check_ignore": [],
   "reach_aliases": {},
   "fps_min": 30,
   "orphan_max": 0,
@@ -269,6 +271,12 @@ Detect:
 
 Notes on the newer keys, so a patch of an existing config doesn't get them wrong:
 
+- `name_check_extra_types` and `name_check_ignore` both default to empty, and empty is
+  the right answer for a fresh install — do **not** try to detect values for them.
+  `name_check_extra_types` exists for types a GDExtension registers at runtime, which
+  `--dump-extension-api` cannot see and `name_check.py` would therefore call unknown;
+  a project only learns which ones it needs by running the checker and reading the
+  false positives. Adding guesses here would suppress real findings from day one.
 - `orphan_max` is retained for compatibility but is **not** the gate — `0` is
   unreachable (a real project reports dozens of orphans on a fresh launch). `/verify`
   gates on `orphan_growth_max`, growth vs. the session baseline.
@@ -509,8 +517,18 @@ fi
 
 ## Step 12 — Smoke check
 
-If a Godot binary was found, run the headless linter to confirm the project
-loads and the core parses:
+First seed the engine API index that `name_check.py` resolves against. This is the
+only time the dump is needed on this machine — it runs in a temp directory with no
+project, caches under the user's cache dir, and is then shared by every clone and
+worktree, so a later parallel session never pays for it:
+
+```bash
+"$PY" "$ROOT/tools/name_check.py" -p "$ROOT" --refresh-api || \
+  echo "WARN: could not dump the engine API. name_check.py still runs, but its
+        engine-name checks will report as SKIPPED until --refresh-api succeeds."
+```
+
+Then run the headless linter to confirm the project loads and the core parses:
 
 ```bash
 "$GODOT" --headless --path "$ROOT" --script res://tools/lint_project.gd
@@ -646,9 +664,11 @@ sequence → performance → quit).
   `run_tests.gd` (headless unit test runner), `devtools.py` (Python CLI client),
   `check_devtools_log.py` (the `Stop`-hook logging reminder), `upstream_gaps.py`
   (pools this project's open gaps into the harness repo's log), `verify_ledger.py`
-  (records what each `/verify` run reached; `stats` reads the history back), and
+  (records what each `/verify` run reached; `stats` reads the history back),
   `import_check.py` (runs `--import` and fails on the parse errors Godot prints
-  while still exiting 0).
+  while still exiting 0), and `name_check.py` (resolves every name the scripts
+  mention against the project's own declarations and a cached engine API index —
+  the one gate that never opens the project, so N agents can run it at once).
 - `res://devtools_ext/commands.gd` — your project's command registry extension
   (plus `commands.example.gd` for reference).
 - `res://test/unit/` and `res://test/sequences/` — a seed unit test and a smoke

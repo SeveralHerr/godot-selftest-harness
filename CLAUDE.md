@@ -21,6 +21,7 @@ into someone else's repo. Read `PURPOSE.md` for what the project is committed to
 | `templates/tools/lint_project.gd`, `run_tests.gd` | Headless runners. Exit `0` pass / `1` findings / `2` couldn't run. |
 | `templates/tools/eval.gd` | Headless one-off script evaluator. Shipped and installed; easy to forget because no doc surface is required to name it. |
 | `templates/tools/import_check.py` | Wraps `godot --import`, which exits `0` while printing parse errors, and exits `1` on them. Runs ahead of lint in `/verify`. |
+| `templates/tools/name_check.py` | Static name resolution — **the only gate that never opens the project**, so N agents can run it at once and a never-imported worktree can run it at all. Resolves types/`class_name`s/autoloads/`preload` paths/engine members from source plus an engine API index cached per version under the user's cache dir. Runs ahead of `import_check.py` in `/verify`. |
 | `templates/tools/check_devtools_log.py` | `Stop` hook installed into the target project. Always exits 0. |
 | `templates/tools/upstream_gaps.py` | Pools a project log's open gaps into this repo's log, deduped by id. **`tools/upstream_gaps.py` is a byte-identical copy** — edit the template, then copy it across. |
 | `templates/devtools_ext/commands.gd` | Stub the target owns; `commands.example.gd` is the reference. |
@@ -64,16 +65,27 @@ files; the extension loads last so a project can override a generic verb.
 ## Validating a template change
 
 **`python tools/check_templates.py`** does this, and it is the gate — a syntax error in
-`dev_tools.gd` otherwise reaches a user's game before anything notices. Five stages:
+`dev_tools.gd` otherwise reaches a user's game before anything notices. Six stages:
 
 1. `py_compile` every `.py`, `json.load` every `.json`.
 2. Assemble a scratch Godot 4.x project from `templates/` (addon, tools, `devtools_ext`,
    `test/`, a minimal `project.godot` with the `DevTools` autoload).
+2.5. Run `name_check.py` on that scratch project **before `--import`** — with no index
+   (must report the engine checks SKIPPED, not passed), under `--require-api` (must exit
+   `2`), after `--refresh-api` (must leave no `.godot/` behind), and with a planted
+   bad-names file (must exit `1` naming the right rules). The positive control is the
+   point: a checker that reports clean on everything looks exactly like one that is not
+   running.
 3. Parse-check every `.gd` under it.
 4. Run both headless runners; expect exit `0` from each.
 5. Launch the scratch project and drive the bridge over the real file bus with the real
    `devtools.py`. Testing one half against a fake of the other is the thing that failed
    before, and this stage is why the check is worth its runtime.
+
+**The scratch project cannot measure a false-positive rate** — it is small and synthetic,
+and `name_check.py` passed every stage on it while emitting 466 bogus warnings on a real
+project ([H-030]). For any change to a *static analysis* template, also run it against a
+real scaffolded project and report the count.
 
 Run it before committing any change under `templates/`, alongside
 `python tools/record_version.py --check`. Say plainly which you actually ran — "templates

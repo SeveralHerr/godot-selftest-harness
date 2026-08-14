@@ -293,6 +293,8 @@ Lives at `res://addons/godot_selftest/devtools_config.json`.
 | `test_dir` | String | `res://test/unit` | Directory the test runner scans for `test_*.gd`. |
 | `scan_root` | String | `res://` | Root for scene/UID scanning. |
 | `uid_check_ignore` | Array | `["res://addons/", "res://tools/"]` | Path prefixes exempt from the missing-`.uid`-sidecar warning. The defaults cover the files the scaffolder copies in — it can't generate a valid `.uid` (ids are engine-assigned), and a gate that cries wolf on install day gets ignored. |
+| `name_check_extra_types` | Array | `[]` | Type names `tools/name_check.py` should accept without proof — the escape hatch for classes a GDExtension registers at runtime, which `--dump-extension-api` cannot see. Leave empty until the checker reports a false positive; every name added here is a name it will never again tell you is missing. |
+| `name_check_ignore` | Array | `[]` | Path prefixes exempt from `name_check.py` findings. Generated or vendored-but-not-plugin code goes here. Vendored addons (an `addons/<name>/` holding a `plugin.cfg`) and `.gdignore` directories are already exempt without configuration. |
 | `reach_aliases` | Object | `{}` | Credits a script reach can never observe to the observed script(s) that vouch for it: `{"world/tile_path_finder.gd": ["world/tile_scenes/bone_worker.gd"]}`. A `RefCounted` or `Resource` held as a plain field is never any node's script, so no amount of exercising it registers — and a permanently deflated reach number teaches readers to ignore the field. Credited files land in a **separate bucket** (`+N by alias`), never folded into `reached`: it is a claim your config makes, shown so a reader can disbelieve it. A voucher that was itself not reached credits nothing. |
 | `fps_min` | int | `30` | Minimum acceptable FPS for `/verify` performance gate. |
 | `orphan_max` | int | `0` | Max tolerated **absolute** orphan nodes. Kept for compatibility only — `0` is unreachable in a real project (a fresh launch reports dozens). Gate on `orphan_growth_max` instead. |
@@ -788,6 +790,75 @@ anywhere in the project and `ClassDB` knows no such engine member. It is the
 is always on, because the entire failure mode is that nobody knew to look. It is
 **advisory** and always will be; see the sharp edge below for what it structurally
 cannot see.
+
+### `tools/name_check.py` — the gate that never opens the project
+
+Every other gate in this harness goes through `.godot/`, which is a single-writer
+resource: `--import` rewrites the import cache, and the headless runners open the
+project and take the same locks. So N agents on one checkout cannot validate at the
+same time, and the honest policy has been *agents never run Godot* — which serialises
+the slowest part of the work behind one agent. A fresh git worktree is the same problem
+at its worst: never imported, so lint reports a thousand `Identifier "X" not declared`
+errors and still exits `0`, and the test runner prints `[PASS]` for tests whose first
+statement errored.
+
+Nearly all of those thousand lines are a **name** that did not resolve, and names are
+decidable from source text plus a table of what the engine provides. `name_check.py`
+resolves them from three inputs, none of which is `.godot/`:
+
+1. the `.gd` files (`class_name`, inner classes, `const`, `enum`, `func`, `signal`, and
+   the `extends` graph that puts a base class's members in scope),
+2. `project.godot`'s `[autoload]` section,
+3. an **engine API index** distilled from `godot --dump-extension-api`.
+
+The third is what makes it safe under parallelism. `--dump-extension-api` runs in an
+empty temp directory with *no project at all* — it opens no `.godot/`, takes no lock,
+and is deterministic for a given engine build. So it is dumped once per engine version
+per machine (~6s, 6.7 MB reduced to ~130 KB gzipped), cached under the user's cache dir
+where **every clone and worktree shares it**, and after that the checker launches
+nothing:
+
+```bash
+python tools/name_check.py --refresh-api    # once per engine version, per machine
+python tools/name_check.py                  # every run after that, no engine
+```
+
+| Rule | Severity | What it means |
+|---|---|---|
+| `unknown_type` | error | An identifier in a type position (`var x: T`, `-> T`, `extends T`, `as T`, `is T`, `Array[T]`, `T.new()`) that matches no `class_name`, inner class, preloaded const, autoload, or engine class. |
+| `duplicate_class_name` | error | Two files declare the same global class. Godot registers one; the others silently do not load. |
+| `class_name_shadows_engine` | error | A `class_name` colliding with an engine class — Godot refuses to register it. |
+| `missing_preload` | error | `preload("res://…")` pointing at a file that is not there. |
+| `missing_extends_path` | error | `extends "res://…"` pointing at a file that is not there. |
+| `missing_load` | warning | The same for `load()`, which can legitimately be conditional. |
+| `unknown_member` | warning | `Known.member` where `Known` resolves and has no such member, walking both the project `extends` chain and the engine's. |
+| `unknown_global_ref` | warning | A PascalCase identifier used as `Name.` / `Name(` that is declared nowhere. This is the `Identifier "Types" not declared` cascade, reported once per name per file instead of once per line. |
+| `class_cache_stale` | warning | A `class_name` present in the source but absent from `.godot/global_script_class_cache.cfg` — read-only, so it stays safe with other agents running. Says the engine will disagree with your files until you import. |
+| `string_ref_unresolved` | advisory | The name inside `has_method("x")` / `connect("x", …)` and friends, matching `lint_project.gd`'s rule of the same name. Advisory for the same structural reason. |
+
+Exit codes follow the harness convention: `0` clean, `1` findings that count (errors,
+plus warnings under `--strict`), `2` could not run. Flags: `-p/--project`, `--json`,
+`--strict`, `--only <prefix>` (repeatable — filters the *report* while still scanning
+the whole project, so cross-file names still resolve; this is what a fan-out agent
+wants), `--no-strings`, `--baseline-write <p>` / `--baseline <p>` (same
+`file|rule|subject` key format as `lint_project.gd`, so only NEW findings gate on a
+project with a backlog), `--refresh-api`, `--force-refresh`, `--api <path>`,
+`--require-api`, `--godot`.
+
+**Two config keys, both empty by default.** `name_check_extra_types` whitelists types a
+GDExtension registers at runtime, which the dump cannot see; `name_check_ignore`
+exempts path prefixes. Leave both empty until the checker actually reports a false
+positive — pre-filling them suppresses real findings.
+
+**Sharp edges.** Without a cached index the engine-name checks are reported as
+`SKIPPED`, *not* passed; `--require-api` turns that into an exit `2`. Member checks
+stand down entirely for a name that is a local value binding, since its type is usually
+unannotated and checking it against a same-named global would flag correct code.
+`unknown_global_ref` deliberately ignores lowercase and `SCREAMING_CASE` identifiers: a
+lowercase name could be an inherited property and a `SCREAMING_CASE` one an inherited
+constant, and a gate that cries wolf gets switched off, which is worse than the gap.
+And this is not a compiler — it does not type-check, evaluate, or see a name built at
+runtime.
 
 ### `tools/import_check.py`
 

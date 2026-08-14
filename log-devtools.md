@@ -1463,11 +1463,18 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   'cells_within' in base 'GDScript'` — the gather-1t9 shape, four times). Workaround that
   worked end-to-end: copy the project (minus .git/.godot) to a scratch dir, run
   `--import` there, verify there — 0 script errors, 250/250, full runtime session.
-  - [gather:G-083] status: open | seen: 1 | harness: 0.7.0 | source: gather 2026-08-02
+  - [gather:G-083] status: fixed | fixed-in: 0.11.0 | seen: 1 | harness: 0.7.0 | source: gather 2026-08-02
   - Improvement: a documented `worktree-verify` recipe (or flag on /verify) that
     auto-stages the scratch copy + import; failing that, the runner should refuse to
     report PASS when the class cache is absent, since every "pass" in that state is
     unverified.
+  - Note (0.11.0): closed by a different route than either option offered. `tools/name_check.py`
+    resolves names from source plus a cached engine API index and never opens the project,
+    so a never-imported worktree now has a Phase 1 gate that works — and it catches exactly
+    the class of failure the 1108 lines were (a `class_name` that did not resolve). The
+    scratch-copy recipe is no longer the only path. The **second** half of this entry — the
+    test runner still printing `[PASS]` with no class cache — is genuinely not fixed and is
+    carried forward as [H-029].
 
 ## 2026-08-05 - Upstreamed 57 open gap(s) from gather (harness 0.4.0, 0.7.0, 0.8.0, unread, unread (bridge was down when I asked))
 
@@ -1633,6 +1640,11 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
     cleans up on exit — the [G-057] ask, but reached for parallel *validation* rather than
     parallel play. Headless lint/test would still need a separate `.godot/` per clone,
     which the clone gives for free.
+  - Note (0.11.0): partially addressed, deliberately not closed. `tools/name_check.py` is a
+    real gate that N agents can run at once on one checkout — it opens no project and writes
+    nothing to `.godot/` — so "agents never run Godot" is no longer the same as "agents never
+    validate". But lint, the test runner and the bridge still each need the import cache, so
+    the `scratch-clone` this entry asks for is still the missing piece and this stays open.
 
 - Gap: **A subagent that cannot run Godot also cannot generate a `.uid`, so it hand-writes
   one and nobody can validate it until the orchestrator imports.** The agent said so
@@ -2479,3 +2491,96 @@ rather than counted as zeros. One bug was found and fixed that way — a `found`
 entries were all malformed collapsed to `[]` and would have silently triggered the new
 `overkill` downgrade, turning a formatting slip into a rewritten verdict; it records
 `null` now.
+
+## 2026-08-14 — A gate that never opens the project (0.11.0)
+
+Four agents in a parallel session on a game project independently asked for the same
+thing: a static GDScript/ClassDB name checker that runs without launching the engine,
+because the shared `.godot/` cache made the harness unusable while they worked at the
+same time. That is `gather:G-093` arriving from four directions at once, and it is worth
+noting that none of them asked for a faster linter — they asked for a *different kind* of
+gate, one whose cost is not a lock.
+
+Shipped `templates/tools/name_check.py`. It resolves the names a project mentions from
+three inputs, none of which is `.godot/`: the `.gd` files themselves (`class_name`, inner
+classes, `const`, `enum`, `func`, `signal`, and the `extends` graph that puts a base
+class's members in scope), `project.godot`'s `[autoload]` section, and an engine API index
+distilled from `godot --dump-extension-api`.
+
+The third input is the whole trick. `--dump-extension-api` runs in an empty temp directory
+with **no project at all** — verified: it opens no `.godot/`, takes no lock, and
+`check_templates.py` stage 2.5 now asserts that a `--refresh-api` leaves no `.godot/`
+behind. 6.7 MB of dump reduces to ~134 KB gzipped, cached per engine version under the
+user's cache dir where every clone and worktree on the machine shares it. After one ~6s
+dump, the checker launches nothing at all.
+
+Nine rules, split by what is actually decidable: `unknown_type`, `duplicate_class_name`,
+`class_name_shadows_engine`, `missing_preload` and `missing_extends_path` are errors;
+`missing_load`, `unknown_member`, `unknown_global_ref` and `class_cache_stale` are
+warnings; `string_ref_unresolved` is advisory, matching `lint_project.gd`'s rule of the
+same name. Wired into `/verify` as the Phase 1 name gate ahead of the import gate, into
+the scaffolder's install set and step 12, and into `check_templates.py` as stage 2.5.
+
+- Value: **warranted**. The checker found a real defect in itself twice during
+  development, both times only because it was run against a real 174-script project rather
+  than the synthetic scratch one — see the two gaps below.
+
+- Gap: **the scratch project in `check_templates.py` is too small and too synthetic to
+  expose a false-positive rate.** Every stage passed on it while `name_check.py` was
+  emitting **466** bogus warnings on the first real project it saw. The cause was one
+  regex: `const X := 0.3` (the inferred-const form) never matched, so every inferred const
+  in the project was invisible and every reference to one became a confident
+  `"Juice" has no member "NODE_BREAK_TIME"`. The scratch project happened to contain no
+  inferred consts. A gate that only ever runs against a fixture it also authors cannot
+  measure noise, and noise is the failure mode that gets a static checker switched off.
+  - [H-030] status: open | seen: 1 | harness: 0.11.0
+  - Improvement: let `check_templates.py` take an optional `--against <project>` that runs
+    the static stages over a real scaffolded project and reports the finding count as a
+    number to eyeball, without gating on it. One flag, and the 466 would have been visible
+    before the commit rather than after.
+
+- Gap: **a second literal-anchored check can silently match nothing and still report a
+  clean run.** `name_check.py` blanks string bodies so no regex can fire inside a literal;
+  the first version blanked the quote *delimiters* too, which is what `preload("…")` and
+  `has_method("…")` anchor on. Both checks matched zero times across every file and the
+  tool printed a clean verdict — the exact `Total: 0 | ALL TESTS PASSED` shape this repo
+  already warns about, in a new place. It was caught only because the test project had
+  planted defects those two rules were supposed to find.
+  - [H-031] status: open | seen: 1 | harness: 0.11.0
+  - Improvement: a rule can report "I matched nothing anywhere in the project" as a
+    diagnostic under a `--self-check` flag. A rule with zero *matches* (not zero findings)
+    across 174 files is either dead code or a broken anchor, and neither should look like
+    a pass.
+
+- Gap: **`run_tests.gd` still prints `[PASS]` when there is no class cache.** This is the
+  half of `gather:G-083` that `name_check.py` does not touch: the name gate now tells a
+  worktree its names are fine, but if someone runs the test runner there anyway, a test
+  whose first statement errored still reports as passing. The runner has the evidence —
+  `.godot/global_script_class_cache.cfg` is absent — and says nothing about it.
+  - [H-029] status: open | seen: 1 | harness: 0.11.0
+  - Improvement: have `run_tests.gd` refuse to report a pass when the class cache file is
+    missing, exiting `2` with one line naming `--import` as the fix. `lint_project.gd`
+    already reports `class_cache_missing` as an advisory; the runner should treat the same
+    condition as disqualifying, because unlike lint it makes a positive claim.
+
+- Gap: **the index cache falls back to a different engine version without saying so.**
+  `find_cached_index` prefers an exact match on the resolved binary's version, but when
+  several indexes are cached and the binary cannot be resolved, it takes the newest by
+  mtime and reports that engine version in its header without flagging the substitution.
+  A 4.5 project checked against a 4.6 index would resolve a class that does not exist in
+  its engine. Deliberate for now — detecting the mismatch means running `godot --version`,
+  and not launching anything is the point — but the silence is the wrong half to keep.
+  - [H-032] status: open | seen: 1 | harness: 0.11.0
+  - Improvement: record the project's engine version in `devtools_config.json` at scaffold
+    time (it is already probing the binary in step 11) and have `name_check.py` compare the
+    index's engine against that string, warning on a mismatch. No launch, no guess.
+
+**Validation run this turn:** `python tools/check_templates.py` — all stages including the
+new 2.5, against Godot 4.6.1 (`stage 5 bridge: ping answered (pong)`, `check_templates:
+OK`). `python tools/record_version.py --check` OK at 0.11.0. `name_check.py` was
+additionally exercised against the real `gather` project (174 scripts, 91 global classes,
+6 autoloads): **0 errors, 0 warnings, 2 advisories**, both of them correct calls on
+`commands.example.gd`. Its exit-code contract, `--json`, `--strict`, `--only`,
+`--no-strings`, `--require-api`, and both baseline paths were checked against a fixture
+project holding planted defects of every rule, plus a mutation test that removed a
+`class_name` declaration and confirmed the resulting `unknown_type` error.

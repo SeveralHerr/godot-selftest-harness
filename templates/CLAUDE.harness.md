@@ -13,9 +13,23 @@ muted, and asserts your actual diff at runtime (catching errors lint/tests can't
 Headless lint and unit tests need **no running game**; run them anytime:
 
 ```bash
+python tools/name_check.py                                       # names only — no engine at all
 godot --headless --path . --script res://tools/lint_project.gd   # UID + scene + dup-id lint
 godot --headless --path . --script res://tools/run_tests.gd      # unit tests (test_dir)
 ```
+
+**`name_check.py` is the only gate that is safe to run in parallel.** It resolves types,
+`class_name`s, autoloads, `preload("res://…")` targets, engine classes/members and string
+method names from source plus a cached engine API index — it opens no project and writes
+nothing to `.godot/`, so N agents can run it at once on one checkout. It is also the only
+Phase 1 gate that works in a **fresh worktree**: with no class cache, lint reports a
+thousand `Identifier "X" not declared` errors and still exits `0`, and the test runner
+prints `[PASS]` for tests whose first statement errored. Exit `0`/`1`/`2` as below. Flags:
+`--only PREFIX` (report just your files; the whole project is still scanned so cross-file
+names resolve), `--strict`, `--json`, `--baseline PATH` / `--baseline-write PATH`,
+`--no-strings`. If it prints `engine index: NONE` the engine-name half was **skipped, not
+passed** — run `python tools/name_check.py --refresh-api` once (Godot in a temp dir, no
+project, safe alongside other agents); `--require-api` makes a missing index an exit `2`.
 
 Exit codes (both): `0` pass, `1` findings, `2` **the runner couldn't run** — a `2` means you
 verified nothing. Redirect to a file and read it back; the Windows Godot build often prints
@@ -193,6 +207,8 @@ the combo window tests nothing the moment the readout starts fading on that time
   only** — Godot has no switch for `user://`, so saves, screenshots, UI baselines and the
   `.godot/` import cache stay shared; `ping` reports `bus_dir` and `user_dir` separately so
   the difference is a read, not a guess. Add `GODOT_USERDATA` per instance to isolate fully.
+  For parallel *validation* rather than parallel play, `python tools/name_check.py` needs
+  none of this — it never opens the project.
 - **`game not running` in ~2s** means a dead game *or* the wrong `user://` dir; the
   error can't tell them apart. Check `--userdata` before assuming a crash.
 - **Assert transforms on `data.transform`, not the property dump.** Godot hides
@@ -205,7 +221,9 @@ the combo window tests nothing the moment the readout starts fading on that time
 `fps_min`, `orphan_growth_max` (gate on this — `orphan_max: 0` is unreachable),
 `safe_area_inset`, `mute`, `main_scene`, `entry_hook {node_path, method}` (advances past
 a menu into the playable scene), `entry_points` (named alternates for scenes the default
-hook can't reach), `test_dir`, `scan_root`, `hud_layer_name`.
+hook can't reach), `test_dir`, `scan_root`, `hud_layer_name`, `name_check_extra_types`
+(types a GDExtension registers at runtime, which the static checker cannot see) and
+`name_check_ignore` (path prefixes it should skip).
 
 ### Token-aware
 - Prefer `node-bounds` / `ui-snapshot` (compact, deterministic) over `screenshot`; only

@@ -8,6 +8,9 @@ other. This script is the release gate:
 
   stage 1  static    py_compile every .py, json.load every .json        (no Godot)
   stage 2  assemble  build a scratch Godot project from templates/      (no Godot)
+  stage 2.5 names    run name_check.py on the scratch project BEFORE
+                     --import, with and without an engine index, and
+                     plant a known-bad file to prove it still says no
   stage 3  parse     `godot --check-only` every template .gd
   stage 4  runners   lint_project.gd + run_tests.gd on the scratch
                      project, both must exit 0
@@ -249,6 +252,110 @@ def stage_parse(godot, scratch):
                                                   (proc.stderr or proc.stdout).strip()))
     print("stage 3 parse: %d scripts checked%s"
           % (len(scripts), "" if ok else " (WITH FAILURES)"))
+    return ok
+
+
+# --------------------------------------------------------------------------
+# Stage 2.5: the static name checker
+#
+# Runs before --import on purpose. name_check.py's whole claim is that it needs no
+# .godot/, and the only way to check that claim is to run it on a project that has
+# never had one. It also gets a private GODOT_SELFTEST_CACHE so the developer's real
+# cached index cannot make a broken --refresh-api look like it worked.
+
+
+def _run_name_check(scratch, cache, args, godot=None):
+    cmd = [sys.executable, str(scratch / "tools" / "name_check.py"),
+           "-p", str(scratch)] + args
+    if godot:
+        cmd += ["--godot", str(godot)]
+    env = dict(os.environ, GODOT_SELFTEST_CACHE=str(cache))
+    return subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=600)
+
+
+def stage_names(scratch, godot, cache):
+    ok = True
+
+    # (a) No index at all: the engine half must report as SKIPPED, not silently pass.
+    proc = _run_name_check(scratch, cache, [])
+    if proc.returncode != 0:
+        ok = fail("stage 2.5 names: clean scratch with no index exited %d\n%s\n%s"
+                  % (proc.returncode, proc.stdout.strip(), proc.stderr.strip()))
+    elif "engine index: NONE" not in proc.stdout or "SKIPPED:" not in proc.stdout:
+        ok = fail("stage 2.5 names: with no cached index the run must say the engine "
+                  "checks were SKIPPED. Got:\n%s" % proc.stdout.strip())
+    else:
+        print("stage 2.5 names: no index -> exit 0, engine checks reported SKIPPED")
+
+    # (b) --require-api must turn that same state into a hard 2, not a quiet pass.
+    proc = _run_name_check(scratch, cache, ["--require-api"])
+    if proc.returncode != 2:
+        ok = fail("stage 2.5 names: --require-api with no index exited %d, expected 2"
+                  % proc.returncode)
+
+    # (c) Dump the index. This must not create a .godot/ anywhere.
+    proc = _run_name_check(scratch, cache, ["--refresh-api"], godot)
+    if proc.returncode != 0:
+        ok = fail("stage 2.5 names: --refresh-api exited %d\n%s\n%s"
+                  % (proc.returncode, proc.stdout.strip(), proc.stderr.strip()))
+        return ok
+    if (scratch / ".godot").exists():
+        ok = fail("stage 2.5 names: --refresh-api created %s. The tool's entire premise "
+                  "is that it never touches the import cache." % (scratch / ".godot"))
+    index_files = list(Path(cache).glob("engine_api_*.json.gz"))
+    if not index_files:
+        ok = fail("stage 2.5 names: --refresh-api exited 0 but wrote no index into %s"
+                  % cache)
+    else:
+        print("stage 2.5 names: --refresh-api -> %s (%d KB), no .godot/ created"
+              % (index_files[0].name, index_files[0].stat().st_size // 1024))
+
+    # (d) With the index, the shipped templates must be name-clean. A finding here is a
+    # real defect in a template, not a false positive to explain away.
+    proc = _run_name_check(scratch, cache, [])
+    if proc.returncode != 0:
+        ok = fail("stage 2.5 names: the shipped templates do not resolve cleanly "
+                  "(exit %d)\n%s" % (proc.returncode, proc.stdout.strip()))
+    else:
+        print("stage 2.5 names: templates resolve clean against the engine index")
+
+    # (e) Positive control. A checker that reports clean on everything is
+    # indistinguishable from one that is not running at all, and stage 4 of the 0.4.0
+    # release was green for exactly that reason.
+    planted = scratch / "tools" / "harness_check_badnames.gd"
+    planted.write_text("\n".join([
+        "extends Node",
+        "class_name HarnessCheckBadNames",
+        "",
+        "const Gone = preload(\"res://tools/definitely_not_here.gd\")",
+        "",
+        "var typo: Vecor2 = Vector2.ZERO",
+        "",
+        "func probe() -> void:",
+        "\tprint(Node.NOTIFICATION_NOT_A_THING)",
+        "",
+    ]), encoding="utf-8")
+    try:
+        proc = _run_name_check(scratch, cache, ["--json"])
+        if proc.returncode != 1:
+            ok = fail("stage 2.5 names: planted bad names exited %d, expected 1\n%s"
+                      % (proc.returncode, proc.stdout.strip()))
+        else:
+            try:
+                rules = {f["rule"] for f in json.loads(proc.stdout)["findings"]}
+            except (ValueError, KeyError) as exc:
+                rules = set()
+                ok = fail("stage 2.5 names: --json output not parseable: %s" % exc)
+            expected = {"missing_preload", "unknown_type", "unknown_member"}
+            if not expected <= rules:
+                ok = fail("stage 2.5 names: planted file should trigger %s, got %s"
+                          % (sorted(expected), sorted(rules)))
+            else:
+                print("stage 2.5 names: planted bad names -> exit 1, rules %s"
+                      % sorted(expected))
+    finally:
+        planted.unlink(missing_ok=True)
+
     return ok
 
 
@@ -585,6 +692,9 @@ def main():
     ok = True
     try:
         ok = stage_assemble(scratch, user_dir_name) and ok
+        # Before --import: name_check.py claims it needs no .godot/, and the only
+        # honest way to check that is to run it on a project that has never had one.
+        ok = stage_names(scratch, godot, Path(tmp) / "api-cache") and ok
         # First import builds .godot/ so later runs resolve class caches.
         imp = run_godot(godot, scratch, ["--import"])
         if imp.returncode != 0:
