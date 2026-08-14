@@ -74,8 +74,8 @@ from bisect import bisect_right
 from datetime import datetime, timezone
 from pathlib import Path
 
-# harness-version: 0.13.0
-HARNESS_VERSION = "0.13.0"
+# harness-version: 0.14.0
+HARNESS_VERSION = "0.14.0"
 
 EXIT_OK = 0
 EXIT_FINDINGS = 1

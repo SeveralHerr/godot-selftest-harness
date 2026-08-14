@@ -129,6 +129,90 @@ def stage_static():
 
 
 # --------------------------------------------------------------------------
+# Stage 1.5: reach classification (pure Python - no Godot, no project)
+
+
+def stage_reach():
+    """verify_ledger's reach buckets, checked by planting each case.
+
+    Reach is the one number in the ledger anybody acts on, and the way it fails is
+    silent: a file that demonstrably ran gets scored a miss, the ratio sags, and
+    readers learn to discount the field instead of reporting the bug. That is what
+    happened to headless tools - `lint_project.gd` was charged as unreached by the
+    very runs that had just executed it - so each bucket here is asserted against a
+    planted path rather than trusted.
+    """
+    sys.path.insert(0, str(TEMPLATES / "tools"))
+    try:
+        import verify_ledger as VL
+    except ImportError as exc:
+        return fail("stage 1.5 reach: cannot import verify_ledger (%s)" % exc)
+
+    tmp = Path(tempfile.mkdtemp(prefix="harness-reach-"))
+    try:
+        # A real file on disk for every candidate: split_reach calls .exists() and
+        # would otherwise excuse the whole set as `deleted`, which passes vacuously.
+        planted = [
+            "player/player.gd",          # game code, never observed -> unreached
+            "tools/lint_project.gd",     # headless runner            -> headless_tools
+            "tools/generate_art.gd",     # project's own generator    -> headless_tools
+            "test/unit/test_thing.gd",   # unit test                  -> test_scripts
+            "toolsy/decoy.gd",           # NOT under tools/           -> unreached
+            "notes.md",                  # wrong suffix               -> not_applicable
+        ]
+        for rel in planted:
+            p = tmp / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text("# planted\n", encoding="utf-8")
+        gone = "world/deleted.gd"  # in the diff, absent from disk -> deleted
+        changed = set(planted) | {gone}
+
+        s = VL.split_reach(changed, set(), set(), tmp, {})
+        expected = {
+            "headless_tools": ["tools/generate_art.gd", "tools/lint_project.gd"],
+            "test_scripts": ["test/unit/test_thing.gd"],
+            "deleted": [gone],
+            "unreached": ["player/player.gd", "toolsy/decoy.gd"],
+        }
+        for bucket, want in expected.items():
+            got = sorted(s.get(bucket) or [])
+            if got != sorted(want):
+                return fail("stage 1.5 reach: %s was %s, expected %s"
+                            % (bucket, got, sorted(want)))
+        # `toolsy/` staying unreached is the over-reach control: a prefix match that
+        # ignored segment boundaries would excuse it and quietly inflate every ratio.
+        if "toolsy/decoy.gd" in (s.get("headless_tools") or []):
+            return fail("stage 1.5 reach: toolsy/ was excused as a headless dir - the "
+                        "prefix match is not respecting segment boundaries")
+        if "notes.md" not in (s.get("not_applicable") or []):
+            return fail("stage 1.5 reach: a .md file did not land in not_applicable")
+        # Excused, never credited: an excused file must not inflate `reached` either.
+        if set(s.get("reached") or []) & set(s.get("headless_tools") or []):
+            return fail("stage 1.5 reach: a headless tool was folded into reached")
+
+        # Opting out must be possible, or a project whose tools/ IS game code is stuck.
+        off = VL.split_reach(changed, set(), set(), tmp, {"reach_headless_dirs": []})
+        if "tools/lint_project.gd" not in (off.get("unreached") or []):
+            return fail("stage 1.5 reach: reach_headless_dirs=[] did not put tools/ "
+                        "back in unreached - the key is decoration")
+
+        # A row written before headless_tools existed must still read. stats() does
+        # .get on the key; a row missing it must not crash or silently change meaning.
+        legacy = {k: v for k, v in VL._sub_reach(s).items() if k != "headless_tools"}
+        if (legacy.get("headless_tools") or []) != []:
+            return fail("stage 1.5 reach: legacy-row simulation is not actually missing "
+                        "the key - the backward-compat check proves nothing")
+        print("stage 1.5 reach: buckets correct (%d headless, %d test, %d deleted, "
+              "%d unreached), toolsy/ not excused, opt-out works, legacy rows parse"
+              % (len(s["headless_tools"]), len(s["test_scripts"]),
+                 len(s["deleted"]), len(s["unreached"])))
+        return True
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+        sys.path.remove(str(TEMPLATES / "tools"))
+
+
+# --------------------------------------------------------------------------
 # Stage 2: scratch project
 
 
@@ -1032,6 +1116,9 @@ def main():
     args = ap.parse_args()
 
     if not stage_static():
+        return 1
+    # Needs no Godot and no project, so it runs under --static-only too.
+    if not stage_reach():
         return 1
     if args.static_only:
         return 0

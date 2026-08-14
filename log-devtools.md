@@ -2971,7 +2971,7 @@ by its own already-fixed bug is the wrong inference, so it stays.
   the same way. This is the identical mechanism `REFERENCE.md` already names for test
   scripts: "a metric that reports a file as unreached when it demonstrably ran teaches its
   readers to discount the number."
-  - [H-039] status: open | seen: 1 | harness: 0.13.0
+  - [H-039] status: fixed | fixed-in: 0.14.0 | seen: 1 | harness: 0.13.0
   - Improvement: a `headless_tools` sub-list of `not_applicable`, driven by a configurable
     `reach_headless_dirs` defaulting to `["tools/"]` — mirroring `uid_check_ignore`, which
     already treats `tools/` as not-game-code. Leave `addons/` alone: `dev_tools.gd`
@@ -2993,3 +2993,56 @@ control fired`). `python tools/record_version.py --record` then `--check` — OK
 `0.13.0`, 11 shipped files, 46 bus verbs + 48 CLI commands documented. Shader pass also
 run against two real projects (`gather`, `BoomerShooter`) for the false-positive count
 above.
+
+## 2026-08-14 — Close H-039: stop charging headless tools as unreached (0.14.0)
+
+Same session as 0.13.0, acting on the gap that release's ledger audit opened.
+
+**Fixed [H-039].** `split_reach()` gains a `headless_tools` sub-list of
+`not_applicable`, driven by `reach_headless_dirs` (default `["tools/"]`). Scripts that
+only ever run as `godot --headless --script res://tools/x.gd` have no node to be the
+`script` of, so they can never appear in a scene-tree snapshot however thoroughly they
+ran — `lint_project.gd` and `run_tests.gd` were being scored misses by the runs that had
+just executed them. Excused, not credited, on the same terms as `test_scripts`.
+
+Checked against the run that exposed it (`gather`, harness 0.10.0, 2026-08-06): its
+`unreached` goes **7 → 4**, with `tools/eval.gd`, `tools/lint_project.gd` and
+`tools/run_tests.gd` moving to `headless_tools`. The reach ratio for that run goes from
+11/18 to 11/15 without a single file being credited that was not already running.
+
+`addons/` is deliberately **not** covered. `dev_tools.gd` is the autoload and already
+resolves through `reached_implicit`, and `scene_validator.gd` showing unreached after
+`validate_ui` demonstrably ran is an *observation* gap in `scripts_seen`, not a
+classification one. Folding the two together would have hidden the second bug inside the
+fix for the first — which is [H-033]'s rule (reproduce the mechanism, don't build to the
+report) applied to a gap this repo wrote itself.
+
+- Gap: **`scripts_seen` does not report a script the bridge loaded on demand.**
+  `addons/godot_selftest/scene_validator.gd` was in the changed set of the 2026-08-06
+  run, `validate_ui` ran during it, and reach still scored the file unreached. Either the
+  census only sees scripts attached to nodes (the validator is loaded and called, never
+  parented), or it snapshots before the validator loads. Unlike the headless-tool case
+  this one is a *real* miss the metric should be able to close, because the script
+  genuinely executed.
+  - [H-040] status: open | seen: 1 | harness: 0.14.0
+  - **Not reproduced** — inferred from one ledger row, so per [H-033] the mechanism above
+    is a hypothesis. The probe is small: scaffold a scratch project, call `validate_ui`
+    over the bus, then call `scripts_seen` and check whether the validator's path is in
+    the list.
+  - Improvement: if it is the not-parented case, have the census record every script the
+    bridge itself `load()`s, not only those it finds on nodes. That is the same
+    "credited because it demonstrably ran" standard `reached_implicit` already uses.
+
+**Validation run this turn:** `python tools/check_templates.py` — **OK**, including the
+new `stage 1.5 reach`. That stage plants every bucket rather than asserting the happy
+path, and both regressions were confirmed to fail it before shipping: reverting the
+default to `[]` gives `headless_tools was [], expected [...]` and exit `1`, and replacing
+the segment-aware `_under()` with a naive `startswith` swallows the planted `toolsy/`
+decoy and also exits `1`. A stage that only reports success is not a stage ([H-035]).
+`python tools/record_version.py --record` then `--check` — OK at `0.14.0`.
+`python -m unittest discover -s tools` — 17 tests, OK.
+
+**Noted, not fixed:** `tools/test_scaffold.py` (17 passing tests) is referenced by
+nothing — not `check_templates.py`, not `CLAUDE.md`, not any command. It only ran this
+turn because it was gone looking for. A suite nothing invokes is a suite that will rot
+without anyone noticing, which is the same class of problem as a gate that cannot fail.

@@ -299,6 +299,7 @@ Lives at `res://addons/godot_selftest/devtools_config.json`.
 | `name_check_extra_types` | Array | `[]` | Type names `tools/name_check.py` should accept without proof — the escape hatch for classes a GDExtension registers at runtime, which `--dump-extension-api` cannot see. Leave empty until the checker reports a false positive; every name added here is a name it will never again tell you is missing. |
 | `name_check_ignore` | Array | `[]` | Path prefixes exempt from `name_check.py` findings. Generated or vendored-but-not-plugin code goes here. Vendored addons (an `addons/<name>/` holding a `plugin.cfg`) and `.gdignore` directories are already exempt without configuration. |
 | `reach_aliases` | Object | `{}` | Credits a script reach can never observe to the observed script(s) that vouch for it: `{"world/tile_path_finder.gd": ["world/tile_scenes/bone_worker.gd"]}`. A `RefCounted` or `Resource` held as a plain field is never any node's script, so no amount of exercising it registers — and a permanently deflated reach number teaches readers to ignore the field. Credited files land in a **separate bucket** (`+N by alias`), never folded into `reached`: it is a claim your config makes, shown so a reader can disbelieve it. A voucher that was itself not reached credits nothing. |
+| `reach_headless_dirs` | Array | `["tools/"]` | Directories whose scripts only ever run under `godot --headless --script`. They cannot be any node's `script`, so reach scores them `headless_tools` (a sub-list of `not_applicable`) instead of counting them as misses — otherwise `lint_project.gd` and `run_tests.gd` are charged as unreached by the runs that just executed them. Matching is on whole path segments, so `tools/` never swallows `toolsy/`. Set to `[]` if your `tools/` genuinely holds game code. `addons/` is not covered here by design: `dev_tools.gd` is the autoload and resolves through `reached_implicit`. |
 | `fps_min` | int | `30` | Minimum acceptable FPS for `/verify` performance gate. |
 | `orphan_max` | int | `0` | Max tolerated **absolute** orphan nodes. Kept for compatibility only — `0` is unreachable in a real project (a fresh launch reports dozens). Gate on `orphan_growth_max` instead. |
 | `orphan_growth_max` | int | `20` | Max tolerated growth in orphan nodes vs. the startup baseline. This is the number that means "this change leaks". |
@@ -1005,6 +1006,13 @@ readers to discount the number:
   writing a test alongside a fix permanently capped the ratio below 100% — precisely the
   wrong incentive. They now join `not_applicable` (sub-list `test_scripts`). Excused, not
   credited: the ledger cannot see Phase 1's results, so it makes no claim they passed.
+- **Scripts under `reach_headless_dirs`** (default `["tools/"]`) run only as
+  `godot --headless --script res://tools/x.gd`. No node ever carries them as its
+  `script`, so no amount of running them can register — `lint_project.gd` and
+  `run_tests.gd` were being charged as misses by the very runs that had just executed
+  them. Same bucket (`headless_tools`), same terms: excused, not credited. `addons/` is
+  deliberately excluded from this rule — `dev_tools.gd` is the autoload and already
+  resolves through `reached_implicit`.
 - **Scripts credited by `reach_aliases`** land in `reached_alias`, with the voucher
   recorded in `reached_alias_via` and printed inline (`+1 by alias: X via Y`) so the
   claim is auditable rather than an anonymous bump. Never folded into `reached` — an

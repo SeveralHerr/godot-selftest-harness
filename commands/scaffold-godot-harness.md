@@ -253,6 +253,7 @@ Detect:
   "name_check_extra_types": [],
   "name_check_ignore": [],
   "reach_aliases": {},
+  "reach_headless_dirs": ["tools/"],
   "fps_min": 30,
   "orphan_max": 0,
   "orphan_growth_max": 20,

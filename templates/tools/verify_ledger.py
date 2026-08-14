@@ -33,7 +33,7 @@ snapshot can see. A changed file in that set that was not otherwise observed lan
 `reached_implicit` — credited as running, kept out of `unreached`, and deliberately not
 folded into `reached`, which stays what was *observed*.
 
-**Two things that were being scored as misses and are not.** A metric that reports a
+**Three things that were being scored as misses and are not.** A metric that reports a
 file as unreached when it demonstrably ran does not merely lose accuracy — it teaches
 its readers to discount the number, which is worse than not printing it.
 
@@ -44,6 +44,13 @@ its readers to discount the number, which is worse than not printing it.
   incentive. They now join `not_applicable` (sub-list `test_scripts`), the same bucket
   their own `.uid` sidecars were already landing in. Excused, not credited: the ledger
   cannot see Phase 1's results from here, so it does not claim they passed.
+* *Headless tools.* Scripts under `reach_headless_dirs` (default `["tools/"]`) only ever
+  run as `godot --headless --script res://tools/x.gd`. There is no node for them to be
+  the `script` of, so they can never register in a snapshot no matter how thoroughly
+  they ran — `lint_project.gd` and `run_tests.gd` were being charged as misses by the
+  very runs they had just executed. Same bucket (`headless_tools`), same terms: excused,
+  not credited. `addons/` is deliberately not covered — `dev_tools.gd` is the autoload
+  and already resolves through `reached_implicit`.
 * *Non-Node scripts.* A `RefCounted` helper held as a plain field, a `Resource`
   subclass, an item model — none of them is ever a node's `script`, so no amount of
   exercising them can register. A project can declare the observed Node that vouches
@@ -125,8 +132,8 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
-# harness-version: 0.13.0
-HARNESS_VERSION = "0.13.0"
+# harness-version: 0.14.0
+HARNESS_VERSION = "0.14.0"
 
 LEDGER_PATH = Path(".devtools") / "verify-runs.jsonl"
 
@@ -143,6 +150,14 @@ CONFIG_PATH = Path("addons") / "godot_selftest" / "devtools_config.json"
 # project has no test dir" rather than "use the default", so the three agree on what a
 # test path is. Disagreeing here would excuse files one tool considers game code.
 DEFAULT_TEST_DIR = "res://test/unit"
+
+# Dirs whose scripts only ever run under `godot --headless --script` and so can never
+# appear in a scene-tree snapshot of a game session - the same structural argument as
+# test_scripts. Default mirrors uid_check_ignore's treatment of tools/ as not-game-code:
+# it holds the harness's own lint_project.gd / run_tests.gd / eval.gd plus whatever
+# one-off generators the project keeps there. addons/ is deliberately NOT here:
+# dev_tools.gd is the autoload and already resolves through reached_implicit.
+DEFAULT_HEADLESS_DIRS = ["tools/"]
 
 GRACE = 10  # seconds; git must never hang the tail end of a verify run
 
@@ -327,6 +342,33 @@ def _under(path, folder):
     return bool(folder) and (path == folder or path.startswith(folder + "/"))
 
 
+def _headless_dirs(cfg):
+    """Repo-relative dirs whose scripts only ever run under `--headless --script`.
+
+    `[]` if the project declares it has none. Default `["tools/"]` mirrors
+    `uid_check_ignore`, which already treats `tools/` as not-game-code: it is where
+    the scaffolder installs `lint_project.gd`, `run_tests.gd` and `eval.gd`, and where
+    projects put their own one-off generators.
+    """
+    raw = cfg.get("reach_headless_dirs", DEFAULT_HEADLESS_DIRS)
+    if isinstance(raw, str):
+        raw = [raw]
+    if not isinstance(raw, list):
+        _warn("devtools_config.json reach_headless_dirs is not a list - using %s"
+              % DEFAULT_HEADLESS_DIRS)
+        raw = DEFAULT_HEADLESS_DIRS
+    out = []
+    for entry in raw:
+        if not isinstance(entry, str):
+            _warn("devtools_config.json reach_headless_dirs entry %r is not a string "
+                  "- ignored" % (entry,))
+            continue
+        folder = _norm(entry).rstrip("/")
+        if folder:
+            out.append(folder)
+    return out
+
+
 def _reach_aliases(cfg):
     """`{script: (voucher, ...)}` - who has to be observed for a script to be credited.
 
@@ -445,19 +487,26 @@ def split_reach(changed, observed, implicit, root, cfg=None):
                          session, so scoring them as misses charged a developer for
                          writing a test - a permanent cap on the ratio, applied
                          precisely to the behavior the harness wants more of
+      headless_tools   - subset of not_applicable: under `reach_headless_dirs`. Same
+                         structural argument as test_scripts, one directory over -
+                         a `--headless --script` runner has no node to be the script of
     When observed is None the observation-dependent lists are None.
     """
     cfg = load_config(root) if cfg is None else cfg
     test_dir = _test_dir(cfg)
+    headless_dirs = _headless_dirs(cfg)
     aliases = _reach_aliases(cfg)
 
     candidates = sorted(p for p in changed if Path(p).suffix.lower() in REACHABLE_SUFFIXES)
     skipped = sorted(p for p in changed if Path(p).suffix.lower() not in REACHABLE_SUFFIXES)
     deleted = sorted(p for p in candidates if not (root / p).exists())
     tests = sorted(p for p in candidates if _under(p, test_dir))
-    # A test file that was also deleted belongs to both sub-lists and to one entry of
-    # not_applicable; the set keeps it from being counted twice.
-    excused = set(deleted) | set(tests)
+    headless = sorted(p for p in candidates
+                      if any(_under(p, d) for d in headless_dirs) and p not in tests)
+    # A file can qualify for more than one sub-list (a deleted test, a headless tool that
+    # was removed). Each sub-list reports it, and the set keeps not_applicable from
+    # counting it twice.
+    excused = set(deleted) | set(tests) | set(headless)
     live = [p for p in candidates if p not in excused]
     result = {
         "reached": None,
@@ -468,6 +517,7 @@ def split_reach(changed, observed, implicit, root, cfg=None):
         "not_applicable": sorted(set(skipped) | excused),
         "deleted": deleted,
         "test_scripts": tests,
+        "headless_tools": headless,
     }
     if observed is None:
         return result
@@ -500,7 +550,8 @@ def _sub_reach(split):
     """
     return {k: split[k] for k in
             ("reached", "reached_implicit", "reached_alias", "reached_alias_via",
-             "unreached", "not_applicable", "deleted", "test_scripts")}
+             "unreached", "not_applicable", "deleted", "test_scripts",
+             "headless_tools")}
 
 
 # The four verdicts a run can carry. `warranted` needs a named claim, `overkill` means
@@ -750,6 +801,7 @@ def _reach_line(split):
     alias = split.get("reached_alias") or []
     via = split.get("reached_alias_via") or {}
     tests = split.get("test_scripts") or []
+    headless = split.get("headless_tools") or []
     unreached = split.get("unreached") or []
     total = len(reached) + len(implicit) + len(alias) + len(unreached)
     detail = "reached %d/%d changed file(s)" % (len(reached), total)
@@ -766,6 +818,10 @@ def _reach_line(split):
         # to not produce.
         detail += ("; %d test script(s) excluded (ran in Phase 1; a game session cannot "
                    "load them): %s" % (len(tests), ", ".join(tests)))
+    if headless:
+        # Same reasoning as the tests line above: named, not silently dropped.
+        detail += ("; %d headless tool(s) excluded (run only under --headless --script, "
+                   "so no node can carry them): %s" % (len(headless), ", ".join(headless)))
     if unreached:
         detail += "; NOT reached: " + ", ".join(unreached)
     elif total > len(reached):
@@ -809,6 +865,9 @@ def cmd_reach(args, root):
         print("test scripts (ran in Phase 1, invisible to a game session's scene tree - "
               "excused, not credited: reach cannot tell you they passed): "
               + ", ".join(u["test_scripts"]))
+    if u.get("headless_tools"):
+        print("headless tools (run only under --headless --script, so no node can carry "
+              "them - excused, not credited): " + ", ".join(u["headless_tools"]))
     if u.get("reached_alias"):
         via = u.get("reached_alias_via") or {}
         print("credited by reach_aliases (declared by this project, NOT observed - a "
@@ -861,6 +920,7 @@ def cmd_stats(args, root):
     # is what keeps a mixed-vintage ledger aggregating instead of raising.
     alias_n = 0
     test_n = 0
+    headless_n = 0
     wt_reached = wt_denom = 0        # worktree denominator (0.8.0+ rows)
     br_reached = br_denom = 0        # branch denominator (0.8.0+ rows)
     per_version = defaultdict(lambda: [0, 0])
@@ -912,6 +972,9 @@ def cmd_stats(args, root):
             implicit_n += len(reach.get("reached_implicit") or [])
             alias_n += len(reach.get("reached_alias") or [])
             test_n += len(reach.get("test_scripts") or [])
+            # .get on a key added in 0.13.0: every row written before it must still
+            # parse, or stats silently mixes two populations in one average.
+            headless_n += len(reach.get("headless_tools") or [])
             slot = per_version[row.get("harness") or "?"]
             slot[0] += len(r)
             slot[1] += len(r) + len(u or [])
@@ -968,6 +1031,9 @@ def cmd_stats(args, root):
     if test_n:
         print("       %d changed test script(s) excluded - they ran in Phase 1, which "
               "is not something reach can see or vouch for" % test_n)
+    if headless_n:
+        print("       %d changed headless tool(s) excluded - they run under "
+              "--headless --script, so no node ever carries them" % headless_n)
     if no_snapshot:
         print("       %d run(s) recorded no snapshot - reach unknown, not counted" % no_snapshot)
 
