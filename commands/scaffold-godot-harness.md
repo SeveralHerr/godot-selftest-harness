@@ -486,6 +486,18 @@ Resolve the Godot binary in this priority order:
    - `/c/Program Files/Godot*/Godot*.exe`
    - `$LOCALAPPDATA/Programs/Godot/Godot*.exe`
 
+**When the glob matches more than one binary, pick by the project's declared engine
+version, never by glob order** (`findmyballs:G-001`). A machine with 4.5.1, 4.6.1 and
+4.7.1 side by side gave a project whose `config/features` reads
+`PackedStringArray("4.7", "Forward Plus")` the **4.5.1** binary, and recording that in
+`godot_bin` would have pinned every later `/verify` two minor versions behind the
+project. Match `X.Y` out of `config/features` against the filename; failing a match,
+take the **highest** version rather than the first hit.
+
+The resolved version is recorded as `godot_version` alongside `godot_bin`, which is
+what lets `name_check.py` notice it is about to answer from a cached index built by a
+different engine (`H-032`) without launching anything to find out.
+
 ```bash
 GODOT=""
 if [ -n "$GODOT_BIN" ] && [ -x "$GODOT_BIN" ]; then GODOT="$GODOT_BIN"; fi
@@ -498,18 +510,39 @@ if [ -z "$GODOT" ] && [ -x "/Applications/Godot.app/Contents/MacOS/Godot" ]; the
 fi
 if [ -z "$GODOT" ] && command -v godot >/dev/null 2>&1; then GODOT="$(command -v godot)"; fi
 if [ -z "$GODOT" ]; then
+  # The project's own X.Y, e.g. "4.7", from config/features in project.godot.
+  WANT="$(sed -n 's/.*config\/features=PackedStringArray(\"\([0-9]\+\.[0-9]\+\)\".*/\1/p' \
+          "$ROOT/project.godot" 2>/dev/null | head -1)"
+  CANDS=""
   for cand in "$HOME"/Documents/Godot_v*_win64.exe \
               "/c/Program Files/Godot"*/Godot*.exe \
               "${LOCALAPPDATA:-/c/nonexistent}"/Programs/Godot/Godot*.exe; do
-    [ -x "$cand" ] && GODOT="$cand" && break
+    [ -x "$cand" ] && CANDS="$CANDS
+$cand"
   done
+  # Prefer a filename carrying the project's X.Y; otherwise the highest version.
+  # `sort -V` puts 4.10 after 4.9, which a lexical sort does not.
+  if [ -n "$WANT" ]; then
+    GODOT="$(printf '%s\n' "$CANDS" | grep -F "_v${WANT}." | sort -Vr | head -1)"
+  fi
+  [ -x "$GODOT" ] || GODOT="$(printf '%s\n' "$CANDS" | sed '/^$/d' | sort -Vr | head -1)"
+  [ -x "$GODOT" ] || GODOT=""
+  if [ -n "$GODOT" ] && [ -n "$WANT" ] && ! printf '%s' "$GODOT" | grep -qF "_v${WANT}."; then
+    echo "WARN: project declares Godot $WANT but the best available binary is $GODOT."
+    echo "      Install $WANT or set GODOT_BIN; a version-skewed gate reports on the wrong engine."
+  fi
 fi
 if [ -n "$GODOT" ]; then
   echo "Godot binary: $GODOT"
-  # Record it so /verify and later scaffold runs skip the probe. Uses the config
-  # mechanism from step 7, so a hand-edited godot_bin stays project-owned.
+  # Ask the binary what it is rather than trusting the filename.
+  GVER="$("$GODOT" --version 2>/dev/null | head -1 | sed 's/^\([0-9]\+\.[0-9]\+\(\.[0-9]\+\)\?\).*/\1/')"
+  echo "Godot version: ${GVER:-unknown}"
+  # Record both so /verify, later scaffold runs and name_check.py skip the probe.
+  # Uses the config mechanism from step 7, so a hand-edited value stays project-owned.
   "$PY" "${CLAUDE_PLUGIN_ROOT}/tools/scaffold_install.py" config --project "$ROOT" \
     --plugin-root "${CLAUDE_PLUGIN_ROOT}" --set "godot_bin=$GODOT"
+  [ -n "$GVER" ] && "$PY" "${CLAUDE_PLUGIN_ROOT}/tools/scaffold_install.py" config --project "$ROOT" \
+    --plugin-root "${CLAUDE_PLUGIN_ROOT}" --set "godot_version=$GVER"
 else
   echo "WARN: no Godot binary found. Set GODOT_BIN or add godot_bin to devtools_config.json."
 fi

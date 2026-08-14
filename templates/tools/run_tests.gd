@@ -16,7 +16,7 @@ extends SceneTree
 ## Exit codes. The runner always calls quit() with its own result, so the process
 ## exit code means "the tests said so" and never "Godot leaked an RID at shutdown":
 ##   0  every selected test passed
-##   1  one or more tests failed
+##   1  one or more tests failed, or verified nothing (see [VACUOUS] below)
 ##   2  the runner itself could not run, i.e. NOTHING WAS VERIFIED - test_dir is
 ##      missing, a test script failed to load / instantiate, no test scripts were
 ##      discovered at all, the discovered scripts held no test_* methods, or a
@@ -41,10 +41,27 @@ extends SceneTree
 ## Every run states its denominator, selector or not (G-135):
 ##   Selected: 38 of 662 discovered  (file 'test_player_combat')
 ##   Selected: 662 of 662 discovered  (no selector)
+##   Autoloads: 6 of 6 ready
+##   Assertions: 1184 executed
 ## The bare run used to print only `Total: 662 | ...`, which is the same fact with
 ## nothing to compare it against - a discovery pass that silently found half the
 ## files it should have looked exactly like a full suite. `ALL TESTS PASSED` is
 ## now unreachable with a zero total: every way of running nothing is exit 2.
+##
+## Autoloads are stepped into readiness before discovery (findmyballs:G-002).
+## In --script mode they are instantiated and parented to root, but the tree has
+## not been stepped, so _ready() has NOT run when _initialize() begins: an
+## autoload that builds its data there answers every test with an empty
+## collection while lint reports every script compiled clean. One awaited frame
+## fixes it; `Autoloads: N of M ready` is the receipt. See _await_autoloads().
+##
+## A test that returns pass having executed NONE of its own _T.assert_* calls is
+## reported `[VACUOUS]` and scored as a failure. This is the other half of the
+## same bug: three tests in the project that found it iterate a collection and
+## assert inside the loop, and an EMPTY collection satisfies all three. The
+## runner only makes this call when the method's own source contains a
+## _T.assert_* call, so a project that hand-rolls its failure strings is never
+## accused of anything.
 ##
 ## Windows note: the stock Godot .exe is the non-console build and prints nothing
 ## to a PowerShell console, so redirect headless runs to a file and read that back
@@ -73,10 +90,10 @@ extends SceneTree
 ## (res://addons/godot_selftest/devtools_config.json key "test_dir", default
 ## "res://test/unit") for files named test_*.gd.
 
-# harness-version: 0.11.0
+# harness-version: 0.12.0
 ## Harness revision these files were copied from. See lint_project.gd / the
 ## `harness_version` bus verb; bump with .claude-plugin/plugin.json.
-const HARNESS_VERSION: String = "0.11.0"
+const HARNESS_VERSION: String = "0.12.0"
 
 const CONFIG_PATH: String = "res://addons/godot_selftest/devtools_config.json"
 const DEFAULT_TEST_DIR: String = "res://test/unit"
@@ -103,6 +120,18 @@ var _selected: int = 0
 ## complete", because the suite is fine - the selector isn't.
 var _selection_error: String = ""
 
+## Autoload readiness, reported on every run. See _await_autoloads().
+var _autoloads_total: int = 0
+var _autoloads_ready: int = 0
+var _autoloads_unready: Array[String] = []
+
+## Assertions executed through the _T.assert_* helpers, counted across the whole
+## process. _run_single_test() snapshots it either side of a test method; the
+## delta is that method's assertion count. Static because the helpers are.
+static var _assertions_run: int = 0
+
+var _vacuous: int = 0
+
 
 func _initialize() -> void:
 	var args: PackedStringArray = OS.get_cmdline_user_args()
@@ -116,6 +145,9 @@ func _initialize() -> void:
 			"--file":
 				if i + 1 < args.size():
 					_file_filter = args[i + 1]
+
+	# MUST happen before any test runs. See _await_autoloads() for why.
+	await _await_autoloads()
 
 	var test_dir: String = _load_test_dir()
 	if not DirAccess.dir_exists_absolute(test_dir):
@@ -168,6 +200,62 @@ func _initialize() -> void:
 	_print_results()
 
 	quit(_exit_code())
+
+
+## Steps the tree once so every autoload finishes entering it and _ready() runs
+## (findmyballs:G-002). Without this the whole suite tests a different program
+## than the one that ships.
+##
+## In --script mode the autoloads ARE instantiated and ARE parented to root by
+## the time _initialize() is called - but the tree has not been stepped, so
+## ENTER_TREE and READY are still queued. Measured on 4.6.1:
+##
+##   in _initialize():   get_parent() = root, is_inside_tree() = FALSE,
+##                       _ready() not run, its Array field empty
+##   after 1 frame:      is_inside_tree() = true, _ready() run, field populated
+##
+## So an autoload that builds its data in _ready() answers with an EMPTY
+## collection to every test, while lint reports every script compiled clean.
+## The project that found this shipped three tests that iterate such a
+## collection: an empty one satisfies all three, and they passed. That is why
+## the assertion counter below exists as well as this await - the two halves of
+## the same failure.
+##
+## Worse than uniformly-empty is what happened before: the runner awaits inside
+## _run_single_test(), so the FIRST test that happened to await a frame flushed
+## the notifications, and every test after it saw populated autoloads while
+## every test before it saw empty ones. Suite behaviour depended on test order.
+##
+## One frame, before discovery, makes it deterministic. Note this is also why
+## eval.gd's "--script mode never instantiates autoloads" was wrong: they are
+## instantiated, they are just not ready yet.
+func _await_autoloads() -> void:
+	var names: Array[String] = _configured_autoloads()
+	_autoloads_total = names.size()
+	if _autoloads_total == 0:
+		return
+
+	await process_frame
+
+	for name: String in names:
+		var node: Node = root.get_node_or_null(NodePath(name))
+		if node != null and node.is_node_ready():
+			_autoloads_ready += 1
+		else:
+			_autoloads_unready.append(name)
+
+
+## Autoload names from project.godot, in declaration order (which is the order
+## Godot instantiates them in, so it is also dependency order).
+func _configured_autoloads() -> Array[String]:
+	var out: Array[String] = []
+	for prop: Dictionary in ProjectSettings.get_property_list():
+		var key: String = str(prop.get("name", ""))
+		if key.begins_with("autoload/"):
+			var name: String = key.substr("autoload/".length())
+			if name != "":
+				out.append(name)
+	return out
 
 
 ## Human-readable form of whichever selectors were passed, for the zero-match error.
@@ -295,6 +383,8 @@ func _run_all_tests(test_scripts: Array[String]) -> void:
 		var runner_script: GDScript = get_script() as GDScript
 		test_obj.set("_T", runner_script)
 
+		var asserting: Dictionary = _methods_calling_assertions(script)
+
 		var methods: Array[Dictionary] = script.get_script_method_list()
 		for method: Dictionary in methods:
 			var method_name: String = method["name"]
@@ -306,7 +396,40 @@ func _run_all_tests(test_scripts: Array[String]) -> void:
 				continue
 			_selected += 1
 
-			await _run_single_test(test_obj, method_name, script_path)
+			await _run_single_test(
+				test_obj, method_name, script_path, bool(asserting.get(method_name, false))
+			)
+
+
+## {method_name: bool} - does this method's own body contain a _T.assert_* call?
+##
+## The discriminator for a vacuous pass. The runner can only count the
+## assertions IT provided, so "0 assertions executed" alone does not prove a
+## test checked nothing: a project may hand-roll its failure strings, and
+## calling that a failure would be the runner overclaiming. But a method whose
+## body plainly calls _T.assert_* and then executes NONE of them did not check
+## what it was written to check - the usual cause being a loop over a
+## collection that turned out to be empty, which is exactly how three
+## findmyballs tests passed against an autoload holding no data.
+##
+## Source-based because it is the only way to tell the two apart. Sliced per
+## method (a top-level `func` at column 0 ends the previous one) rather than per
+## script, so one hand-rolled test in an otherwise asserting file is not
+## accused of anything.
+func _methods_calling_assertions(script: GDScript) -> Dictionary:
+	var out: Dictionary = {}
+	var source: String = script.source_code
+	if source == "":
+		return out  # no source (exported build): claim nothing
+	var current: String = ""
+	for line: String in source.split("\n"):
+		if line.begins_with("func ") or line.begins_with("static func "):
+			var head: String = line.substr(line.find("func ") + 5)
+			current = head.split("(")[0].strip_edges()
+			out[current] = false
+		elif current != "" and line.contains("_T.assert"):
+			out[current] = true
+	return out
 
 
 # Isolated so a runtime error inside new() aborts only this call, leaving
@@ -350,7 +473,12 @@ func _script_matches_selectors(script_path: String) -> bool:
 	return true
 
 
-func _run_single_test(test_obj: RefCounted, method_name: String, script_path: String) -> void:
+func _run_single_test(
+	test_obj: RefCounted,
+	method_name: String,
+	script_path: String,
+	expects_assertions: bool,
+) -> void:
 	# Call setup if it exists. `await` on a non-coroutine call resolves at once,
 	# so synchronous setup/teardown/tests are unaffected.
 	if test_obj.has_method("setup"):
@@ -364,20 +492,33 @@ func _run_single_test(test_obj: RefCounted, method_name: String, script_path: St
 		"status": "FAIL",
 		"message": "Test aborted before returning (runtime error - see stderr)",
 		"elapsed_ms": 0,
+		"assertions": 0,
 	}
 	_results.append(result)
 	_failed += 1
 
 	var start_time: int = Time.get_ticks_msec()
+	var assertions_before: int = _assertions_run
 
 	# Run the test - assertion failures come back as the return value
 	var raw_result: Variant = await test_obj.call(method_name)
 
 	result["elapsed_ms"] = Time.get_ticks_msec() - start_time
+	var assertions_used: int = _assertions_run - assertions_before
+	result["assertions"] = assertions_used
 
 	var error_msg: String = "" if raw_result == null else str(raw_result)
 	if error_msg != "":
 		result["message"] = error_msg
+	elif expects_assertions and assertions_used == 0:
+		# Returned the success value having executed none of the assertions it
+		# is written around. Not a pass: nothing was checked.
+		result["status"] = "VACUOUS"
+		result["message"] = (
+			"returned pass having executed 0 of its _T.assert_* calls - "
+			+ "nothing was verified (an empty collection satisfies every loop over it)"
+		)
+		_vacuous += 1
 	else:
 		result["status"] = "PASS"
 		result["message"] = ""
@@ -399,6 +540,11 @@ func _print_results() -> void:
 			"total": _passed + _failed + _skipped,
 			"discovered": _discovered,
 			"selected": _selected,
+			"vacuous": _vacuous,
+			"assertions": _assertions_run,
+			"autoloads_total": _autoloads_total,
+			"autoloads_ready": _autoloads_ready,
+			"autoloads_unready": _autoloads_unready,
 			"filter": _filter,
 			"file": _file_filter,
 			"selection_error": _selection_error,
@@ -424,11 +570,15 @@ func _print_results() -> void:
 
 	for result: Dictionary in _results:
 		var status: String = result["status"]
-		var icon: String = "[PASS]" if status == "PASS" else "[FAIL]"
+		var icon: String = "[PASS]"
+		if status == "VACUOUS":
+			icon = "[VACU]"
+		elif status != "PASS":
+			icon = "[FAIL]"
 		var test_name: String = result["test"]
 		var elapsed: int = result.get("elapsed_ms", 0)
 		print("  %s %s (%dms)" % [icon, test_name, elapsed])
-		if status == "FAIL":
+		if status != "PASS":
 			print("         %s" % result.get("message", ""))
 
 	for err: Dictionary in _errors:
@@ -448,6 +598,16 @@ func _print_results() -> void:
 	# the suite down to; on a bare run it is the discovery denominator, which is
 	# the number that says whether the whole suite was even found.
 	print("  Selected: %d of %d discovered  (%s)" % [_selected, _discovered, _selector_label()])
+	# Denominators, both of them. A run that verified nothing must never be
+	# reportable as a clean one, so say what was actually looked at.
+	if _autoloads_total > 0:
+		var autoload_note: String = ""
+		if not _autoloads_unready.is_empty():
+			autoload_note = "  NOT READY: %s" % ", ".join(_autoloads_unready)
+		print("  Autoloads: %d of %d ready%s" % [
+			_autoloads_ready, _autoloads_total, autoload_note,
+		])
+	print("  Assertions: %d executed" % _assertions_run)
 	print("-" .repeat(60))
 
 	if _selection_error != "":
@@ -462,6 +622,12 @@ func _print_results() -> void:
 		# above, so this line should be unreachable. It exists so that no future
 		# path can reach "ALL TESTS PASSED" with an empty tally.
 		print("  NOTHING RAN - 0 of %d discovered test(s) executed, so nothing was verified" % _discovered)
+	elif _vacuous > 0:
+		print("  %d TEST(S) VERIFIED NOTHING - each returned pass without executing" % _vacuous)
+		print("  any of its own _T.assert_* calls. The usual cause is a loop over a")
+		print("  collection that was empty, which satisfies every assertion inside it.")
+		if _failed > _vacuous:
+			print("  (%d other test(s) also failed.)" % (_failed - _vacuous))
 	elif _failed == 0:
 		print("  ALL TESTS PASSED")
 	else:
@@ -473,6 +639,7 @@ func _print_results() -> void:
 # These are called by test scripts via the _T reference.
 
 static func assert_eq(actual: Variant, expected: Variant, context: String = "") -> String:
+	_assertions_run += 1
 	if actual == expected:
 		return ""
 	var msg: String = "Expected %s but got %s" % [str(expected), str(actual)]
@@ -482,6 +649,7 @@ static func assert_eq(actual: Variant, expected: Variant, context: String = "") 
 
 
 static func assert_true(condition: bool, context: String = "") -> String:
+	_assertions_run += 1
 	if condition:
 		return ""
 	var msg: String = "Expected true but got false"
@@ -491,6 +659,7 @@ static func assert_true(condition: bool, context: String = "") -> String:
 
 
 static func assert_false(condition: bool, context: String = "") -> String:
+	_assertions_run += 1
 	if not condition:
 		return ""
 	var msg: String = "Expected false but got true"
@@ -500,6 +669,7 @@ static func assert_false(condition: bool, context: String = "") -> String:
 
 
 static func assert_float_eq(actual: float, expected: float, tolerance: float = 0.001, context: String = "") -> String:
+	_assertions_run += 1
 	if absf(actual - expected) <= tolerance:
 		return ""
 	var msg: String = "Expected %.6f but got %.6f (tolerance: %.6f)" % [expected, actual, tolerance]
@@ -509,6 +679,7 @@ static func assert_float_eq(actual: float, expected: float, tolerance: float = 0
 
 
 static func assert_gt(actual: Variant, threshold: Variant, context: String = "") -> String:
+	_assertions_run += 1
 	if actual > threshold:
 		return ""
 	var msg: String = "Expected %s > %s" % [str(actual), str(threshold)]
@@ -518,6 +689,7 @@ static func assert_gt(actual: Variant, threshold: Variant, context: String = "")
 
 
 static func assert_gte(actual: Variant, threshold: Variant, context: String = "") -> String:
+	_assertions_run += 1
 	if actual >= threshold:
 		return ""
 	var msg: String = "Expected %s >= %s" % [str(actual), str(threshold)]

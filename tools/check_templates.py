@@ -13,9 +13,13 @@ other. This script is the release gate:
                      plant a known-bad file to prove it still says no
   stage 3  parse     `godot --check-only` every template .gd
   stage 4  runners   lint_project.gd + run_tests.gd on the scratch
-                     project, both must exit 0
+                     project, both must exit 0; assert the runner's
+                     denominators (autoloads ready, assertions executed)
+                     and PLANT a vacuous test to prove exit 1
   stage 5  bridge    launch the scratch game headless and drive verbs
-                     over the real file bus with the real devtools.py
+                     over the real file bus with the real devtools.py,
+                     including the validate_ui baseline round-trip
+                     against PLANTED findings and a genuinely PAUSED tree
   stage 6  contract  (--full) exercise EVERY generic verb once and
                      assert the reply envelope; new verbs MUST add a row
 
@@ -37,6 +41,7 @@ import importlib.util
 import json
 import os
 import py_compile
+import re
 import shutil
 import subprocess
 import sys
@@ -185,6 +190,26 @@ def stage_assemble(scratch, user_dir_name):
         "\tvar sprite_image := Image.create_empty(8, 8, false, Image.FORMAT_RGBA8)",
         "\tsprite.texture = ImageTexture.create_from_image(sprite_image)",
         "\tadd_child(sprite)",
+        "\t# Planted UI defects for check_ui_baseline(): a Label resting at alpha 0",
+        "\t# (verbatim the finding that stalled findmyballs) and an 8x8 Button. A",
+        "\t# baseline round-trip over ZERO findings passes against an implementation",
+        "\t# that does nothing at all, so having real findings IS the check.",
+        "\tvar ghost := Label.new()",
+        '\tghost.name = "Ghost"',
+        '\tghost.text = "resting at alpha 0"',
+        "\tghost.modulate.a = 0.0",
+        "\tadd_child(ghost)",
+        "\tvar tiny := Button.new()",
+        '\ttiny.name = "Tiny"',
+        "\ttiny.size = Vector2(8, 8)",
+        "\tadd_child(tiny)",
+        "",
+        "",
+        "## Lets check_paused_bridge() pause the tree over the bus, so the",
+        "## PROCESS_MODE_ALWAYS fix is checked by its effect, not by reading the",
+        "## property back.",
+        "func harness_set_paused(on: bool) -> void:",
+        "\tget_tree().paused = on",
         "",
         "",
         "func _on_go() -> void:",
@@ -356,7 +381,51 @@ def stage_names(scratch, godot, cache):
     finally:
         planted.unlink(missing_ok=True)
 
+    ok = check_engine_skew(scratch, cache) and ok
     return ok
+
+
+def check_engine_skew(scratch, cache):
+    """The index-vs-project engine mismatch warning must FIRE (H-032).
+
+    Its first version never did: `godot_version` in config is bare ("4.7.1")
+    while an index's engine is the binary's banner ("Godot Engine v4.7.1..."),
+    and a regex anchored at the start matched one and never the other. It
+    reported clean on a real mismatch, which is indistinguishable from having no
+    check at all - the same shape as [H-031], caught the same way, by planting.
+    """
+    config_path = scratch / "addons" / "godot_selftest" / "devtools_config.json"
+    original = config_path.read_text(encoding="utf-8")
+    try:
+        def run_with(version):
+            config = json.loads(original)
+            if version is None:
+                config.pop("godot_version", None)
+            else:
+                config["godot_version"] = version
+            config_path.write_text(json.dumps(config, indent=2), encoding="utf-8")
+            return _run_name_check(scratch, cache, [])
+
+        mismatch = run_with("4.0.0")
+        if "WARNING:" not in mismatch.stdout or "declares Godot 4.0" not in mismatch.stdout:
+            return fail("stage 2.5 names: a project declaring Godot 4.0 against a "
+                        "newer index must warn. Got:\n%s" % mismatch.stdout.strip())
+        # The index's own version, however it is spelled, must NOT warn.
+        engine = re.search(r"engine index: \S+ \S+ v?(\d+\.\d+)", mismatch.stdout)
+        if engine:
+            same = run_with(engine.group(1))
+            if "WARNING:" in same.stdout:
+                return fail("stage 2.5 names: matching engine version must not warn:\n%s"
+                            % same.stdout.strip())
+        unset = run_with(None)
+        if "WARNING:" in unset.stdout:
+            return fail("stage 2.5 names: an unset godot_version must not warn "
+                        "(unknown is not a mismatch):\n%s" % unset.stdout.strip())
+        print("stage 2.5 names: engine skew warns on a mismatch, stays quiet on a "
+              "match and when unset")
+        return True
+    finally:
+        config_path.write_text(original, encoding="utf-8")
 
 
 # --------------------------------------------------------------------------
@@ -374,7 +443,86 @@ def stage_runners(godot, scratch):
         else:
             tail = [l for l in proc.stdout.strip().splitlines() if l.strip()]
             print("stage 4 %s: exit 0 (%s)" % (name, tail[-1] if tail else "no output"))
+            if name == "tests":
+                ok = check_test_denominators(proc.stdout) and ok
+    if ok:
+        ok = stage_vacuous_control(godot, scratch) and ok
     return ok
+
+
+def check_test_denominators(out):
+    """The runner must state what it looked at, not just that it passed.
+
+    Three numbers, each of which has at some point been the difference between a
+    real pass and a green-looking nothing: how many tests were selected, how many
+    autoloads were actually ready, and how many assertions executed.
+    """
+    ok = True
+    m = re.search(r"Autoloads: (\d+) of (\d+) ready", out)
+    if not m:
+        ok = fail("run_tests printed no `Autoloads:` line - the scratch project has a "
+                  "DevTools autoload, so the readiness check is not running")
+    elif m.group(1) != m.group(2):
+        ok = fail("run_tests reports %s of %s autoloads ready; _await_autoloads() is "
+                  "not stepping the tree" % (m.group(1), m.group(2)))
+    else:
+        print("stage 4 tests: autoloads %s of %s ready" % (m.group(1), m.group(2)))
+
+    m = re.search(r"Assertions: (\d+) executed", out)
+    if not m:
+        ok = fail("run_tests printed no `Assertions:` line")
+    elif m.group(1) == "0":
+        ok = fail("run_tests executed 0 assertions over the seeded suite - the counter "
+                  "is not wired to the _T.assert_* helpers")
+    else:
+        print("stage 4 tests: %s assertion(s) executed" % m.group(1))
+    return ok
+
+
+def stage_vacuous_control(godot, scratch):
+    """Positive control: plant a test that asserts inside a loop over nothing.
+
+    This is the findmyballs shape - three real tests passed exactly this way
+    against an autoload holding no data. The scratch suite passes clean either
+    way, so without planting the defect a broken detector and a working one look
+    identical, which is [H-030] in the stage that would otherwise re-learn it.
+    """
+    planted = scratch / "test" / "unit" / "test_vacuous_control.gd"
+    planted.write_text(
+        "extends RefCounted\n"
+        "var _T\n"
+        "\n"
+        "func _empty() -> Array:\n"
+        "\treturn []\n"
+        "\n"
+        "func test_asserts_over_an_empty_collection() -> String:\n"
+        "\tfor item in _empty():\n"
+        "\t\tvar e: String = _T.assert_true(item != null, \"never runs\")\n"
+        "\t\tif e != \"\":\n"
+        "\t\t\treturn e\n"
+        "\treturn \"\"\n"
+        "\n"
+        "func test_handrolled_needs_no_helper() -> String:\n"
+        "\tif 2 + 2 != 4:\n"
+        "\t\treturn \"arithmetic broke\"\n"
+        "\treturn \"\"\n",
+        encoding="utf-8")
+    try:
+        proc = run_godot(godot, scratch, ["--script", "res://tools/run_tests.gd"])
+        out = proc.stdout
+        if proc.returncode == 0:
+            return fail("planted vacuous test still exited 0 - a test that executes "
+                        "none of its own assertions is being reported as a pass")
+        if "[VACU] test_asserts_over_an_empty_collection" not in out:
+            return fail("planted vacuous test was not flagged [VACUOUS]\n%s" % out)
+        if "[VACU] test_handrolled_needs_no_helper" in out:
+            return fail("a hand-rolled test with no _T.assert_* call was flagged "
+                        "vacuous - the source discriminator is over-reaching")
+        print("stage 4 tests: vacuous control fired (exit %d, [VACU] on the empty-loop "
+              "test only)" % proc.returncode)
+        return True
+    finally:
+        planted.unlink(missing_ok=True)
 
 
 # --------------------------------------------------------------------------
@@ -519,8 +667,9 @@ def contract_rows():
         ("scene_tree", {"root": "/root/Main/Go", "depth": 2, "properties": ["text"]}, True,
          "gather:G-119/G-109: a subtree, with a property reported per node"),
         ("reachable_ui", {}, True,
-         "gather:G-129: the fixture's one Button must be found and reachable",
-         ["controls", "count", "reachable", "viewport"], {"count": 1, "reachable": 1}),
+         "gather:G-129: the fixture's two Buttons ('Go' and the planted 8x8 'Tiny') "
+         "must both be found and reachable",
+         ["controls", "count", "reachable", "viewport"], {"count": 2, "reachable": 2}),
         ("input_press", {"action": "ui_accept"}, True, ""),
         ("input_release", {"action": "ui_accept"}, True, ""),
         ("input_tap", {"action": "ui_accept"}, True, ""),
@@ -541,7 +690,10 @@ def contract_rows():
         ("wait_frames", {"count": 5}, True, ""),
         ("get_node_bounds", {"node_path": "/root/Main"}, False,
          "Node2D has no rect headlessly; envelope only"),
-        ("validate_ui", {}, True, ""),
+        ("validate_ui", {}, False,
+         "envelope only: success depends on baseline state, and check_ui_baseline() "
+         "tests that semantics properly",
+         ["issues", "baseline_in_use", "new_count", "pre_existing_count"]),
         ("get_ui_snapshot", {}, True, ""),
         ("save_ui_baseline", {}, True, ""),
         ("ui_snapshot_diff", {}, True, "baseline saved by the previous row"),
@@ -563,6 +715,98 @@ def check_envelope(action, reply):
     if reply.get("action") not in (None, action):
         problems.append("action echoed as %r" % reply.get("action"))
     return problems
+
+
+def check_ui_baseline(client, scratch):
+    """validate_ui's NEW/PRE split, against a project that HAS findings.
+
+    The stock scratch project reports zero UI issues, and an empty finding set
+    round-trips through any baseline implementation whatsoever - including one
+    that does nothing. stage_assemble plants two real defects (a Label resting
+    at alpha 0, which is verbatim the finding that stalled findmyballs, and an
+    8x8 Button) so the transition is actually exercised.
+    """
+    def call(args=None, timeout=20.0):
+        return client.send_command(scratch, "validate_ui", args or {}, timeout=timeout)
+
+    first = call()
+    issues = (first.get("data") or {}).get("issues", [])
+    n = len(issues)
+    if n == 0:
+        return fail("validate_ui found 0 issues on a project with planted UI defects - "
+                    "either the defects stopped being planted or the checks stopped "
+                    "running; either way the baseline test below proves nothing")
+    d = first["data"]
+    if d.get("baseline_in_use") is not False or d.get("new_count") != n:
+        return fail("with no baseline every finding must gate: in_use=%r new=%r of %d"
+                    % (d.get("baseline_in_use"), d.get("new_count"), n))
+    if first.get("success"):
+        return fail("validate_ui reported success with %d ungated findings" % n)
+    if not all(i.get("path") and i.get("baseline") == "new" for i in issues):
+        return fail("every finding needs a node path and baseline=new: %r" % issues[:2])
+
+    wrote = call({"baseline_write": True})
+    if not ((wrote.get("data") or {}).get("baseline_written") and wrote.get("success")):
+        return fail("baseline_write: %r" % wrote.get("message"))
+
+    after = call()
+    da = after["data"]
+    if da.get("new_count") != 0 or da.get("pre_existing_count") != n:
+        return fail("after baseline_write, known findings must be pre-existing, not "
+                    "NEW: new=%r pre=%r of %d"
+                    % (da.get("new_count"), da.get("pre_existing_count"), n))
+    if not after.get("success"):
+        return fail("a fully-baselined run must pass: %r" % after.get("message"))
+
+    ignored = call({"use_baseline": False})
+    if (ignored.get("data") or {}).get("new_count") != n:
+        return fail("--no-baseline must re-report every finding")
+
+    # The baseline stays written. The contract table's validate_ui row runs
+    # after this and asserts the envelope only, precisely because success now
+    # depends on baseline state rather than on the verb alone.
+    codes = sorted({i["code"] for i in issues})
+    print("stage 5 bridge: validate_ui baseline %d finding(s) %s -> NEW, written, "
+          "-> PRE, run passes" % (n, codes))
+    return True
+
+
+def check_paused_bridge(client, scratch):
+    """The bridge must answer while the tree is paused (findmyballs:G-003).
+
+    Before 0.12.0 every call after a pause timed out, and the error text blamed
+    --userdata - so this is checked by pausing for real rather than by reading
+    process_mode back, which would confirm the assignment and not the effect.
+    """
+    def call(action, args=None):
+        return client.send_command(scratch, action, args or {}, timeout=15.0)
+
+    if call("ping")["data"].get("paused") is not False:
+        return fail("ping must report paused=False on an unpaused game")
+
+    r = call("run_method", {"node_path": "/root/Main",
+                            "method": "harness_set_paused", "args": [True]})
+    if not r.get("success"):
+        return fail("could not pause the fixture: %s" % r.get("message"))
+    try:
+        ping = call("ping")
+        if not ping.get("success"):
+            return fail("bridge stopped answering once the tree was paused - "
+                        "PROCESS_MODE_ALWAYS is not in effect")
+        if ping["data"].get("paused") is not True:
+            return fail("ping answered while paused but reported paused=%r"
+                        % ping["data"].get("paused"))
+        for action, args in (("scene_tree", {"depth": 1}),
+                             ("find_nodes", {"class": "Button"}),
+                             ("validate_ui", {})):
+            if not call(action, args).get("success") and action != "validate_ui":
+                return fail("%s failed while paused" % action)
+        print("stage 5 bridge: paused tree still answers (ping/scene_tree/find_nodes/"
+              "validate_ui), ping reports paused=True")
+    finally:
+        call("run_method", {"node_path": "/root/Main",
+                            "method": "harness_set_paused", "args": [False]})
+    return True
 
 
 def stage_bridge(godot, scratch, full):
@@ -590,6 +834,9 @@ def stage_bridge(godot, scratch, full):
         listing = client.send_command(scratch, "list_commands", {}, timeout=10.0)
         if not listing.get("success"):
             ok = fail("list_commands over the live bus: %s" % listing.get("message"))
+
+        ok = check_ui_baseline(client, scratch) and ok
+        ok = check_paused_bridge(client, scratch) and ok
 
         if full:
             passed = 0

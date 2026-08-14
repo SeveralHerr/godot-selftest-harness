@@ -163,3 +163,50 @@ func _cmd_reset_session(_args: Dictionary) -> Dictionary:
 		"message": "Session reset via GameManager",
 		"data": {},
 	}
+
+
+## A handler MAY be a coroutine. The bridge awaits every handler result, so
+## `await` inside one is safe and is sometimes the only correct thing to do.
+##
+## Why this example exists: a verb that loops over freed nodes without ever
+## yielding will process the same node forever. `queue_free()` does not remove a
+## node from its groups until the end of the frame, and a bus handler runs
+## ENTIRELY INSIDE ONE FRAME - so a "collect everything" verb written the
+## obvious way reported `{"grabbed": 120}` having grabbed one object 120 times.
+## Nothing about that result looks wrong.
+##
+## The rule: if your verb's loop depends on the effect of the previous
+## iteration, await a frame between iterations and let the engine catch up.
+##
+## Example bus call:   {"action": "collect_all", "args": {"group": "pickup", "max": 200}}
+func _cmd_collect_all(args: Dictionary) -> Dictionary:
+	var group: String = args.get("group", "pickup")
+	var limit: int = int(args.get("max", 500))
+
+	var collected: int = 0
+	var guard: int = 0
+	while guard < limit:
+		guard += 1
+		var remaining: Array = _dev.get_tree().get_nodes_in_group(group)
+		# Skip anything already queued for deletion: it is still in the group
+		# this frame, and counting it again is exactly the bug above.
+		var target: Node = null
+		for node: Node in remaining:
+			if is_instance_valid(node) and not node.is_queued_for_deletion():
+				target = node
+				break
+		if target == null:
+			break
+
+		# ... project-specific collection here, e.g. target.collect() ...
+		target.queue_free()
+		collected += 1
+
+		# Let the frame end so the freed node actually leaves the group.
+		await _dev.get_tree().process_frame
+
+	return {
+		"success": true,
+		"message": "Collected %d from group '%s'" % [collected, group],
+		"data": {"collected": collected, "group": group, "iterations": guard},
+	}

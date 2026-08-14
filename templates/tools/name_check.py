@@ -74,8 +74,8 @@ from bisect import bisect_right
 from datetime import datetime, timezone
 from pathlib import Path
 
-# harness-version: 0.11.0
-HARNESS_VERSION = "0.11.0"
+# harness-version: 0.12.0
+HARNESS_VERSION = "0.12.0"
 
 EXIT_OK = 0
 EXIT_FINDINGS = 1
@@ -1254,6 +1254,19 @@ def _read_harness_config(project_path):
     return data if isinstance(data, dict) else {}
 
 
+def _xy(version: str) -> str:
+    """Major.minor out of a version string, from either side of the comparison.
+
+    Must handle both shapes: config's `godot_version` is bare ("4.7.1"), while
+    an index's `engine` is the binary's own banner ("Godot Engine v4.7.1.stable
+    .official"). A regex anchored at the start matches the first and silently
+    never matches the second, which made this check dead code that reported
+    clean on a real mismatch - caught only by planting one.
+    """
+    m = re.search(r"v?(\d+)\.(\d+)", version or "")
+    return "%s.%s" % (m.group(1), m.group(2)) if m else ""
+
+
 def _resolve_godot(args, project_path):
     config = _read_harness_config(project_path)
     godot = args.godot or os.environ.get("GODOT_BIN") or str(config.get("godot_bin", "") or "")
@@ -1263,7 +1276,8 @@ def _resolve_godot(args, project_path):
     return godot_path if godot_path.is_file() else None
 
 
-def report(findings, index, project, counts, args, skipped, baseline_info):
+def report(findings, index, project, counts, args, skipped, baseline_info,
+           engine_skew=None):
     print("name_check %s - static name resolution, no engine launched" % HARNESS_VERSION)
     print("project: %s" % project.root)
     print("scanned: %d script(s), %d global class(es), %d autoload(s)%s"
@@ -1274,6 +1288,8 @@ def report(findings, index, project, counts, args, skipped, baseline_info):
         print("engine index: %s (%d classes, %d builtins) from %s"
               % (index.engine or "unknown", len(index.classes), len(index.builtins),
                  index.source_path or "--api"))
+        if engine_skew:
+            print("  WARNING: %s" % engine_skew)
     else:
         print("engine index: NONE - engine-name checks were SKIPPED, not passed. %s"
               % REFRESH_HINT)
@@ -1382,6 +1398,23 @@ def main():
             index = find_cached_index(
                 (lambda: godot_version(godot_path)) if godot_path else None)
 
+    # An index built by a DIFFERENT engine resolves classes the project's engine
+    # may not have, and the substitution used to be silent (H-032). The
+    # scaffolder records the resolved engine version in devtools_config.json, so
+    # the comparison costs nothing - no launch, which is the whole point of this
+    # tool. Comparing X.Y only: a patch bump does not add or remove API.
+    engine_skew = None
+    if index is not None:
+        want = _xy(str(config.get("godot_version", "") or ""))
+        have = _xy(str(index.engine or ""))
+        if want and have and want != have:
+            engine_skew = (
+                "engine index is %s but this project declares Godot %s. Names "
+                "resolved against the wrong engine can be wrong in both "
+                "directions. Run --refresh-api with the %s binary."
+                % (index.engine, want, want)
+            )
+
     if index is None:
         note = ("engine-name checks (unknown_type against ClassDB, engine members, "
                 "class_name shadowing): no API index cached. %s" % REFRESH_HINT)
@@ -1465,7 +1498,8 @@ def main():
             "exit": exit_code,
         }, indent=2))
     else:
-        report(findings, index, project, counts, args, skipped, baseline_info)
+        report(findings, index, project, counts, args, skipped, baseline_info,
+               engine_skew)
 
     return exit_code
 

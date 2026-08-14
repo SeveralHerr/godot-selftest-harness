@@ -36,10 +36,17 @@ verified nothing. Redirect to a file and read it back; the Windows Godot build o
 nothing to the console, so a failed run looks like silent success.
 Test flags (after `--`): `--filter NAME` (matches method name **or** test script filename),
 `--file NAME` (one script; combines with `--filter` via AND), `--json`. **Every** run prints
-`Selected: N of M discovered` — read that line, not just the exit code. `Total: 0 | ALL TESTS
-PASSED` is this harness's worst failure mode and `Selected:` is what makes a silent zero
-visible. A selector matching nothing is exit `2` (`SELECTED NOTHING — …`), and a suite with no
-`test_*` methods is exit `2` as well; neither is a pass.
+`Selected: N of M discovered`, `Autoloads: N of M ready` and `Assertions: N executed` — read
+those lines, not just the exit code. `Total: 0 | ALL TESTS PASSED` is this harness's worst
+failure mode and those three denominators are what make a silent zero visible. A selector
+matching nothing is exit `2` (`SELECTED NOTHING — …`), and a suite with no `test_*` methods is
+exit `2` as well; neither is a pass.
+A test that returns pass having executed **none** of its own `_T.assert_*` calls prints
+`[VACUOUS]` and fails the run. The usual cause is a loop over a collection that was empty —
+an empty collection satisfies every assertion inside a loop over it. Fix the data, not the
+test. (`Autoloads:` exists because that empty collection is usually an autoload: `--script`
+mode parents autoloads to root but does not step the tree, so `_ready()` had not run. The
+runner awaits a frame first, so what you test is what ships.)
 `UIDs: OK` covers both halves: no stale `uid=` reference **and** no `.gd` missing its
 `.uid` sidecar. A script you just wrote outside the editor has none — commit the sidecar
 Godot generates alongside the script.
@@ -127,7 +134,7 @@ Launch first: `godot --path . --mute &` then `sleep 5 && python tools/devtools.p
 
 | Verb | Use |
 |---|---|
-| `ping` | Confirm the bridge is live — reports which session answered, plus `bus_dir` and `user_dir` separately |
+| `ping` | Confirm the bridge is live — reports which session answered, plus `bus_dir` and `user_dir` separately, and `tree is PAUSED` when it is. **The bridge answers while paused** (`PROCESS_MODE_ALWAYS`), so pause menus / settings / death screens are verifiable like any other UI |
 | `quit` | Shut the game down; waits for the process and **exits 1 if it survived**. A survivor answers the bus alongside the next instance, and the symptom is empty replies, not an error |
 | `scene-tree [--root PATH] [--depth N]` | Discover root scene name + node paths (don't assume names). Each node carries `script` and `scene_file`, so a changed file maps to the node that runs it. `--root` lists a deep subtree that would otherwise truncate |
 | `find-nodes [--class C\|--group G\|--method M] [--where N=V] [--property N] [--root PATH]` | Locate nodes by what they *are*, not where they sit. `--where` is repeatable and takes dotted paths (`--where slot_data.item.name='Iron Bar'`). Usually the right verb for identifying one node in a large tree |
@@ -143,7 +150,8 @@ Launch first: `godot --path . --mute &` then `sleep 5 && python tools/devtools.p
 | `canvas-scale --node PATH` | Accumulated canvas scale + effective texture filter — the crisp/blurry question as one read |
 | `set-resolution --size W,H` | Resize the window (honest read-back; headless may clamp) |
 | `ui-snapshot` / `ui-snapshot-diff` / `save-ui-baseline` | Structured UI state vs baseline |
-| `validate --scene S` / `validate-all` / `validate-ui` | One scene / every scene / UI layout validation (expect 0 issues) |
+| `validate --scene S` / `validate-all` | One scene / every scene validation (expect 0 issues) |
+| `validate-ui [--baseline-write] [--no-baseline]` | UI layout validation. Findings split `NEW` vs `PRE` against `user://ui_findings_baseline.json` (keyed on rule + node path); **only NEW ones fail**. `--baseline-write` accepts the current set — read them first, a blind write is deleting the check. A popup resting at alpha 0 or a world-space HUD is the case this exists for |
 | `performance [--reset-baseline]` | FPS vs `fps_min`, orphan **growth** vs `orphan_growth_max` |
 | `input press` `input release` `input tap` ACTION | Simulate input actions. `tap` releases on the NEXT frame and replies after the release, reporting `pressed_during`/`pressed_after` |
 | `input clear` / `input list` / `input sequence FILE` | clear everything currently held / list the project's actions / replay a JSON sequence file |

@@ -14,14 +14,14 @@ extends Node
 ## extension loads AFTER the generic handlers, a project may override a generic
 ## verb by registering the same action string (last-writer-wins).
 
-# harness-version: 0.11.0
+# harness-version: 0.12.0
 # --- Constants ---
 
 ## Version of the godot-selftest-harness these files were copied from. Reported by the
 ## `harness_version` verb and stamped into every copied tool script, so a gap logged
 ## against a project can name the version it was seen on, and a refresh can tell a
 ## stale file from a customized one. Bump with .claude-plugin/plugin.json.
-const HARNESS_VERSION: String = "0.11.0"
+const HARNESS_VERSION: String = "0.12.0"
 
 ## Default bus filenames. With a session id (see _resolve_session) the id is spliced in
 ## before the extension, so two instances can each own a bus in the same user:// dir.
@@ -122,6 +122,9 @@ var _last_command_abs_path: String
 ## Unix time this instance came up. Stamped (with the pid) onto every reply so a
 ## client can detect a foreign instance answering on its bus (G-036a).
 var _start_unix: float = 0.0
+## Owner-file heartbeat. See _touch_owner_heartbeat().
+const HEARTBEAT_INTERVAL_MSEC: int = 1000
+var _last_heartbeat_msec: int = 0
 var _last_command_check_msec: int = 0
 var _config: Dictionary = {}
 var _handlers: Dictionary = {}
@@ -164,6 +167,24 @@ var _extension: RefCounted = null
 # --- Lifecycle ---
 
 func _ready() -> void:
+	# Keep polling while the tree is paused (findmyballs:G-003). The bus poll runs
+	# from a pausable process callback, so without this ANY paused state is
+	# unreachable over the bridge - which is exactly the UI most worth verifying:
+	# pause menus, settings screens, death screens, level-complete screens.
+	#
+	# The failure it caused was worse than the outage. `run-method /root/SceneFlow
+	# toggle_pause` succeeded, and every call after it answered "that process is
+	# STILL ALIVE, so it is running but not polling THIS directory" - which reads
+	# as a wrong --userdata problem, so the project debugged the bus for a cycle
+	# before finding the pause. A confidently wrong diagnosis costs more than
+	# silence. See also the owner file's last_poll_unix, which makes "alive but
+	# not polling" a fact the client can state instead of guess at.
+	#
+	# Safe as a default: DevTools drives nothing gameplay-side on its own, it only
+	# answers requests. A project that wants the bridge to pause with the game can
+	# still set process_mode back from its own code.
+	process_mode = Node.PROCESS_MODE_ALWAYS
+
 	# Session resolution comes first: it decides which files every later step reads,
 	# writes and clears. _process_command_line_args() runs much later and is far too
 	# late to influence the paths.
@@ -207,6 +228,33 @@ func _process(_delta: float) -> void:
 	if now_msec - _last_command_check_msec >= 100:
 		_last_command_check_msec = now_msec
 		_check_for_commands()
+		_touch_owner_heartbeat(now_msec)
+
+
+## Refreshes last_poll_unix on the owner file (findmyballs:G-004).
+##
+## The owner record used to carry a pid and nothing else that changes, so the
+## client's only liveness test was "does this pid exist". That is a proxy, and
+## it failed in both directions on real machines:
+##
+##   - Windows recycles pids. A dead Godot's pid was inherited by an unrelated
+##     process (MoNotificationUx), so `launch` refused to start with "pid 14856
+##     still owns this bus" and `ping` called that pid STILL ALIVE.
+##   - A live owner that is not polling - paused tree, wrong --userdata, a
+##     handler wedged mid-call - looks identical to a healthy one.
+##
+## A poll timestamp is not a proxy: it is the fact the client actually wants,
+## and one number covers all of it. Recording the process NAME instead (the
+## originally proposed fix) needs platform-specific lookup on both sides and
+## still cannot tell a paused owner from a polling one.
+##
+## Throttled to once a second - the poll itself runs at 10Hz and this would
+## otherwise be 10 writes/sec of the same few bytes for the life of the game.
+func _touch_owner_heartbeat(now_msec: int) -> void:
+	if now_msec - _last_heartbeat_msec < HEARTBEAT_INTERVAL_MSEC:
+		return
+	_last_heartbeat_msec = now_msec
+	_write_owner_file()
 
 
 func _exit_tree() -> void:
@@ -596,6 +644,9 @@ func _cmd_ping(_args: Dictionary) -> Dictionary:
 			"pid": OS.get_process_id(),
 			"start_unix": _start_unix,
 			"scripts_seen": _scripts_seen.size(),
+			# Since 0.12.0 the bridge answers while paused, so a reply no longer
+			# implies a running tree. Report it rather than let a client assume.
+			"paused": get_tree().paused,
 			"bus_dir": _bus_dir if not _bus_dir.is_empty() else ProjectSettings.globalize_path("user://"),
 			"user_dir": ProjectSettings.globalize_path("user://"),
 		},
@@ -2503,6 +2554,7 @@ func _cmd_validate_ui(args: Dictionary) -> Dictionary:
 	var overlaps: Array = _check_interactive_overlaps(interactive_controls)
 	for overlap: Dictionary in overlaps:
 		issues.append({
+			"path": str(overlap["node_a"]),
 			"severity": "warning",
 			"code": "interactive_overlap",
 			"message": "Interactive controls overlap: '%s' and '%s' (overlap area: %.0fpx)" % [
@@ -2510,11 +2562,33 @@ func _cmd_validate_ui(args: Dictionary) -> Dictionary:
 			],
 		})
 
+	var baseline: Dictionary = _apply_ui_baseline(issues, args)
+
+	# Gate on what is NEW when a baseline is in play. A finding that is correct
+	# by design - a popup resting at alpha 0, a diegetic HUD in world space -
+	# must not fail every run forever, or the check gets switched off.
+	var gating: int = int(baseline["new_count"]) if bool(baseline["in_use"]) else issues.size()
+	var summary: String = "No UI issues found"
+	if not issues.is_empty():
+		if bool(baseline["in_use"]):
+			summary = "%d UI issues found (%d NEW, %d pre-existing)" % [
+				issues.size(), baseline["new_count"], baseline["pre_existing_count"],
+			]
+		else:
+			summary = "%d UI issues found" % issues.size()
+	if bool(baseline["written"]):
+		summary = "UI baseline written: %d finding(s) now pre-existing" % issues.size()
+
 	return {
-		"success": issues.is_empty(),
-		"message": "%d UI issues found" % issues.size() if not issues.is_empty() else "No UI issues found",
+		"success": gating == 0,
+		"message": summary,
 		"data": {
 			"issues": issues,
+			"baseline_in_use": baseline["in_use"],
+			"baseline_written": baseline["written"],
+			"baseline_path": baseline["path"],
+			"new_count": baseline["new_count"],
+			"pre_existing_count": baseline["pre_existing_count"],
 			"safe_area_checked": check_safe_area,
 			"safe_area_inset": inset,
 			"safe_area_rect": {
@@ -2525,6 +2599,88 @@ func _cmd_validate_ui(args: Dictionary) -> Dictionary:
 			},
 		},
 	}
+
+
+## Splits validate_ui findings into NEW and PRE-EXISTING against a saved
+## baseline, the same split lint_project.gd has had since 0.4.0
+## (findmyballs:G-006, gather:G-018).
+##
+## Two projects independently hit the same wall: a finding that is CORRECT and
+## permanent. findmyballs' cash-delta popup rests at alpha 0 between pops, so
+## `ui_transparent` fires on every run forever; gather's diegetic HUD hangs off
+## a Camera2D, so its position findings were a function of where the player was
+## standing - 9 of 9 findings on one run. Neither project could gate on
+## validate_ui at all, and a check that can only ever be ignored is a check that
+## has been switched off.
+##
+## Keyed on (code, node path), NOT on the message: messages carry rects, alphas
+## and text widths, so a baseline keyed on them would go stale the first time a
+## label moved a pixel and quietly re-report everything as new.
+##
+## args: { "baseline_write": bool, "use_baseline": bool (default true) }
+## Returns { in_use, written, path, new_count, pre_existing_count }, and stamps
+## each issue with "baseline": "new" | "pre_existing".
+func _apply_ui_baseline(issues: Array, args: Dictionary) -> Dictionary:
+	# Plain user://, like the layout baseline next door: a findings baseline is a
+	# property of the project, not of one bus session, so N sessions share it.
+	var path: String = "user://ui_findings_baseline.json"
+	var write_mode: bool = bool(args.get("baseline_write", false))
+	var use: bool = bool(args.get("use_baseline", true))
+
+	if write_mode:
+		var keys: Array = []
+		for issue: Dictionary in issues:
+			keys.append(_ui_finding_key(issue))
+			issue["baseline"] = "pre_existing"
+		var file: FileAccess = FileAccess.open(path, FileAccess.WRITE)
+		if file == null:
+			return {
+				"in_use": false, "written": false, "path": path,
+				"new_count": issues.size(), "pre_existing_count": 0,
+			}
+		file.store_string(JSON.stringify({
+			"harness_version": HARNESS_VERSION,
+			"written_unix": Time.get_unix_time_from_system(),
+			"keys": keys,
+		}, "  "))
+		file.close()
+		return {
+			"in_use": true, "written": true, "path": path,
+			"new_count": 0, "pre_existing_count": issues.size(),
+		}
+
+	var known: Dictionary = {}
+	var in_use: bool = false
+	if use and FileAccess.file_exists(path):
+		var text: String = FileAccess.get_file_as_string(path)
+		var parsed: Variant = JSON.parse_string(text)
+		if parsed is Dictionary:
+			var keys_value: Variant = (parsed as Dictionary).get("keys", [])
+			if keys_value is Array:
+				in_use = true
+				for key: Variant in keys_value as Array:
+					known[str(key)] = true
+
+	var new_count: int = 0
+	var pre_existing: int = 0
+	for issue: Dictionary in issues:
+		if in_use and known.has(_ui_finding_key(issue)):
+			issue["baseline"] = "pre_existing"
+			pre_existing += 1
+		else:
+			issue["baseline"] = "new"
+			new_count += 1
+
+	return {
+		"in_use": in_use, "written": false, "path": path,
+		"new_count": new_count, "pre_existing_count": pre_existing,
+	}
+
+
+## Stable identity of a UI finding: the rule that fired and the node it fired
+## on. Deliberately excludes the message - see _apply_ui_baseline().
+func _ui_finding_key(issue: Dictionary) -> String:
+	return "%s@%s" % [str(issue.get("code", "")), str(issue.get("path", ""))]
 
 
 ## Reads the safe-area inset (pixels trimmed off each viewport edge) from args, else
@@ -2575,6 +2731,7 @@ func _validate_ui_recursive(node: Node, vp: Vector2, issues: Array, interactive_
 		# Check 1: Viewport overflow
 		if not world_space and (rect.position.x + rect.size.x > vp.x or rect.position.y + rect.size.y > vp.y):
 			issues.append({
+				"path": str(control.get_path()),
 				"severity": "warning",
 				"code": "ui_overflow",
 				"message": "%s '%s' extends past viewport (rect: %.0f,%.0f -> %.0f,%.0f, viewport: %.0fx%.0f)" % [
@@ -2588,6 +2745,7 @@ func _validate_ui_recursive(node: Node, vp: Vector2, issues: Array, interactive_
 		# Check 2: Zero-size visible
 		if control.size.x == 0.0 or control.size.y == 0.0:
 			issues.append({
+				"path": str(control.get_path()),
 				"severity": "warning",
 				"code": "ui_zero_size",
 				"message": "%s '%s' is visible but has zero size (%.0fx%.0f)" % [
@@ -2599,6 +2757,7 @@ func _validate_ui_recursive(node: Node, vp: Vector2, issues: Array, interactive_
 		var effective_alpha: float = _get_effective_alpha(control)
 		if effective_alpha == 0.0:
 			issues.append({
+				"path": str(control.get_path()),
 				"severity": "info",
 				"code": "ui_transparent",
 				"message": "%s '%s' is visible but fully transparent (effective alpha: %.2f)" % [
@@ -2619,6 +2778,7 @@ func _validate_ui_recursive(node: Node, vp: Vector2, issues: Array, interactive_
 					if display_text.length() > 50:
 						display_text = display_text.substr(0, 47) + "..."
 					issues.append({
+						"path": str(control.get_path()),
 						"severity": "warning",
 						"code": "ui_text_overflow",
 						"message": "%s '%s' text '%s' exceeds width (text: %.0fpx, label: %.0fpx)" % [
@@ -2629,6 +2789,7 @@ func _validate_ui_recursive(node: Node, vp: Vector2, issues: Array, interactive_
 		# Check 5: Negative position
 		if not world_space and (rect.position.x < 0.0 or rect.position.y < 0.0):
 			issues.append({
+				"path": str(control.get_path()),
 				"severity": "warning",
 				"code": "ui_negative_pos",
 				"message": "%s '%s' has negative position (%.0f, %.0f)" % [
@@ -2645,6 +2806,7 @@ func _validate_ui_recursive(node: Node, vp: Vector2, issues: Array, interactive_
 				var padding: float = 16.0
 				if btn_text_width + padding > control.size.x and control.size.x > 0.0:
 					issues.append({
+						"path": str(control.get_path()),
 						"severity": "warning",
 						"code": "button_text_overflow",
 						"message": "Button '%s' text '%s' (%.0fpx) exceeds button width (%.0fpx)" % [
@@ -2657,6 +2819,7 @@ func _validate_ui_recursive(node: Node, vp: Vector2, issues: Array, interactive_
 			var min_tap: float = 40.0
 			if control.size.x < min_tap or control.size.y < min_tap:
 				issues.append({
+					"path": str(control.get_path()),
 					"severity": "warning",
 					"code": "small_tap_target",
 					"message": "Interactive control '%s' size %.0fx%.0f below minimum %.0fx%.0f" % [
@@ -2675,6 +2838,7 @@ func _validate_ui_recursive(node: Node, vp: Vector2, issues: Array, interactive_
 			# Check if child extends beyond parent bounds (layout corruption)
 			if node_rect.position.x < parent_rect.position.x - 2.0:
 				issues.append({
+					"path": str(control.get_path()),
 					"severity": "warning",
 					"code": "container_layout_drift",
 					"message": "Node '%s' position (%.0f) is left of parent container (%.0f) - possible layout corruption" % [
@@ -2683,6 +2847,7 @@ func _validate_ui_recursive(node: Node, vp: Vector2, issues: Array, interactive_
 				})
 			if node_rect.end.x > parent_rect.end.x + 2.0:
 				issues.append({
+					"path": str(control.get_path()),
 					"severity": "warning",
 					"code": "container_layout_drift",
 					"message": "Node '%s' extends past parent container right edge (%.0f > %.0f) - possible layout corruption" % [
@@ -2699,6 +2864,7 @@ func _validate_ui_recursive(node: Node, vp: Vector2, issues: Array, interactive_
 			var carries_text: bool = not _get_control_text(control).is_empty()
 			if (is_interactive or carries_text) and not safe_rect.encloses(rect):
 				issues.append({
+					"path": str(control.get_path()),
 					"severity": "warning",
 					"code": "ui_outside_safe_area",
 					"message": "%s '%s' falls outside the safe area (rect: %.0f,%.0f -> %.0f,%.0f, safe area: %.0f,%.0f -> %.0f,%.0f)" % [
@@ -3994,6 +4160,11 @@ func _write_owner_file() -> void:
 	file.store_string(JSON.stringify({
 		"pid": OS.get_process_id(),
 		"start_unix": _start_unix,
+		# Refreshed ~1/sec by _touch_owner_heartbeat() for as long as this
+		# instance is actually polling the bus. The client reads it to tell a
+		# live owner from a recycled pid or a wedged one; see that function.
+		"last_poll_unix": Time.get_unix_time_from_system(),
+		"heartbeat_interval_sec": float(HEARTBEAT_INTERVAL_MSEC) / 1000.0,
 		"project": str(ProjectSettings.get_setting("application/config/name", "")),
 		"session": _session,
 		"bus_dir": _bus_dir if not _bus_dir.is_empty() else ProjectSettings.globalize_path("user://"),

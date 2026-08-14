@@ -303,6 +303,7 @@ Lives at `res://addons/godot_selftest/devtools_config.json`.
 | `main_scene` | String | `""` | Main scene path (detected from `run/main_scene`). |
 | `entry_hook` | Object | `{ "node_path": "", "method": "" }` | Optional node/method the harness calls to reach a testable game state. |
 | `entry_points` | Object | `{}` | Named alternate entry points, each `{scene, node_path, method, args, match}`. `/verify` picks the one whose `match` substrings hit the diff, so a change to a boss/shop/level script has a runtime path instead of only a code read. |
+| `godot_version` | String | `""` | Engine version the scaffolder resolved (`X.Y.Z`, from `godot --version`). `name_check.py` compares its cached API index against this and warns on a mismatch — without it, an index built by another engine is used silently, resolving classes the project's engine may not have. |
 | `mute` | bool | `true` | Prefer launching muted during automated runs. |
 | `log_files` | Array | `["log-devtools.md"]` | Files the `Stop` hook expects to change alongside code. |
 | `log_check_globs` | Array | `[]` | Extra path substrings the `Stop` hook counts as "code". |
@@ -403,6 +404,41 @@ Notable behaviors:
   is a live query, not a signal, so a `Control` that read availability in its own
   `_ready()` won't re-evaluate (set the flag before the scene loads); and it is real
   emulation, so mouse input also arrives as touch.
+- **The bridge keeps polling while the tree is paused.** The DevTools autoload runs
+  `PROCESS_MODE_ALWAYS`, so pause menus, settings screens, death screens and
+  level-complete screens are reachable — they were not before 0.12.0, and they are the
+  UI most worth verifying. `ping` reports `tree is PAUSED` so a reply is never mistaken
+  for an unpaused game. Before this, pausing produced *"that process is STILL ALIVE, so
+  it is running but not polling THIS directory"*, which reads as a `--userdata` problem
+  and cost the project that hit it a debugging cycle on the wrong thing.
+- **The owner file carries `last_poll_unix`, and that is the liveness test.** A pid is a
+  proxy and it failed both ways in the field: Windows recycled a dead Godot's pid onto
+  an unrelated process, so `launch` refused to start against a bus nobody owned; and a
+  live-but-paused owner was indistinguishable from a healthy one. A heartbeat is the
+  fact itself — `launch` now blocks only on an owner that is alive *and* polling, and
+  the messages say which.
+- **`validate_ui` splits findings `NEW` vs `PRE-EXISTING`** against
+  `user://ui_findings_baseline.json`, and only NEW ones fail the check —
+  `--baseline-write` accepts the current set, `--no-baseline` ignores it. Keyed on
+  (rule, node path), never on the message, which carries rects and alphas that move
+  every frame. This exists because two projects independently hit a finding that was
+  *correct and permanent*: a popup resting at alpha 0 between pops, and a diegetic HUD
+  whose screen position is wherever the player happens to be standing. Both had to
+  ignore `validate-ui` wholesale, which is the same as not having it.
+- **`run_tests.gd` steps autoloads into readiness before discovery.** In `--script`
+  mode Godot parents autoloads to `root` but does not step the tree, so `_ready()` has
+  not run: an autoload that builds its data there answers **every test** with an empty
+  collection, while lint reports every script compiled clean. Worse, the runner awaits
+  inside tests, so the first test that happened to await a frame flushed the
+  notifications and every test after it saw different data than every test before —
+  suite behaviour depended on test order. One awaited frame up front makes it
+  deterministic; `Autoloads: N of M ready` is the receipt.
+- **A test that executes none of its own assertions is `[VACUOUS]`, not a pass.** The
+  companion failure to the one above: a test that loops over a collection and asserts
+  inside the loop is satisfied by an *empty* collection. Three such tests passed
+  against an empty autoload in the project that found this. The runner counts
+  `_T.assert_*` calls per method and only makes the call when the method's own source
+  contains one, so a project that hand-rolls its failure strings is never accused.
 - **`validate_ui`** flags `ui_outside_safe_area` when `safe_area_inset` is configured
   — for overlays (a CRT shader, a notch, a rounded corner) that eat the viewport edges
   without any validator knowing. The check is skipped entirely when the inset is

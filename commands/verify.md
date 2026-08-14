@@ -324,13 +324,27 @@ Note the difference from `entry_hook`: reaching a scene is rarely enough. A boss
 Run in order:
 
 1. `"$PY" tools/devtools.py validate-all` — 0 issues required
-2. `"$PY" tools/devtools.py validate-ui` — 0 issues required. If `config.safe_area_inset` is non-zero this also reports `ui_outside_safe_area` for Controls straying under an overlay/notch/rounded corner; with an all-zero inset the check is skipped entirely.
+2. `"$PY" tools/devtools.py validate-ui` — 0 **NEW** issues required. If `config.safe_area_inset` is non-zero this also reports `ui_outside_safe_area` for Controls straying under an overlay/notch/rounded corner; with an all-zero inset the check is skipped entirely.
 3. `"$PY" tools/devtools.py screenshot` — visual verification (add a short `sleep` first if you just changed state)
 4. `"$PY" tools/devtools.py performance` — FPS must be `>= config.fps_min` (default 30); orphan **growth** since the baseline must be `<= config.orphan_growth_max`
 
    Gate on `orphan_growth`, not the absolute count. A real project reports dozens of orphans on a fresh launch before any test action, so the historical `orphan_max: 0` was unreachable — and a threshold nothing can ever satisfy trains you to skip the check entirely. Growth-since-baseline is the number that actually means "this change leaks". Report the absolute count alongside it for context, and if `orphan_growth` is unavailable (older harness install), say so rather than silently falling back to a check you know is noise.
 
-No game-specific exceptions are baked in. If `validate-ui` reports issues you believe are pre-existing/benign, report them explicitly in the summary rather than silently ignoring — and consider a Phase 6 proposal to add a baseline via `save-ui-baseline`.
+No game-specific exceptions are baked in, but a *permanent* finding is a real
+category and 0.12.0 gives it somewhere to go. `validate-ui` splits findings into
+`NEW` and `PRE` against `user://ui_findings_baseline.json`, keyed on (rule, node
+path) rather than on the message, and **only NEW findings fail the check**. Two
+projects independently stalled here — a `+125` popup resting at alpha 0 between
+pops (`ui_transparent` forever) and a diegetic HUD whose screen position is
+wherever the player is standing — and a check that can only ever be ignored has
+been switched off in practice.
+
+If the run reports `No UI findings baseline`, every finding gates; that is the
+correct state for a project that has never triaged its UI. Accept the current set
+with `"$PY" tools/devtools.py validate-ui --baseline-write` **only after reading
+each finding** and saying in the summary which ones you are accepting and why. A
+baseline written without that read is indistinguishable from deleting the check.
+`--no-baseline` re-reports everything for a one-off audit.
 
 **Capture a scene-tree snapshot before moving on.** Phase 5 uses it to compute which changed files this run actually reached; it costs one command and cannot be reconstructed after the game exits.
 
@@ -634,6 +648,6 @@ For each issue, present a recommendation in this format:
 
 ## Pass/Fail Summary
 
-Report results as a table: Godot binary used, harness drift (Phase 0) if any, config thresholds (fps_min / orphan_growth_max), import gate status, lint status, unit test status (with the `Selected: N of M discovered` figure, not just pass/fail), live scene name (and which entry point fired), validate-all, validate-ui, performance (FPS + orphan growth vs baseline), and each change-specific test (name + what it verified + pass/fail). List the project verbs discovered via `list-commands` that you used. Also check the Godot terminal output for GDScript runtime errors or warnings.
+Report results as a table: Godot binary used, harness drift (Phase 0) if any, config thresholds (fps_min / orphan_growth_max), import gate status, lint status, unit test status (with the `Selected: N of M discovered`, `Autoloads: N of M ready` and `Assertions: N executed` figures, not just pass/fail — a suite reporting 0 assertions or an unready autoload verified far less than its pass count suggests), live scene name (and which entry point fired), validate-all, validate-ui, performance (FPS + orphan growth vs baseline), and each change-specific test (name + what it verified + pass/fail). List the project verbs discovered via `list-commands` that you used. Also check the Godot terminal output for GDScript runtime errors or warnings.
 
 **Include the worktree reach line from Phase 5** (the per-session denominator; report the branch ratio alongside it, labeled as such), naming any changed file the run did not reach. Do not report a run as verified when its changed files were never loaded — say which ones were covered at runtime and which were only read. If all checks pass *and* the changed files were reached, the commit is safe to proceed; if checks pass but reach was partial, say so plainly and let the user decide.

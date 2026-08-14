@@ -89,11 +89,11 @@ from pathlib import Path
 from typing import Optional  # noqa: F401
 
 
-# harness-version: 0.11.0
+# harness-version: 0.12.0
 # Version of the godot-selftest-harness this client was copied from. Compared against
 # the running game's own stamp by the `harness-version` verb, so a half-refreshed
 # install (new client, old autoload) is visible instead of mysterious.
-HARNESS_VERSION = "0.11.0"
+HARNESS_VERSION = "0.12.0"
 
 COMMANDS_FILE = "devtools_commands.json"
 RESULTS_FILE = "devtools_results.json"
@@ -282,8 +282,43 @@ def pid_alive(pid) -> bool:
     return True
 
 
+#: How many missed heartbeats before an owner counts as not polling. The game
+#: writes last_poll_unix about once a second (HEARTBEAT_INTERVAL_MSEC in
+#: dev_tools.gd); a few seconds of slack absorbs a slow frame or a long handler
+#: without calling a healthy owner dead.
+POLL_STALE_AFTER_SEC = 5.0
+
+
+def poll_age(owner: dict):
+    """Seconds since the owner last polled the bus, or None if it never said.
+
+    None means an owner file written by a harness older than 0.12.0, which had
+    no last_poll_unix. Callers must treat that as "unknown", never as "stale":
+    an old game is not a dead one.
+    """
+    if not isinstance(owner, dict):
+        return None
+    ts = owner.get("last_poll_unix")
+    if not isinstance(ts, (int, float)):
+        return None
+    return max(0.0, time.time() - float(ts))
+
+
 def owner_status(user_data: Path) -> dict:
-    """{present, pid, alive, path} for the bus owner record. Never raises.
+    """{present, pid, alive, polling, poll_age, path} for the bus owner record.
+    Never raises.
+
+    `alive` is a pid check and `polling` is a heartbeat check, and the second is
+    the one worth believing (findmyballs:G-004). A pid can be alive and still
+    not own this bus: Windows recycles pids, so a dead Godot's number was found
+    attached to an unrelated process and reported STILL ALIVE while `launch`
+    refused to start. A pid can also be alive AND the real owner AND not
+    answering - a paused tree does exactly that, and the message it produced
+    ("running but not polling THIS directory") sent a project debugging its
+    --userdata for a cycle.
+
+    polling is None when the owner file predates 0.12.0 and carries no
+    heartbeat. Unknown is not stale; callers say so rather than guessing.
 
     Read BEFORE the command is written, so the very first call can say what it
     knows instead of leaving the caller to interpret an empty response
@@ -300,9 +335,42 @@ def owner_status(user_data: Path) -> dict:
     """
     owner, path = _read_owner(user_data)
     if owner is None:
-        return {"present": False, "pid": None, "alive": False, "path": path}
+        return {
+            "present": False, "pid": None, "alive": False,
+            "polling": False, "poll_age": None, "path": path,
+        }
     pid = owner.get("pid")
-    return {"present": True, "pid": pid, "alive": pid_alive(pid), "path": path}
+    age = poll_age(owner)
+    return {
+        "present": True,
+        "pid": pid,
+        "alive": pid_alive(pid),
+        "polling": None if age is None else age <= POLL_STALE_AFTER_SEC,
+        "poll_age": age,
+        "path": path,
+    }
+
+
+def owner_liveness_phrase(owner: dict) -> str:
+    """One clause describing what the owner record actually proves.
+
+    Kept in one place because three call sites print it and they used to
+    disagree, which is how "STILL ALIVE" ended up on a paused game.
+    """
+    pid = owner.get("pid")
+    age = poll_age(owner)
+    if age is None:
+        state = ("that process is alive" if pid_alive(pid) else "that process is gone")
+        return "%s (no heartbeat in the owner file - harness older than 0.12.0)" % state
+    if age <= POLL_STALE_AFTER_SEC:
+        return "that process polled the bus %.1fs ago, so it is live and listening" % age
+    if pid_alive(pid):
+        return (
+            "that process EXISTS but last polled the bus %.0fs ago, so it is not "
+            "listening: the tree is paused, the game is wedged, or the pid was "
+            "recycled by an unrelated process" % age
+        )
+    return "that process is gone (last polled %.0fs ago); the record is stale" % age
 
 
 def _parse_project_godot(project_file: Path) -> dict:
@@ -472,12 +540,30 @@ def _wait_for_pickup(commands_path: Path, user_data: Path, action: str):
         # "has likely exited" was a guess, and quoting it at every later call made
         # a clean relaunch read as a second failure stacked on the first
         # (gather:G-103). The pid is checkable, so check it and say which it is.
+        #
+        # The heartbeat is checkable too, and it is the better question
+        # (findmyballs:G-004): pointing at --userdata was WRONG for the project
+        # that hit this, whose tree was merely paused. Lead with what the poll
+        # timestamp proves, and only mention the directory when it is still a
+        # live possibility.
         pid = owner.get("pid")
-        fate = ("that process is CONFIRMED GONE, so this is the ordinary "
-                "aftermath of a crash or quit - relaunch"
-                if not pid_alive(pid) else
-                "that process is STILL ALIVE, so it is running but not polling "
-                "THIS directory - check --userdata/--session")
+        age = poll_age(owner)
+        if age is None:
+            fate = ("that process is CONFIRMED GONE, so this is the ordinary "
+                    "aftermath of a crash or quit - relaunch"
+                    if not pid_alive(pid) else
+                    "that process is STILL ALIVE, so it is running but not polling "
+                    "THIS directory - check --userdata/--session")
+        elif age > POLL_STALE_AFTER_SEC and pid_alive(pid):
+            fate = (
+                "%s. If it is paused, the DevTools autoload should be "
+                "PROCESS_MODE_ALWAYS (harness 0.12.0+ sets this by default; an "
+                "older install can be patched live with `set-state --node "
+                "/root/DevTools --property process_mode --value 3`)"
+                % owner_liveness_phrase(owner)
+            )
+        else:
+            fate = owner_liveness_phrase(owner)
         owner_note = (
             "\nOwner file {p} says pid {pid} (project {proj!r}, session {sess!r}) "
             "last claimed this bus; {fate}.".format(
@@ -719,12 +805,35 @@ def print_validation_result(result: dict):
                     severity = {"error": "ERROR", "warning": "WARN", "info": "INFO"}.get(issue["severity"], "???")
                     print(f"  [{severity}] {issue['code']}: {issue['message']}")
     else:
-        # Handle single scene validate response: data.issues is a list
+        # Handle single scene validate response: data.issues is a list.
+        # validate_ui stamps each issue with data.baseline ("new"/"pre_existing")
+        # since 0.12.0; other validate verbs do not, and print unchanged.
         issues = data.get("issues", [])
         if isinstance(issues, list):
             for issue in issues:
                 severity = {"error": "ERROR", "warning": "WARN", "info": "INFO"}.get(issue["severity"], "???")
-                print(f"  [{severity}] {issue['code']}: {issue['message']}")
+                mark = ""
+                state = issue.get("baseline")
+                if state == "new":
+                    mark = "NEW "
+                elif state == "pre_existing":
+                    mark = "PRE "
+                print(f"  {mark}[{severity}] {issue['code']}: {issue['message']}")
+
+    if data.get("baseline_written"):
+        print(f"\nBaseline written to {data.get('baseline_path', '?')}. "
+              f"{data.get('pre_existing_count', 0)} finding(s) are now pre-existing; "
+              "later runs gate on NEW ones only.")
+    elif data.get("baseline_in_use"):
+        print(f"\nBaseline: {data.get('new_count', 0)} NEW, "
+              f"{data.get('pre_existing_count', 0)} pre-existing "
+              f"({data.get('baseline_path', '?')}). Only NEW findings fail this check.")
+    elif "new_count" in data:
+        # validate_ui with no baseline on disk. Say so: a project that never
+        # writes one is gating on every finding forever, which is how a check
+        # that fires on correct-by-design UI ends up being ignored entirely.
+        print("\nNo UI findings baseline. Every finding gates. "
+              "Run `validate-ui --baseline-write` to accept the current set.")
 
     if not result["success"]:
         sys.exit(1)
@@ -1077,6 +1186,11 @@ def cmd_ping(args, project_path: Path):
             session = data.get("session") or ""
             where = f", session: {session}" if session else ""
             print(f"DevTools is running (timestamp: {data['timestamp']:.0f}{where})")
+            # Reachable while paused since 0.12.0, so ping answering no longer
+            # implies an unpaused tree. Say which, rather than let the caller
+            # infer it. paused is absent on a pre-0.12.0 game.
+            if data.get("paused") is True:
+                print("  tree is PAUSED (bridge still polling: PROCESS_MODE_ALWAYS)")
         else:
             print("DevTools responded but with error")
             sys.exit(1)
@@ -1856,8 +1970,13 @@ def cmd_set_feature(args, project_path: Path):
 
 
 def cmd_validate_ui(args, project_path: Path):
-    """Run all UI layout checks."""
-    result = send_command(project_path, "validate_ui")
+    """Run all UI layout checks, split NEW vs PRE-EXISTING against a baseline."""
+    cmd_args = {}
+    if getattr(args, "baseline_write", False):
+        cmd_args["baseline_write"] = True
+    if getattr(args, "no_baseline", False):
+        cmd_args["use_baseline"] = False
+    result = send_command(project_path, "validate_ui", cmd_args)
     print_validation_result(result)
 
 
@@ -2024,14 +2143,29 @@ def cmd_launch(args, project_path: Path):
             print(f"Error: {e}", file=sys.stderr)
             sys.exit(2)
         owner = owner_status(user_data)
-        if owner["present"] and owner["alive"]:
+        # A pid alone is not ownership (findmyballs:G-004). Windows recycled a
+        # dead Godot's pid onto an unrelated process and this refused to launch
+        # at all, costing the project a workaround (--isolated) to get moving.
+        # Block only on an owner that is BOTH alive and still polling; an owner
+        # that has not polled in POLL_STALE_AFTER_SEC is not using this bus
+        # whatever its pid says. polling is None on a pre-0.12.0 owner file -
+        # unknown, so fall back to the old pid-only behaviour rather than
+        # launching a second instance on top of a live one.
+        stale_claim = owner["present"] and owner["alive"] and owner["polling"] is False
+        if owner["present"] and owner["alive"] and not stale_claim:
             print(f"Error: pid {owner['pid']} still owns this bus "
                   f"({owner['path'].name}).\n"
+                  f"  {owner_liveness_phrase(_read_owner(user_data)[0] or {})}\n"
                   "Quit it first, or launch with --isolated to get a bus of your own.\n"
                   "Pass --allow-second-instance if you really mean to run two.",
                   file=sys.stderr)
             if not args.allow_second_instance:
                 sys.exit(1)
+        elif stale_claim:
+            print(f"Note: {owner['path'].name} names pid {owner['pid']}, which exists but "
+                  f"last polled this bus {owner['poll_age']:.0f}s ago - not a live owner "
+                  "(a recycled pid, or a game that stopped polling). Launching.",
+                  file=sys.stderr)
 
     devtools_dir = project_path / ".devtools"
     devtools_dir.mkdir(exist_ok=True)
@@ -2881,6 +3015,11 @@ def main():
 
     # validate-ui
     p = subparsers.add_parser("validate-ui", help="Run UI layout validation checks")
+    p.add_argument("--baseline-write", action="store_true",
+                   help="Record the current findings as pre-existing; later runs "
+                        "gate only on NEW ones (mirrors lint_project.gd --baseline-write)")
+    p.add_argument("--no-baseline", action="store_true",
+                   help="Ignore the saved baseline and gate on every finding")
     p.set_defaults(func=cmd_validate_ui)
 
     # save-ui-baseline

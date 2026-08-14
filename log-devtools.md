@@ -478,7 +478,7 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   full `git stash` + relaunch + `validate-ui` on HEAD to compare (HEAD: 10 issues, branch: 9
   — the change removes `ui_zero_size` on `UI`), which is exactly the hand-triage that lint's
   `--baseline` exists to abolish.
-  - [gather:G-018] status: open | seen: 1 | harness: 0.4.0 | source: gather 2026-08-01
+  - [gather:G-018] status: fixed | fixed-in: 0.12.0 | seen: 1 | harness: 0.4.0 | source: gather 2026-08-01
   - Improvement: give `validate-ui` the same `--baseline PATH` / `--baseline-write PATH`
     split `lint_project.gd` already has, so UI findings report as `NEW` vs `PRE-EXISTING`;
     and skip `ui_negative_pos` for Controls whose canvas ancestor is not a `CanvasLayer`,
@@ -2570,7 +2570,7 @@ the scaffolder's install set and step 12, and into `check_templates.py` as stage
   A 4.5 project checked against a 4.6 index would resolve a class that does not exist in
   its engine. Deliberate for now — detecting the mismatch means running `godot --version`,
   and not launching anything is the point — but the silence is the wrong half to keep.
-  - [H-032] status: open | seen: 1 | harness: 0.11.0
+  - [H-032] status: fixed | fixed-in: 0.12.0 | seen: 1 | harness: 0.11.0
   - Improvement: record the project's engine version in `devtools_config.json` at scaffold
     time (it is already probing the binary in step 11) and have `name_check.py` compare the
     index's engine against that string, warning on a mismatch. No launch, no guess.
@@ -2584,3 +2584,191 @@ additionally exercised against the real `gather` project (174 scripts, 91 global
 `--no-strings`, `--require-api`, and both baseline paths were checked against a fixture
 project holding planted defects of every rule, plus a mutation test that removed a
 `class_name` declaration and confirmed the resulting `unknown_type` error.
+
+## 2026-08-14 - Upstreamed 6 open gap(s) from findmyballs (harness 0.10.0)
+
+Pooled by `tools/upstream_gaps.py` from `C:\Users\gotmi\Documents\GitHub\findmyballs\log-devtools.md`. Gap text is the project's,
+verbatim; only the id line is rewritten (qualified with the project name so
+ids from two projects cannot collide, plus a `source:` back-pointer).
+
+- Gap: **the Godot binary probe ignores the project's declared engine version** — step 11's
+  glob `"$HOME"/Documents/Godot_v*_win64.exe` takes the first match. This machine has
+  `Godot_v4.5.1-stable_win64.exe`, `Godot_v4.6.1-stable_win64.exe` and
+  `Godot_v4.7.1-stable_win64.exe` side by side, so it picked **4.5.1** for a project whose
+  `config/features` is `PackedStringArray("4.7", "Forward Plus")`. Recording that in
+  `godot_bin` would have pinned every later `/verify` to an engine two minor versions
+  behind the project. Workaround: overrode the glob by hand and passed
+  `--set godot_bin=.../Godot_v4.7.1-stable_win64.exe`.
+  - [findmyballs:G-001] status: fixed | fixed-in: 0.12.0 | seen: 1 | harness: 0.10.0 | source: findmyballs 2026-08-14
+  - Improvement: when the glob returns more than one candidate, parse the version out of
+    `config/features` and prefer the binary whose filename carries the same `X.Y`; fall
+    back to the highest version, not the first glob hit. Reverse-sorting the glob alone
+    would have been enough here.
+
+- Gap: **`--script` mode never adds autoloads to the scene tree, so `_ready()` never runs** —
+  both headless runners start this way. `BallCatalog.all_balls()` returned `0` under
+  `run_tests.gd` while the same call returned `75` in the live game. A probe test confirmed it:
+  `PROBE before=0 after_manual=75 purse_before=0 purse_after=10`, and
+  `BallCatalog.get_tree()` raised `Parameter "data.tree" is null`. Nothing in lint or the test
+  summary hints at it — `Scripts: 33 compiled OK`, `UIDs: OK`, `lint: 0 error(s)`. Workaround:
+  made the catalog build lazily via `_ensure_built()` on all 13 public accessors.
+  - [findmyballs:G-002] status: fixed | fixed-in: 0.12.0 | seen: 1 | harness: 0.10.0 | source: findmyballs 2026-08-14
+  - Improvement: have `run_tests.gd` and `lint_project.gd` warn when a configured autoload is
+    not `is_inside_tree()` — one line, and it turns an invisible empty-data failure into a
+    named one. A stronger fix is for the runners to add autoloads to the tree before
+    discovery so `_ready()` fires as it does in the real game.
+
+- Gap: **pausing the tree kills the DevTools bridge** — `run-method /root/SceneFlow
+  toggle_pause` succeeded, and every subsequent call returned `that process is STILL ALIVE, so
+  it is running but not polling THIS directory`, which reads as a wrong-`--userdata` problem
+  rather than as a paused game. The DevTools autoload polls from a pausable process callback,
+  so no pause-menu, settings-screen or death-screen state is reachable over the bus — exactly
+  the UI most likely to need verifying. Workaround: `set-state --node /root/DevTools --property
+  process_mode --value 3` *before* pausing, after which `screenshot` and `scene-tree` worked
+  normally and confirmed the pause menu.
+  - [findmyballs:G-003] status: fixed | fixed-in: 0.12.0 | seen: 1 | harness: 0.10.0 | source: findmyballs 2026-08-14
+  - Improvement: set `process_mode = Node.PROCESS_MODE_ALWAYS` on the DevTools autoload in
+    `dev_tools.gd`. It has no gameplay side effects and makes every paused UI testable.
+
+- Gap: **`devtools_owner.json` trusts a bare pid, and Windows recycles pids** — `launch`
+  refused to start with `Error: pid 14856 still owns this bus`, and `ping` reported that pid as
+  `STILL ALIVE`. It was `MoNotificationUx`, an unrelated Windows process that had inherited the
+  dead Godot's pid. Workaround: `launch --isolated` to sidestep the stale claim entirely.
+  - [findmyballs:G-004] status: fixed | fixed-in: 0.12.0 | seen: 1 | harness: 0.10.0 | source: findmyballs 2026-08-14
+  - Improvement: record the process *name* (and ideally start time) alongside the pid in
+    `devtools_owner.json`, and treat a pid whose name no longer matches as dead rather than as
+    a live owner.
+
+- Gap: **the harness cannot be run at all while parallel agents share `.godot/`** — four
+  subagents wrote ~2,300 lines across disjoint file sets with the engine explicitly forbidden
+  to them, because concurrent `--import`/lint runs corrupt the shared class cache. Every one of
+  them reported the same thing independently: the residual risk in their work was engine API
+  names they could not check. Workaround: all four wrote blind and the orchestrator linted
+  centrally afterwards; the first central run was clean, so the cost here was latency, not
+  defects.
+  - [findmyballs:G-005] status: fixed | fixed-in: 0.11.0 | seen: 1 | harness: 0.10.0 | source: findmyballs 2026-08-14
+    (the log was written against 0.10.0; the second half of its own Improvement line —
+    "a static GDScript/ClassDB name checker that needs no engine run" — shipped as
+    `name_check.py` in 0.11.0, which is the same ask as `gather:G-093`. The `--import-cache`
+    half is untouched and stays open as [H-034]: the engine gates still cannot be run
+    concurrently, they can only now be *skipped* by a gate that never opens the project.)
+  - Improvement: a `--import-cache DIR` passthrough on `lint_project.gd` / `run_tests.gd` (or a
+    documented `GODOT_PROJECT_METADATA` override) so each agent can lint against a private
+    cache. Failing that, a static GDScript/ClassDB name checker that needs no engine run.
+
+- Gap: **`validate-ui` flags the transient cash-delta popup as `ui_transparent`** — tracked
+  as `findmyballs-6mm`. `validate-ui` reports `[INFO] ui_transparent: Label 'Delta' is
+  visible but fully transparent (alpha 0.00)`. Correct by design: it is the `+125` popup at
+  rest between pops. Workaround: none applied yet (left open).
+  - [findmyballs:G-006] status: fixed | fixed-in: 0.12.0 | seen: 1 | harness: 0.10.0 | source: findmyballs 2026-08-14
+  - Improvement: either the HUD hides the label (`visible = false`) instead of driving
+    `alpha = 0` at rest, or `validate-ui` gains a way to allowlist a node (by group or
+    metadata) as "intentionally transparent at rest" via `save-ui-baseline`.
+
+## 2026-08-14 — Every gate reports what it looked at (0.12.0)
+
+First release shaped by a **second** project. `findmyballs` scaffolded the harness this
+week and logged six gaps in one session; `[H-028]` had already named the problem those
+six answer — 84% of gaps came from `gather`, so "the core is game-agnostic" was a design
+commitment validated against a single sample. Two of the six independently reproduce a
+`gather` gap, and those two are the highest-confidence items in the whole corpus.
+
+Worth recording what the six did **not** contain: a request for a new verb. Not one.
+`[H-027]` says nothing counts which of the 46 bus verbs is ever used, so a release that
+adds surface area cannot be told apart from a release that improves anything. This one
+adds no verbs. It adds denominators.
+
+**The theme.** `findmyballs:G-002` reports three catalog tests that passed by iterating an
+empty array — `test_ball_ids_are_unique`, `test_every_ball_is_populated`,
+`test_lookup_by_id_round_trips`. An empty collection satisfies every assertion inside a
+loop over it. That is the fourth sighting of one failure mode here: `[H-002]` (`Total: 0 |
+ALL TESTS PASSED`), `gather:G-004` (a filter selecting 0 of N), `[H-031]` (a rule matching
+nothing anywhere), and now a test method executing none of its own assertions. Each was
+fixed locally and the invariant was never written down. It is now: **every gate reports
+the denominator of what it actually looked at, and zero is disqualifying rather than
+passing.**
+
+**Closed in 0.12.0** — `findmyballs:G-001` `G-002` `G-003` `G-004` `G-006`, `gather:G-018`
+(the same validate-ui gap `findmyballs:G-006` reports, from the other direction), and
+`[H-032]`. `findmyballs:G-005` was closed by 0.11.0's `name_check.py` before this session
+began — its log was written against 0.10.0 — and is marked as such, with the
+`--import-cache` half it also names left open as `[H-034]`.
+
+- Value: **warranted** — running the real thing overturned the diagnosis in the log, and
+  planting defects caught two checks that were reporting clean while doing nothing.
+  - Expected: that `--script` mode does not instantiate autoloads (what `findmyballs:G-002`
+    concluded, and what `eval.gd`'s own header has asserted since it shipped), so the fix
+    would be for the runners to instantiate and parent them.
+  - Got: **the opposite.** A probe on 4.6.1 shows autoloads ARE instantiated and ARE
+    parented to `root` when `_initialize()` begins — `get_parent()` is `root` — but the
+    tree has not been stepped, so `is_inside_tree()` is `false` and `_ready()` has not run.
+    One `await process_frame` and the same autoload reports `is_inside_tree() = true`,
+    `_ready()` run, its array populated. The fix is one awaited frame, not a re-parenting
+    pass.
+  - Found: **(1)** the real mechanism above, which also makes `eval.gd`'s documented
+    limitation wrong — it now awaits a frame and ships `get_autoload("Name")`, verified
+    returning `3` for a catalog that reported `0` before. **(2)** The pre-fix failure was
+    worse than uniformly-empty: the runner awaits inside `_run_single_test`, so the first
+    test that happened to await a frame flushed the notifications, and every test after it
+    saw populated autoloads while every test before it saw empty ones. Suite behaviour
+    depended on test order. **(3)** `name_check.py`'s new engine-skew warning was **dead
+    code on arrival** — `godot_version` in config is bare (`4.7.1`) while an index's
+    `engine` is the binary's banner (`Godot Engine v4.7.1.stable.official`), and a regex
+    anchored with `re.match` matched the first and never the second. It reported clean on a
+    planted 4.0-vs-4.7 mismatch. Caught only by planting one.
+  - Cheaper: nothing. The probe that overturned the diagnosis took one scratch project and
+    ~40s, and no amount of reading either log would have produced it — both written
+    sources said the same wrong thing.
+
+- Gap: **a fix built to a gap report's stated cause would have shipped doing nothing.**
+  `findmyballs:G-002`'s Improvement line asks the runners to "add autoloads to the tree
+  before discovery so `_ready()` fires as it does in the real game". They are already in
+  the tree. Following it literally means `root.add_child()` on a fresh instance, which
+  Godot would auto-rename beside the real one, leaving the node GDScript resolves
+  untouched — a change that passes review, passes lint, and fixes nothing. The log's
+  `Improvement:` field is a hypothesis from a project that was working around the problem,
+  not a diagnosis, and this repo has been treating it as the latter.
+  - [H-033] status: open | seen: 1 | harness: 0.12.0
+  - Improvement: require reproducing a pooled gap's *mechanism* before implementing its
+    *Improvement*, and record the reproduction in the release entry. Three of the six gaps
+    this session were reproduced first; this is the one where it changed the answer. Cheap
+    version: add a `Reproduced:` line to the gap format, so an entry can distinguish "I saw
+    this happen" from "I inferred this from a workaround that helped".
+
+- Gap: **the engine gates still cannot run concurrently; 0.11.0 made them skippable, not
+  parallel.** `name_check.py` answers the question four `findmyballs` agents were actually
+  asking, and this is why `findmyballs:G-005` closes. But `--import`, `lint_project.gd` and
+  `run_tests.gd` still share one `.godot/`, so N agents still serialise behind one owner
+  for anything the static checker cannot decide.
+  - [H-034] status: open | seen: 4 | harness: 0.12.0
+    (inherits the count from `gather:G-005`/`G-093` and `findmyballs:G-005`; the
+    `--import-cache` half has now been asked for by two projects and four agents)
+  - Improvement: unchanged — a `--import-cache DIR` passthrough, or a documented
+    `GODOT_PROJECT_METADATA` override. Failing that, a lockfile that makes concurrent
+    runners **queue** instead of corrupting the class cache: you cannot parallelise a
+    single-writer resource, but you can stop it silently producing garbage.
+
+- Gap: **`check_templates.py` caught two dead checks this session, and both times only
+  because a defect was planted.** The scratch project reports 0 UI findings, so the
+  validate-ui baseline round-tripped NEW→PRE→pass over an empty set on the first attempt —
+  a result an implementation that does nothing whatsoever also produces. Same for the skew
+  warning. Planting is now permanent for both (`check_ui_baseline`, `check_engine_skew`,
+  `stage_vacuous_control`), but nothing makes it the default posture for the *next* check.
+  - [H-035] status: open | seen: 1 | harness: 0.12.0
+    (third sighting of the family behind `[H-030]` and `[H-031]`)
+  - Improvement: a rule for this repo, enforced by review rather than code — a new stage in
+    `check_templates.py` must plant the defect it claims to detect, and the printed line
+    must name what fired. A stage that can only report success is not a stage.
+
+**Validation run this turn:** `python tools/check_templates.py --full` — all stages against
+Godot 4.7.1, `72/72` contract rows, plus the three new positive controls
+(`stage 4 tests: vacuous control fired (exit 1, [VACU] on the empty-loop test only)`,
+`stage 5 bridge: validate_ui baseline 2 finding(s) ['small_tap_target', 'ui_transparent']
+-> NEW, written, -> PRE, run passes`, `stage 5 bridge: paused tree still answers`).
+`python tools/record_version.py --check` OK at 0.12.0 (11 shipped files, 46 bus verbs, 48
+CLI commands). Per `CLAUDE.md`'s rule for static-analysis changes, `name_check.py` was also
+run against the real `gather` project (174 scripts, 91 global classes, 6 autoloads):
+**0 errors, 0 warnings, 2 advisories** — identical to the 0.11.0 baseline, so the skew
+change added no false positives. The autoload mechanism was established by a standalone
+probe on 4.6.1 before any code was written, and the pause fix is checked by pausing a real
+tree over the bus rather than by reading `process_mode` back.
