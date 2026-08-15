@@ -91,10 +91,10 @@ extends SceneTree
 ## (res://addons/godot_selftest/devtools_config.json key "test_dir", default
 ## "res://test/unit") for files named test_*.gd.
 
-# harness-version: 0.19.0
+# harness-version: 0.20.0
 ## Harness revision these files were copied from. See lint_project.gd / the
 ## `harness_version` bus verb; bump with .claude-plugin/plugin.json.
-const HARNESS_VERSION: String = "0.19.0"
+const HARNESS_VERSION: String = "0.20.0"
 
 const CONFIG_PATH: String = "res://addons/godot_selftest/devtools_config.json"
 const DEFAULT_TEST_DIR: String = "res://test/unit"
@@ -120,6 +120,11 @@ var _selected: int = 0
 ## Set when a selector matched nothing. Reported instead of "the suite did not
 ## complete", because the suite is fine - the selector isn't.
 var _selection_error: String = ""
+## Scripts INSIDE the selection that failed to load (gh#10). A selector naming a
+## script that does not compile "matches nothing" - the script contributed 0 to
+## _discovered - and the verdict used to blame the selector's spelling while the
+## parse error sat 60 lines up. These are what let the verdict blame the right thing.
+var _selected_load_failures: Array[String] = []
 
 ## The suite as an inherited asset, not just this run's tally. A session that
 ## finds `Suite: 3 test script(s) in res://test/unit` knows there is prior work
@@ -155,6 +160,22 @@ func _initialize() -> void:
 			"--file":
 				if i + 1 < args.size():
 					_file_filter = args[i + 1]
+
+	# A never-imported project has no class cache, so every `class_name` in it is
+	# unresolvable and a test whose first statement uses one aborts on a runtime
+	# error -- which this runner sees as a pass (H-029, gather:G-083). The evidence
+	# is right there on disk. Refuse rather than report a suite that could not
+	# have run: exit 2, one line, the fix named.
+	if not FileAccess.file_exists("res://.godot/global_script_class_cache.cfg"):
+		_runner_error = true
+		_errors.append({
+			"script": "res://.godot/global_script_class_cache.cfg",
+			"error": "missing - this project has never been imported, so no class_name resolves "
+				+ "and any test using one aborts silently. Run `godot --headless --path . --import` first",
+		})
+		_print_results()
+		quit(_exit_code())
+		return
 
 	# MUST happen before any test runs. See _await_autoloads() for why.
 	await _await_autoloads()
@@ -461,6 +482,7 @@ func _record_load_failure(script_path: String, error: String) -> void:
 		_discovery_errors.append({"script": script_path, "error": error})
 		return
 	_errors.append({"script": script_path, "error": error})
+	_selected_load_failures.append(script_path)
 	_runner_error = true
 
 
@@ -562,6 +584,7 @@ func _print_results() -> void:
 			"filter": _filter,
 			"file": _file_filter,
 			"selection_error": _selection_error,
+			"selected_load_failures": _selected_load_failures,
 			"errors": _errors,
 			"discovery_errors": _discovery_errors,
 			"results": _results,
@@ -628,7 +651,15 @@ func _print_results() -> void:
 	print("  Suite: %d test script(s) in %s" % [_test_files, _test_dir])
 	print("-" .repeat(60))
 
-	if _selection_error != "":
+	if _selection_error != "" and not _selected_load_failures.is_empty():
+		# The selector was right; the script it named never loaded, so it
+		# contributed 0 to _discovered and the selector "matched nothing" (gh#10).
+		# Selector-syntax advice here sends the reader to re-check the spelling
+		# while the real cause sits 60 lines up in a parse backtrace.
+		print("  SELECTED NOTHING - %d selected test script(s) FAILED TO COMPILE (see [ERR] above);" % _selected_load_failures.size())
+		print("  a selector cannot match a script that did not load. Fix the parse error")
+		print("  first: %s (exit 2)" % ", ".join(_selected_load_failures))
+	elif _selection_error != "":
 		print("  SELECTED NOTHING - %s (exit 2)" % _selection_error)
 		print("  Nothing was verified. --filter matches method names and test script")
 		print("  filenames; --file matches the script path. Run without selectors to")

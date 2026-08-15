@@ -2557,7 +2557,7 @@ the scaffolder's install set and step 12, and into `check_templates.py` as stage
   worktree its names are fine, but if someone runs the test runner there anyway, a test
   whose first statement errored still reports as passing. The runner has the evidence —
   `.godot/global_script_class_cache.cfg` is absent — and says nothing about it.
-  - [H-029] status: open | seen: 1 | harness: 0.11.0
+  - [H-029] status: fixed | fixed-in: 0.20.0 | seen: 1 | harness: 0.11.0
   - Improvement: have `run_tests.gd` refuse to report a pass when the class cache file is
     missing, exiting `2` with one line naming `--import` as the fix. `lint_project.gd`
     already reports `class_cache_missing` as an advisory; the runner should treat the same
@@ -3695,7 +3695,7 @@ general tool. Report: `experiments/harness-ab/README.md`.
   four steps, which means a second definition of "installed" now exists beside the
   slash command and will drift from it. `check_templates.py` has a third
   (`stage_assemble`).
-  - [H-047] status: open | seen: 1 | harness: 0.18.0
+  - [H-047] status: fixed | fixed-in: 0.20.0 | seen: 1 | harness: 0.18.0
   - Improvement: add `scaffold_install.py full --project ROOT`, doing files + config
     + autoload + `devtools_ext/` + `test/` + `CLAUDE.md` merge, and have both
     `commands/scaffold-godot-harness.md` and `check_templates.py stage_assemble` call
@@ -3708,7 +3708,7 @@ general tool. Report: `experiments/harness-ab/README.md`.
   Writing that correctly in `setup_arms.py` took a fix after the naive version put it
   first — the rule is documented in prose, in one place, and is not shipped as code.
   Same root cause as [H-047].
-  - [H-048] status: open | seen: 1 | harness: 0.18.0
+  - [H-048] status: fixed | fixed-in: 0.20.0 | seen: 1 | harness: 0.18.0
   - Improvement: fold it into the `full` mode above so the ordering rule exists once,
     as code, with a test that a project with its own `[autoload]` block ends up with
     `DevTools=` after its own entries.
@@ -3804,7 +3804,7 @@ verification nudge.
   outside `_screen_reference_rect()`. It reported `in_viewport: false` on a panel that
   is dead centre in the real game. The verb was believed, and it produced a false
   defect that reached a published report.
-  - [H-051] status: open | seen: 1 | harness: 0.18.0
+  - [H-051] status: fixed | fixed-in: 0.20.0 | seen: 1 | harness: 0.18.0
   - Improvement: when `DisplayServer.get_name() == "headless"` **and**
     `ProjectSettings.get("display/window/stretch/mode") != "disabled"`, the reply must
     say so — either refuse the geometry (`success: false`, naming the stretch mode) or
@@ -3915,3 +3915,130 @@ files, 48 bus verbs + 50 CLI commands documented. Per [H-030], `coverage_check.p
 also run against three real scaffolded projects (`../gather` 1340 assertions/53 files,
 `../moving-in` 448/19, `../findmyballs` 46/3) — which is what caught the seed-evidence
 false COVERED described above.
+
+## 2026-08-15 — Reflecting on "the tool was not useful": the top ten open issues, and what they had in common (0.20.0)
+
+Asked to reflect on the A/B's null result and tackle the top ten of the open issues
+(gh#5, #6, #7, #9, #10; beads dfj, e8g, 0nl, cki and the rest). Reading them together
+against the study, one thing stands out: **the study found no correctness gap, and the
+one difference it did find was the harness lying** ([H-051]). Every open issue is the
+same shape — a verb or runner returning a well-formed answer that is not measuring what
+the reader thinks (`--hide` that hid nothing, `performance` on a paused tree, a selector
+blamed for a compile failure, a `quit` that reported a survivor that had exited). A tool
+that cannot be trusted loses to the bespoke selftest the model writes anyway, because
+at least *that* one is not believed blindly. So the ranking was: trust defects first,
+then the thing that makes the measurement re-runnable ([H-047]).
+
+Ten shipped, each with the defect planted as a gate where a gate can hold it:
+
+1. **[H-051] headless geometry is now flagged**, and the diagnosis differs from the
+   filed hypothesis. It is not the stretch transform — `get_global_transform_with_canvas()`
+   is identity in both modes on the scratch project. It is `get_window().size`, which is
+   `64x64` headless (`window_get_size()` even reports `0x0`): a panel centred with
+   `(get_window().size - size) / 2` on 800x600 sits at exactly `(-368,-268)` headless and
+   `(0,0)` windowed. Reproduced in a 40-line scratch before touching the verb ([H-033]).
+   The verb was *right about the headless run*; what it lacked was saying so. Now
+   `get_node_bounds` / `get_ui_snapshot` / `validate_ui` / `reachable_ui` / `findings`
+   carry `geometry_trustworthy` + `geometry_caveat`, `findings` stamps `caveat` on
+   geometry-code findings only, and the client prints it beside the numbers. Verdicts
+   still gate (CI is headless). Stage 5 asserts the flag on the aggregate, on the
+   planted `ScaledOutside` overflow, and NOT on `ui_transparent`; a mutation that
+   returned `""` made both new checks fail (`geometry_trustworthy=True, caveat=''`).
+2. **gh#5.1 `screenshot --hide` accepts `CanvasLayer`** and refuses (no file) when it
+   can hide nothing. The positive control found a *second* bug: `--hide` awaited
+   `RenderingServer.frame_post_draw`, which headless never emits, so any `--hide` hung
+   the bridge for the client's whole timeout. Now `process_frame`. Sweep finding:
+   `_is_effectively_visible` ignored a `CanvasLayer`'s own `visible`, so a hidden pause
+   menu's buttons were "reachable" — fixed in the same walk.
+3. **gh#5.2 the reply write is atomic** (temp + `rename_absolute`, direct-write fallback)
+   and the client's two `unlink()`s ride out `WinError 32`.
+4. **gh#6.1 `performance` says `tree_paused`**, message says `PAUSED`, client leads with
+   `TREE IS PAUSED`; `/verify` Phase 2 gates on `ping` before Phase 3. Stage 5's paused
+   check now asserts it both ways.
+5. **gh#6.2 was not slow shutdown.** `pid_alive()` on Windows used `os.kill(pid, 0)`,
+   which raises `WinError 87` for a **dead** pid; the tolerant `OSError -> True` read
+   that as alive, so `quit` could never see the game exit and named a pid `tasklist`
+   no longer had — measured here, 13s of "STILL ALIVE" on a game that had gone. The
+   proposed grace re-poll would not have fixed it ([H-033] again). Now
+   `OpenProcess` + `GetExitCodeProcess`; verified dead / foreign-live / own / child /
+   killed-child.
+6. **gh#7.1 / e8g `config --set` no longer reverts owned keys it was not passed** —
+   reproduced on master (`godot_bin: "C:/fake/godot.exe" -> ""`), fixed, two unit tests
+   plant it. Step 11 collapsed to one call and reads `godot_bin` back; tier 4 resolves a
+   `#!` wrapper to its exec target and `cygpath`s MSYS paths (gh#7.2); step 12 imports
+   before linting (gh#7.3).
+7. **gh#10.1** the filed fix used `_discovery_errors`; those are the *unselected*
+   failures (G-055). A selected script that fails to load goes to `_errors`, so a new
+   `_selected_load_failures` drives the verdict. The stage-4 control failed on my first
+   (issue-shaped) implementation and passed on the second — which is the point.
+8. **gh#10.2** `/verify` Phase 0.5 tier (d): no `main_scene` → headless-only (forced),
+   `runtime unreached`, ledger `--no-reach`, verdict `inconclusive`, with a mechanical
+   check rather than recollection.
+9. **[H-029]** `run_tests.gd` exits 2 naming `--import` when the class cache is absent
+   (confirmed the file exists after import even with zero `class_name`s). Stage-4 control
+   hides the file and asserts.
+10. **[H-047]/[H-048] `scaffold_install.py full`** — one definition of installed: files
+    → config (with `main_scene` detected) → `devtools_ext/` → `test/` seed → `CLAUDE.md`
+    → log → `Stop` hook → autoload **last**. `SHIPPED_FILES` moved into it and
+    `record_version.py` imports the list. Five unit tests, including a project with two
+    autoloads asserting `DevTools` lands after both and nothing else moves.
+    `check_templates.py stage_assemble` now builds its scratch through `full`, and the
+    slash command's step 3 is one call with steps 4–10 kept as spec + fallback.
+
+- Value: **warranted** — the controls did work the review would not have.
+  - Expected: ten point fixes from ten well-written reports.
+  - Got: three of the ten reports proposed a fix that would not have fixed the bug
+    (H-051's stretch-transform hypothesis, gh#6.2's grace re-poll, gh#10.1's
+    `_discovery_errors`), and each was found by planting the defect first. Two more
+    bugs nobody had filed fell out of the plants (`--hide` hanging headless; a hidden
+    `CanvasLayer` reading as visible).
+  - Cheaper: the 40-second scratch probe before each fix, every time. It is the only
+    step that told the filed hypothesis from the mechanism.
+
+- Gap: **a `--hide` that hangs headless was invisible for four releases** because no
+  stage sent the flag; the verb's own docstring advertised the case. Same class as
+  [H-035]: a verb argument nobody drives in `check_templates.py` is untested, and the
+  contract table only sends each verb's happy-path args.
+  - [H-054] status: fixed | fixed-in: 0.20.0 | seen: 1 | harness: 0.19.0
+  - Improvement: shipped — `check_geometry_caveat_and_hide` drives `--hide` three ways.
+    Remaining: an audit of which documented verb *arguments* the contract table never
+    sends; that list is the next set of untested paths.
+
+- Gap: **`pid_alive` was wrong on Windows since it was written**, and every survivor
+  warning on this platform was noise. Nothing measured liveness against a known-dead pid.
+  - [H-055] status: fixed | fixed-in: 0.20.0 | seen: 1 | harness: 0.19.0
+  - Improvement: shipped. A `tools/` unit test that spawns a child, kills it and asserts
+    `pid_alive` flips would pin it without an engine — not written this turn.
+
+- Gap (working practice, not code): **I killed Godot by image name** to clear a hung
+  probe and took a second process with it — most likely another session's `moving-in`
+  game, which was live on this machine at the time (a fresh one appeared 20s later).
+  Nothing in the repo said not to.
+  - [H-056] status: fixed | fixed-in: 0.20.0 | seen: 1 | harness: 0.19.0
+  - Improvement: shipped as a `CLAUDE.md` gotcha — kill the owner-file pid or the
+    handle you hold, never the image.
+
+- Not done, deliberately, and why: bead **mqy** (re-run the A/B on a weaker model) and
+  **1hb** (regression-under-feature-addition) are the two beads that would actually
+  answer "is it useful". They need the rig that [H-052] destroyed, and rebuilding it is
+  its own session; `full` mode is the prerequisite it lacked. **[H-050]** (`input_tap`
+  double-toggling a polled+handled action) is real and measurement-relevant but needs a
+  frame-timing probe I did not want to rush beside ten other changes. Beads 2ih, ik8,
+  1kh, 0hk and the H-02x/H-03x/H-04x concurrency and telemetry items are unchanged.
+
+**Validation run this turn:** `python tools/check_templates.py` — OK, new lines:
+`stage 2 assemble: ... (installed by scaffold_install.py full: 13 shipped files, config,
+devtools_ext, test seed, CLAUDE.md, log, autoload)`, `stage 4 tests: uncompilable --file
+target -> verdict names the compile failure, not the selector`, `stage 4 tests: no class
+cache -> exit 2 naming --import (H-029 control)`, `stage 5 bridge: findings headless ->
+geometry_trustworthy=false, 2 of 4 finding(s) carry the H-051 caveat (geometry codes
+only)`, `stage 5 bridge: node-bounds headless carries the H-051 caveat; screenshot --hide
+refuses a missing node and a Node3D by name, accepts a CanvasLayer`, `... performance
+says tree_paused=True`. Confirmed to FAIL: the gh#10 control on the first
+implementation, the `--hide` control on the pre-existing hang, and the H-051 checks
+under a mutation returning `""` (both printed FAIL, mutation reverted). `python -m
+unittest discover -s tools` — 24 tests OK (was 17). `python tools/record_version.py
+--record` then `--check` — OK at `0.20.0`, 13 shipped files, 48 bus verbs + 50 CLI
+commands documented. No static-analysis template changed, so no real-project
+false-positive run was owed; the live-bus verbs were exercised on a scratch project only
+(a real project's game was in use by another session).

@@ -33,22 +33,11 @@ REPO = Path(__file__).resolve().parent.parent
 PLUGIN_JSON = REPO / ".claude-plugin" / "plugin.json"
 HISTORY = REPO / "harness_history.json"
 
-# Files copied verbatim into a target project, relative to templates/.
-SHIPPED = [
-    "addons/godot_selftest/dev_tools.gd",
-    "addons/godot_selftest/scene_validator.gd",
-    "tools/lint_project.gd",
-    "tools/run_tests.gd",
-    "tools/eval.gd",
-    "tools/capture.gd",
-    "tools/devtools.py",
-    "tools/check_devtools_log.py",
-    "tools/upstream_gaps.py",
-    "tools/verify_ledger.py",
-    "tools/import_check.py",
-    "tools/name_check.py",
-    "tools/coverage_check.py",
-]
+# Files copied verbatim into a target project, relative to templates/. One list,
+# owned by the installer: what `scaffold_install.py full` installs is exactly what
+# this stamps and hashes, so a shipped file cannot be added to one and not the other.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from scaffold_install import SHIPPED_FILES as SHIPPED  # noqa: E402
 
 # Files that must be byte-identical to their template (this repo keeps runnable copies).
 MIRRORED = {"tools/upstream_gaps.py": "tools/upstream_gaps.py"}

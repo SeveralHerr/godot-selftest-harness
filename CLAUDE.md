@@ -186,6 +186,11 @@ probe is what found that, and the fix it produced was one line instead of a pass
   holds no copy of them and no stash, reflog or Recycle Bin entry survives the command.
   This already cost the entire A/B study harness ([H-052]): its conclusions survived only
   because they had been written into `log-devtools.md` first.
+- **Never kill Godot by image name** (`taskkill /IM Godot*`, `pkill godot`). Other
+  sessions run games on this machine at the same time — a `/verify` on `moving-in`
+  was live during a 0.20.0 probe. Kill the pid the bus owner file names
+  (`devtools_owner.json` → `pid`), or the `Popen` handle you hold; `check_templates.py`
+  already kills its own scratch game in a `finally`.
 - **Scoping a subagent to a file list does not scope it away from `git clean`.** When
   fanning work out, say *"you may edit only the files named above; run no repo-wide git
   command of any kind"* in the prompt, and give untracked work a recoverable object

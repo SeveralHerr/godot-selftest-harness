@@ -14,14 +14,14 @@ extends Node
 ## extension loads AFTER the generic handlers, a project may override a generic
 ## verb by registering the same action string (last-writer-wins).
 
-# harness-version: 0.19.0
+# harness-version: 0.20.0
 # --- Constants ---
 
 ## Version of the godot-selftest-harness these files were copied from. Reported by the
 ## `harness_version` verb and stamped into every copied tool script, so a gap logged
 ## against a project can name the version it was seen on, and a refresh can tell a
 ## stale file from a customized one. Bump with .claude-plugin/plugin.json.
-const HARNESS_VERSION: String = "0.19.0"
+const HARNESS_VERSION: String = "0.20.0"
 
 ## Default bus filenames. With a session id (see _resolve_session) the id is spliced in
 ## before the extension, so two instances can each own a bus in the same user:// dir.
@@ -685,12 +685,30 @@ func _write_result(action: String, result: Dictionary) -> void:
 	var status: Dictionary = _collect_status()
 	if not status.is_empty():
 		response["status"] = status
-	var file: FileAccess = FileAccess.open(_results_path, FileAccess.WRITE)
+	# Write-then-rename, so the reply file only ever exists complete (gh#5).
+	# A plain open(WRITE) on the target holds a brief exclusive lock on Windows,
+	# and a client clearing a stale reply in that window got WinError 32 -- after
+	# the verb had already taken effect, so it could not tell whether to retry.
+	# The client also keeps a bounded unlink retry for older game-side harnesses.
+	var tmp_path: String = _results_path + ".tmp"
+	var file: FileAccess = FileAccess.open(tmp_path, FileAccess.WRITE)
 	if file == null:
-		_write_log("error", "Failed to write result file", {"error": FileAccess.get_open_error()})
+		_write_log("error", "Failed to write result file", {"error": FileAccess.get_open_error(), "path": tmp_path})
 		return
 	file.store_string(JSON.stringify(response, "  "))
 	file.close()
+	var err: Error = DirAccess.rename_absolute(tmp_path, _results_path)
+	if err != OK:
+		# The client may be mid-read of a stale reply, which on Windows blocks the
+		# replace. Fall back to the direct write rather than lose the reply.
+		_write_log("warn", "Atomic rename of result file failed; writing directly", {"error": err})
+		var direct: FileAccess = FileAccess.open(_results_path, FileAccess.WRITE)
+		if direct == null:
+			_write_log("error", "Failed to write result file", {"error": FileAccess.get_open_error()})
+			return
+		direct.store_string(JSON.stringify(response, "  "))
+		direct.close()
+		DirAccess.remove_absolute(tmp_path)
 
 
 ## Records the verb about to be dispatched, and deletes the record once it returns.
@@ -801,31 +819,59 @@ func _cmd_screenshot(args: Dictionary) -> Dictionary:
 
 	# Collect what to hide, remembering each node's PREVIOUS state so a node that
 	# was already invisible is not "restored" into visibility.
-	var to_hide: Array[CanvasItem] = []
+	#
+	# CanvasItem OR CanvasLayer (gh#5). CanvasLayer extends Node, not CanvasItem,
+	# and it is what nearly every HUD, pause menu and overlay is rooted in -- so
+	# the CanvasItem-only version silently dropped the exact node this flag exists
+	# to hide, warned, and handed back a HUD-bearing capture as the thing asked
+	# for. Both classes have the same `visible` semantics. Anything else named is
+	# an ERROR, not a warning: a capture that ignored --hide is worse than none.
+	var to_hide: Array[Node] = []
 	var was_visible: Array[bool] = []
 	var hidden_paths: Array = []
+	var unhideable: Array = []
 	for entry: Variant in (args.get("hide", []) if args.get("hide") is Array else []):
 		var found: Dictionary = _resolve_node(str(entry))
-		if found["node"] is CanvasItem:
-			to_hide.append(found["node"] as CanvasItem)
+		var n: Node = found["node"]
+		if n is CanvasItem or n is CanvasLayer:
+			to_hide.append(n)
+		elif n == null:
+			unhideable.append("%s: no such node" % str(entry))
+		else:
+			unhideable.append("%s: %s has no visibility (not a CanvasItem or CanvasLayer)" % [
+				str(entry), n.get_class()])
 	for entry: Variant in (args.get("hide_group", []) if args.get("hide_group") is Array else []):
+		var matched: int = 0
 		for node: Node in get_tree().get_nodes_in_group(str(entry)):
-			if node is CanvasItem:
-				to_hide.append(node as CanvasItem)
+			if node is CanvasItem or node is CanvasLayer:
+				to_hide.append(node)
+				matched += 1
+		if matched == 0:
+			unhideable.append("group '%s': no CanvasItem or CanvasLayer in it" % str(entry))
+	if not unhideable.is_empty():
+		return {
+			"success": false,
+			"message": "--hide matched nothing it could hide; no capture written. " + "; ".join(PackedStringArray(unhideable)),
+			"data": {"unhideable": unhideable},
+		}
 
-	for item: CanvasItem in to_hide:
-		was_visible.append(item.visible)
+	for item: Node in to_hide:
+		was_visible.append(bool(item.get("visible")))
 		hidden_paths.append(str(item.get_path()))
-		item.visible = false
+		item.set("visible", false)
 
-	# One frame so the hidden nodes are actually off the rendered image.
+	# One frame so the hidden nodes are actually off the rendered image. The
+	# visibility change lands in THIS frame's draw; process_frame resumes at the
+	# start of the next, after that draw. NOT RenderingServer.frame_post_draw:
+	# headless never draws, so that signal never fires and the verb hung forever
+	# with the flag (found by check_templates once --hide got a positive control).
 	if not to_hide.is_empty():
-		await RenderingServer.frame_post_draw
+		await get_tree().process_frame
 
 	var image: Image = get_viewport().get_texture().get_image()
 
 	for i: int in to_hide.size():
-		to_hide[i].visible = was_visible[i]
+		to_hide[i].set("visible", was_visible[i])
 
 	if image == null:
 		return {"success": false, "message": "Failed to capture viewport image"}
@@ -1697,9 +1743,16 @@ func _cmd_performance(args: Dictionary) -> Dictionary:
 		"devtools_set_speed": _devtools_set_speed,
 		# Frames since the orphan baseline was captured; -1 before capture.
 		"orphan_baseline_age_frames": (int(Engine.get_process_frames()) - _orphan_baseline_frame) if _orphan_baseline_frame >= 0 else -1,
+		# gh#6: the bridge is PROCESS_MODE_ALWAYS, so it answers on a paused tree
+		# -- with a plausible FPS for a game that is not stepping. A whole /verify
+		# phase validated a title-screen pause as healthy on those numbers. The
+		# fact goes in the reply, so a reader who skipped `ping` still sees it.
+		"tree_paused": get_tree().paused,
 	}
 
 	var message: String = "Performance metrics collected"
+	if get_tree().paused:
+		message += " on a PAUSED tree - FPS and growth here describe a game that is not stepping"
 	if baseline_captured:
 		message += " (orphans %d, baseline %d, growth %d)" % [orphan_nodes, _orphan_baseline, orphan_growth]
 	else:
@@ -2693,7 +2746,12 @@ func _is_effectively_visible(node: Node) -> bool:
 		if current is CanvasItem and not current.visible:
 			return false
 		if current is CanvasLayer:
-			break
+			# The layer's own `visible` counts (gh#5 sweep): a pause menu whose
+			# CanvasLayer is hidden was reported as visible, so its buttons were
+			# "reachable" and its panels were laid out for checks nobody could see.
+			# The walk stops here either way -- a CanvasLayer renders independently
+			# of any CanvasItem above it.
+			return (current as CanvasLayer).visible
 		current = current.get_parent()
 	return true
 
@@ -2757,6 +2815,37 @@ func _screen_reference_rect() -> Rect2:
 	if designed.x < 2.0 or designed.y < 2.0:
 		return rect
 	return Rect2(Vector2.ZERO, designed)
+
+
+## Why a screen-space rect measured HEADLESS must not be read as what a player
+## sees (H-051). Empty string when the geometry is the real thing.
+##
+## Headless has no window: get_window().size is 64x64 and window_get_size() is
+## 0x0, whatever the project designed. Under a stretch mode the root viewport
+## still lays anchored Controls out against the designed size, so most geometry
+## is right -- but anything the game positions FROM the window size lands where
+## no player ever sees it. Reproduced: a panel centred with
+## `(get_window().size - size) / 2` on an 800x600 design sits at (-368,-268)
+## headless and at (0,0) windowed. The verb reported the headless number
+## faithfully, the caller read it as the player's screen, and a "whole end-of-run
+## screen off-viewport" defect reached a published report before a windowed
+## screenshot overturned it. So every verb that returns screen geometry carries
+## this alongside the number, and the client prints it next to any off-viewport
+## verdict, because a well-formed rect that is not measuring what the reader
+## thinks is the failure this whole file is written against.
+func _geometry_caveat() -> String:
+	if DisplayServer.get_name() != "headless":
+		return ""
+	var designed: Vector2 = Vector2(
+		float(ProjectSettings.get_setting("display/window/size/viewport_width", 0)),
+		float(ProjectSettings.get_setting("display/window/size/viewport_height", 0)))
+	var win: Vector2i = get_window().size if get_window() != null else Vector2i.ZERO
+	return ("measured HEADLESS: the window is %dx%d, not the designed %dx%d (stretch mode '%s'). "
+		+ "Anchored/viewport-relative layout is unaffected, but anything the game positions from "
+		+ "the window size (get_window().size, DisplayServer.window_get_size) lands elsewhere than "
+		+ "a player sees. Confirm any off-viewport verdict windowed before reporting it.") % [
+		win.x, win.y, int(designed.x), int(designed.y),
+		str(ProjectSettings.get_setting("display/window/stretch/mode", "disabled"))]
 
 
 ## Where a Control actually lands on screen.
@@ -2846,6 +2935,8 @@ func _cmd_validate_ui(args: Dictionary) -> Dictionary:
 				"w": safe_rect.size.x,
 				"h": safe_rect.size.y,
 			},
+			"geometry_trustworthy": _geometry_caveat().is_empty(),
+			"geometry_caveat": _geometry_caveat(),
 		},
 	}
 
@@ -3138,6 +3229,8 @@ func _cmd_get_ui_snapshot(_args: Dictionary) -> Dictionary:
 		"data": {
 			"viewport": {"width": int(vp.x), "height": int(vp.y)},
 			"elements": elements,
+			"geometry_trustworthy": _geometry_caveat().is_empty(),
+			"geometry_caveat": _geometry_caveat(),
 		},
 	}
 
@@ -3195,7 +3288,7 @@ func _snapshot_ui_recursive(node: Node, vp: Vector2, elements: Array) -> void:
 ## CanvasItem-only by construction -- there is no screen rect for a
 ## MeshInstance3D. `aabb` is the 3D counterpart, in world units.
 ## data keys: name, type, path, global_rect{x,y,w,h}, visible, modulate_a, text,
-## in_viewport, size_source.
+## in_viewport, size_source, canvas_scale, geometry_trustworthy, geometry_caveat.
 func _cmd_get_node_bounds(args: Dictionary) -> Dictionary:
 	var node_path: String = args.get("node_path", "")
 	if node_path.is_empty():
@@ -3260,6 +3353,8 @@ func _cmd_get_node_bounds(args: Dictionary) -> Dictionary:
 				and rect.position.y + rect.size.y <= vp.y,
 			"size_source": size_source,
 			"canvas_scale": {"x": canvas_scale.x, "y": canvas_scale.y},
+			"geometry_trustworthy": _geometry_caveat().is_empty(),
+			"geometry_caveat": _geometry_caveat(),
 		},
 	}
 
@@ -4485,6 +4580,8 @@ func _cmd_reachable_ui(_args: Dictionary) -> Dictionary:
 			"count": out.size(),
 			"reachable": reachable,
 			"viewport": {"w": vp.x, "h": vp.y},
+			"geometry_trustworthy": _geometry_caveat().is_empty(),
+			"geometry_caveat": _geometry_caveat(),
 		},
 	}
 
@@ -4549,10 +4646,11 @@ func _collect_reachable(node: Node, vp: Vector2, out: Array) -> void:
 ##         "use_baseline": bool, "baseline_write": bool } -- the last two pass
 ## straight through to the UI findings baseline.
 ##
-## data keys: findings (Array of {source, code, severity, path, message}),
-## counts (source -> int), checks_run (Array[String]), checks_skipped (Array of
-## {check, reason}), viewport {w, h}, baseline_in_use, new_count,
-## pre_existing_count.
+## data keys: findings (Array of {source, code, severity, path, message} -- a
+## geometry finding measured headless also carries caveat), counts (source ->
+## int), checks_run (Array[String]), checks_skipped (Array of {check, reason}),
+## viewport {w, h}, baseline_in_use, new_count, pre_existing_count,
+## geometry_trustworthy, geometry_caveat.
 func _cmd_findings(args: Dictionary) -> Dictionary:
 	var include_scenes: bool = bool(args.get("scenes", true))
 	var findings: Array = []
@@ -4560,6 +4658,10 @@ func _cmd_findings(args: Dictionary) -> Dictionary:
 	var checks_run: Array = []
 	var checks_skipped: Array = []
 	var vp: Vector2 = _screen_reference_rect().size
+	# H-051: a ui_layout / ui_reachable verdict measured headless is stamped
+	# here rather than only on the underlying verb, because this aggregate
+	# re-shapes each reply and would otherwise drop the flag on the way through.
+	var caveat: String = _geometry_caveat()
 
 	# Carried through from the UI baseline even when the UI check is skipped, so
 	# the client never has to guess whether a key is absent or merely false.
@@ -4598,6 +4700,8 @@ func _cmd_findings(args: Dictionary) -> Dictionary:
 				str(issue.get("severity", "warning")),
 				str(issue.get("path", "")),
 				str(issue.get("message", "")))
+			if not caveat.is_empty() and str(issue.get("code", "")) in GEOMETRY_CODES:
+				findings[findings.size() - 1]["caveat"] = caveat
 		checks_run.append("ui_layout")
 
 	# --- 2. ui_reachable: reachable_ui's OFF-SCREEN / BLOCKED BY -------------
@@ -4628,6 +4732,8 @@ func _cmd_findings(args: Dictionary) -> Dictionary:
 			_append_finding(findings, counts, "ui_reachable", "unreachable_ui", "warning",
 				str(control.get("path", "")),
 				"%s is interactive but cannot be hit: %s" % [described, why])
+			if not caveat.is_empty() and not on_screen:
+				findings[findings.size() - 1]["caveat"] = caveat
 		checks_run.append("ui_reachable")
 
 	# --- 3. signal_unconnected ----------------------------------------------
@@ -4717,8 +4823,20 @@ func _cmd_findings(args: Dictionary) -> Dictionary:
 			"baseline_in_use": baseline_in_use,
 			"new_count": new_count,
 			"pre_existing_count": pre_existing_count,
+			"geometry_trustworthy": caveat.is_empty(),
+			"geometry_caveat": caveat,
 		},
 	}
+
+
+## validate_ui codes whose verdict is a screen-space position -- the ones a
+## headless run can get wrong for the reason _geometry_caveat() explains.
+## ui_transparent, ui_zero_size, text overflow and tap-target size are measured
+## in the node's own units and are the same headless or windowed.
+const GEOMETRY_CODES: Array[String] = [
+	"ui_overflow", "ui_negative_pos", "ui_outside_safe_area", "interactive_overlap",
+	"container_layout_drift",
+]
 
 
 func _append_finding(out: Array, counts: Dictionary, source: String, code: String,

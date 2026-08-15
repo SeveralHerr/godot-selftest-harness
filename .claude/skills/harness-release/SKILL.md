@@ -119,7 +119,24 @@ seconds here is the cheapest step in this file and has the best hit rate. Candid
 the harness installed: `../gather`, `../findmyballs`, `../moving-in`.
 
 If you added a check, it must **plant the defect it claims to detect** and be confirmed
-to fail before shipping. A stage that can only report success is not a stage.
+to fail before shipping. A stage that can only report success is not a stage. The best
+evidence is a check that failed *organically* while you built the fix (in 0.20.0 two of
+three new controls did — one caught the wrong first implementation, one caught an
+unrelated headless hang). For any check that has never been seen failing, run a mutation:
+
+```bash
+cp templates/addons/godot_selftest/dev_tools.gd "$TEMP/dev_tools.gd.orig"
+# one-line edit that disables the behaviour the check asserts (e.g. make the
+# helper return "" / false unconditionally), then:
+python tools/check_templates.py > "$TEMP/mutation.log" 2>&1; echo "exit=$?"   # expect 1
+grep FAIL "$TEMP/mutation.log"                                                # expect YOUR check
+cp "$TEMP/dev_tools.gd.orig" templates/addons/godot_selftest/dev_tools.gd
+git diff --stat templates/addons/godot_selftest/dev_tools.gd                  # prove the restore
+```
+
+**Do not edit the mutated file while the run is in flight** — the restore overwrites
+whatever is on disk. Do other work (docs, log) for the five minutes, and quote the FAIL
+line it printed in the log entry.
 
 ## 4. Log the turn
 
@@ -156,8 +173,13 @@ bd list --status=open
 
 ## 6. Commit and push
 
-Only when the user has asked. **Work on a `release/X.Y.Z` branch, never directly on
-`master`.** Every release in the log arrived that way — `Merge pull request #8 from
+Only when the user has asked — and be precise about what "asked" covers. An unattended
+"tackle these issues / cut the release" turn authorizes the *branch commit* (it is
+reversible, and every past release arrived as one); it does **not** authorize a push or
+a PR, which are outward-facing and stay a separate, explicit ask. If even the branch
+commit was not clearly asked for, `git add -A` so the work has a recoverable object,
+and hand off with the exact commands. **Work on a `release/X.Y.Z` branch, never directly
+on `master`.** Every release in the log arrived that way — `Merge pull request #8 from
 SeveralHerr/release/0.18.0`, `#4 from SeveralHerr/fix/...` — and the standing rule in the
 user's global `CLAUDE.md` is *never commit to main*. Cut the branch before the first
 commit; if you are already on `master` with the work in the tree,
