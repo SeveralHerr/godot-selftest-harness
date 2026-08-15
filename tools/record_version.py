@@ -47,6 +47,7 @@ SHIPPED = [
     "tools/verify_ledger.py",
     "tools/import_check.py",
     "tools/name_check.py",
+    "tools/coverage_check.py",
 ]
 
 # Files that must be byte-identical to their template (this repo keeps runnable copies).

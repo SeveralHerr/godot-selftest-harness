@@ -1,6 +1,18 @@
 extends RefCounted
 
-## Example unit test — delete or replace once you add real tests.
+## THIS PROJECT'S SELFTEST — add to it, don't start a new one beside it.
+##
+## When you verify a change, the checks you write belong here. Not in a scratch
+## script, not in the chat transcript. A check left here is re-run by /verify on
+## every subsequent change and inherited by the next session; the same check
+## written into a throwaway is worth one run and then gone. `run_tests.gd` prints
+## `Suite: N test script(s)` so a fresh session can see how much prior checking
+## it is standing on.
+##
+## Split into more `test_*.gd` files under this directory once a single file gets
+## unwieldy — the runner discovers all of them. The two sanity tests below exist
+## so a fresh install has something that passes; delete them once real checks
+## replace them, but keep the file.
 ##
 ## The headless runner (tools/run_tests.gd) auto-discovers every test_*.gd file
 ## under the configured test_dir, instantiates it, calls setup() before each
@@ -23,6 +35,10 @@ extends RefCounted
 ##
 ## Test methods may be coroutines: if a method awaits, the runner awaits it too.
 ## Methods that don't await are unaffected.
+##
+## What does NOT belong here: anything needing a live, playing game — real input,
+## physics over time, a scene mid-transition. Those are the bridge's job
+## (`python tools/devtools.py`), driven by /verify Phase 4.
 
 var _T  # assertion helper injected by run_tests.gd
 

@@ -140,7 +140,7 @@ Same installer, for `res://tools/`:
   --plugin-root "${CLAUDE_PLUGIN_ROOT}" \
   tools/lint_project.gd tools/run_tests.gd tools/eval.gd tools/capture.gd tools/devtools.py \
   tools/check_devtools_log.py tools/upstream_gaps.py tools/verify_ledger.py \
-  tools/import_check.py tools/name_check.py
+  tools/import_check.py tools/name_check.py tools/coverage_check.py
 chmod +x "$ROOT/tools/devtools.py" 2>/dev/null || true
 ```
 
@@ -202,17 +202,24 @@ fi
 cp "${CLAUDE_PLUGIN_ROOT}/templates/devtools_ext/commands.example.gd" "$ROOT/devtools_ext/commands.example.gd"
 ```
 
-## Step 6 — Seed tests and a sequence example (only if empty)
+## Step 6 — Seed the project's selftest and a sequence example (only if empty)
 
-Create `res://test/unit/` and copy `test_example.gd` **only if the test dir is
+Create `res://test/unit/` and copy `test_selftest.gd` **only if the test dir is
 missing or empty** (do not litter a project that already has tests). Always copy
 `test/sequences/smoke.json` as a schema example (safe to refresh).
+
+The seeded file is named `test_selftest.gd`, not `test_example.gd`, and its header
+says *add to this* rather than *delete this*. That naming is the point: a model
+asked to verify a change will write a selftest whether or not one exists, and a
+file that reads as disposable gets a throwaway written beside it instead of being
+extended. Installs predating 0.19.0 keep their `test_example.gd` — the dir is
+non-empty, so this step leaves it alone, which is the correct behavior.
 
 ```bash
 mkdir -p "$ROOT/test/unit" "$ROOT/test/sequences"
 if [ -z "$(ls -A "$ROOT/test/unit" 2>/dev/null)" ]; then
-  cp "${CLAUDE_PLUGIN_ROOT}/templates/test/unit/test_example.gd" "$ROOT/test/unit/test_example.gd"
-  echo "Seeded test/unit/test_example.gd"
+  cp "${CLAUDE_PLUGIN_ROOT}/templates/test/unit/test_selftest.gd" "$ROOT/test/unit/test_selftest.gd"
+  echo "Seeded test/unit/test_selftest.gd — this project's selftest; extend it, don't replace it"
 else
   echo "test/unit already has files — left untouched."
 fi
@@ -728,12 +735,15 @@ sequence → performance → quit).
   `import_check.py` (runs `--import` and fails on the parse errors Godot prints
   while still exiting 0), and `name_check.py` (resolves every name the scripts
   mention against the project's own declarations and a cached engine API index —
-  the one gate that never opens the project, so N agents can run it at once).
+  the one gate that never opens the project, so N agents can run it at once), and
+  `coverage_check.py` (reports which classes of defect this project's tests never
+  ask about — also engine-free and parallel-safe).
   Each installed `.gd` also gets a `.uid` sidecar if it arrived without one.
 - `res://devtools_ext/commands.gd` — your project's command registry extension
   (plus `commands.example.gd` for reference).
-- `res://test/unit/` and `res://test/sequences/` — a seed unit test and a smoke
-  sequence example.
+- `res://test/unit/test_selftest.gd` and `res://test/sequences/` — the project's
+  selftest (the documented home for every check a session writes, re-run by
+  `/verify` on every change) and a smoke sequence example.
 - A `DevTools` autoload line in `project.godot`.
 - `<ROOT>/CLAUDE.md` — a lean, reference-style harness guidance section wrapped in
   `<!-- BEGIN godot-selftest-harness -->` / `<!-- END godot-selftest-harness -->`

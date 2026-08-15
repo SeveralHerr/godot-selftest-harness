@@ -14,14 +14,14 @@ extends Node
 ## extension loads AFTER the generic handlers, a project may override a generic
 ## verb by registering the same action string (last-writer-wins).
 
-# harness-version: 0.18.0
+# harness-version: 0.19.0
 # --- Constants ---
 
 ## Version of the godot-selftest-harness these files were copied from. Reported by the
 ## `harness_version` verb and stamped into every copied tool script, so a gap logged
 ## against a project can name the version it was seen on, and a refresh can tell a
 ## stale file from a customized one. Bump with .claude-plugin/plugin.json.
-const HARNESS_VERSION: String = "0.18.0"
+const HARNESS_VERSION: String = "0.19.0"
 
 ## Default bus filenames. With a session id (see _resolve_session) the id is spliced in
 ## before the extension, so two instances can each own a bus in the same user:// dir.
@@ -75,6 +75,21 @@ const STEP_TIME_MAX_SECONDS: float = 60.0
 ## killed by a runtime error mid-await (which never resumes, so it never clears the
 ## guard) must not brick the bus until the game is restarted.
 const DISPATCH_WATCHDOG_MSEC: int = 300000
+
+## Every check the `findings` verb aggregates, in report order. Named here rather
+## than implied by the loop so the reply can carry a denominator: "reports clean
+## while doing nothing" is this repo's documented failure mode, and a consolidated
+## report is the easiest place for a check to disappear from without anyone
+## noticing. Every id below ends up in exactly one of data["checks_run"] /
+## data["checks_skipped"], and the client prints both. These ids are also the
+## `source` values on the findings themselves and the keys of data["counts"].
+const FINDINGS_CHECKS: Array = [
+	"ui_layout",
+	"ui_reachable",
+	"signal_unconnected",
+	"performance",
+	"scene_validation",
+]
 
 ## Default configuration, used verbatim when CONFIG_PATH is missing. Keys read by
 ## this core: validator_script, extension_script, hud_layer_name, scan_root,
@@ -491,6 +506,7 @@ func _register_generic_handlers() -> void:
 	register_command("sample_pixels", _cmd_sample_pixels)
 	register_command("curve", _cmd_curve)
 	register_command("reachable_ui", _cmd_reachable_ui)
+	register_command("findings", _cmd_findings)
 
 
 func _load_extension() -> void:
@@ -4503,6 +4519,253 @@ func _collect_reachable(node: Node, vp: Vector2, out: Array) -> void:
 				})
 	for child: Node in node.get_children():
 		_collect_reachable(child, vp, out)
+
+
+## Every check the harness can run against a live game, in one call, normalized
+## into one flat findings list. Zero config, zero assertions, one exit code.
+##
+## Why this exists: each individual verb answers a different question in a
+## different shape -- validate_ui returns `issues`, reachable_ui returns
+## `controls` with two "unreachable" flags buried in them, performance returns
+## eighteen metrics of which two are thresholded, validate_all returns a
+## per-scene tree. Getting a single "is anything wrong" answer meant five calls
+## and five bespoke readers, so in practice it meant one call and four checks
+## nobody ran.
+##
+## Nothing here re-implements a check. Each branch calls the existing `_cmd_*`
+## and normalizes its reply, so a fix to validate_ui is a fix here too and the
+## two can never drift into disagreeing about the same scene. The one new check
+## is `signal_unconnected` (see _collect_unconnected_signals).
+##
+## checks_run / checks_skipped are the point as much as the findings are. A
+## consolidated report is where a check that silently did nothing looks exactly
+## like a check that passed, so a check that could not run says so by name and
+## reason, and the client prints the denominator. Sub-conditions that were
+## skipped inside a check that DID run are reported with a dotted id
+## ("performance.orphan_growth"); the client counts only dotless ids toward the
+## denominator.
+##
+## args: { "scenes": bool (default true -- the slow one, it loads every scene),
+##         "use_baseline": bool, "baseline_write": bool } -- the last two pass
+## straight through to the UI findings baseline.
+##
+## data keys: findings (Array of {source, code, severity, path, message}),
+## counts (source -> int), checks_run (Array[String]), checks_skipped (Array of
+## {check, reason}), viewport {w, h}, baseline_in_use, new_count,
+## pre_existing_count.
+func _cmd_findings(args: Dictionary) -> Dictionary:
+	var include_scenes: bool = bool(args.get("scenes", true))
+	var findings: Array = []
+	var counts: Dictionary = {}
+	var checks_run: Array = []
+	var checks_skipped: Array = []
+	var vp: Vector2 = _screen_reference_rect().size
+
+	# Carried through from the UI baseline even when the UI check is skipped, so
+	# the client never has to guess whether a key is absent or merely false.
+	var baseline_in_use: bool = false
+	var new_count: int = 0
+	var pre_existing_count: int = 0
+
+	var scene: Node = get_tree().current_scene
+
+	# --- 1. ui_layout: whatever validate_ui already applies -------------------
+	if scene == null:
+		checks_skipped.append({
+			"check": "ui_layout",
+			"reason": "no current scene (get_tree().current_scene is null)",
+		})
+	else:
+		var ui_args: Dictionary = {}
+		if args.has("baseline_write"):
+			ui_args["baseline_write"] = bool(args["baseline_write"])
+		if args.has("use_baseline"):
+			ui_args["use_baseline"] = bool(args["use_baseline"])
+		var ui: Dictionary = _cmd_validate_ui(ui_args)
+		var ui_data: Dictionary = ui.get("data", {})
+		baseline_in_use = bool(ui_data.get("baseline_in_use", false))
+		new_count = int(ui_data.get("new_count", 0))
+		pre_existing_count = int(ui_data.get("pre_existing_count", 0))
+		for issue: Dictionary in ui_data.get("issues", []):
+			# Only NEW findings gate, exactly as validate_ui decides it. A
+			# pre-existing finding is one the project has already accepted; it
+			# stays counted in pre_existing_count (which the client prints) so
+			# it is excluded, not hidden.
+			if baseline_in_use and str(issue.get("baseline", "new")) == "pre_existing":
+				continue
+			_append_finding(findings, counts, "ui_layout",
+				str(issue.get("code", "ui_issue")),
+				str(issue.get("severity", "warning")),
+				str(issue.get("path", "")),
+				str(issue.get("message", "")))
+		checks_run.append("ui_layout")
+
+	# --- 2. ui_reachable: reachable_ui's OFF-SCREEN / BLOCKED BY -------------
+	if scene == null:
+		checks_skipped.append({
+			"check": "ui_reachable",
+			"reason": "no current scene (get_tree().current_scene is null)",
+		})
+	else:
+		var reach: Dictionary = _cmd_reachable_ui({})
+		var reach_data: Dictionary = reach.get("data", {})
+		for control: Dictionary in reach_data.get("controls", []):
+			var blocked: String = str(control.get("blocked_by", ""))
+			var on_screen: bool = bool(control.get("on_screen", true))
+			if on_screen and blocked.is_empty():
+				continue
+			var rect: Dictionary = control.get("rect", {})
+			var label: String = str(control.get("text", ""))
+			var described: String = str(control.get("type", "Control"))
+			if not label.is_empty():
+				described += " '%s'" % label
+			var why: String = "blocked by %s" % blocked
+			if not on_screen:
+				why = "off screen at %.0f,%.0f %.0fx%.0f (viewport %dx%d)" % [
+					float(rect.get("x", 0.0)), float(rect.get("y", 0.0)),
+					float(rect.get("w", 0.0)), float(rect.get("h", 0.0)),
+					int(vp.x), int(vp.y)]
+			_append_finding(findings, counts, "ui_reachable", "unreachable_ui", "warning",
+				str(control.get("path", "")),
+				"%s is interactive but cannot be hit: %s" % [described, why])
+		checks_run.append("ui_reachable")
+
+	# --- 3. signal_unconnected ----------------------------------------------
+	var dangling: Array = []
+	_collect_unconnected_signals(get_tree().root, dangling)
+	for entry: Dictionary in dangling:
+		_append_finding(findings, counts, "signal_unconnected", "signal_unconnected", "warning",
+			str(entry["path"]),
+			"signal '%s' declared by %s is never connected" % [
+				entry["signal"], entry["script"]])
+	checks_run.append("signal_unconnected")
+
+	# --- 4. performance: FPS vs fps_min, orphan GROWTH vs orphan_growth_max --
+	var perf: Dictionary = _cmd_performance({})
+	var perf_data: Dictionary = perf.get("data", {})
+	var fps: float = float(perf_data.get("fps", 0.0))
+	var fps_min: float = float(_config.get("fps_min", 30))
+	if fps <= 0.0:
+		# Not a pass. A launch that has not rendered a frame reports 0, and 0 is
+		# below every threshold there is; gating on it would be noise.
+		checks_skipped.append({
+			"check": "performance.fps",
+			"reason": "engine reports 0 fps (no frame measured yet)",
+		})
+	elif fps < fps_min:
+		_append_finding(findings, counts, "performance", "fps_below_min", "warning", "",
+			"FPS %.1f is below fps_min %.0f" % [fps, fps_min])
+	if not bool(perf_data.get("orphan_baseline_captured", false)):
+		checks_skipped.append({
+			"check": "performance.orphan_growth",
+			"reason": "orphan baseline not sampled yet; growth is not meaningful",
+		})
+	else:
+		var growth: int = int(perf_data.get("orphan_growth", 0))
+		var growth_max: int = int(perf_data.get("orphan_growth_max", 20))
+		if growth > growth_max:
+			_append_finding(findings, counts, "performance", "orphan_growth", "warning", "",
+				"orphans grew %d (max %d)" % [growth, growth_max])
+	checks_run.append("performance")
+
+	# --- 5. scene_validation: validate_all over scan_root -------------------
+	if not include_scenes:
+		checks_skipped.append({
+			"check": "scene_validation",
+			"reason": "disabled by args (scenes=false)",
+		})
+	else:
+		var scenes_result: Dictionary = _cmd_validate_all({})
+		var scenes_data: Dictionary = scenes_result.get("data", {})
+		if not scenes_data.has("scenes"):
+			# validate_all only fails outright when it cannot load the validator.
+			# That is a skip, not a clean scan, and it must say which.
+			checks_skipped.append({
+				"check": "scene_validation",
+				"reason": str(scenes_result.get("message", "validate_all returned no scene list")),
+			})
+		else:
+			for entry: Dictionary in scenes_data["scenes"]:
+				for issue: Dictionary in entry.get("issues", []):
+					_append_finding(findings, counts, "scene_validation",
+						str(issue.get("code", "scene_issue")),
+						str(issue.get("severity", "warning")),
+						str(entry.get("path", "")),
+						str(issue.get("message", "")))
+			checks_run.append("scene_validation")
+
+	# A check that ran and found nothing is a 0, not an absent key: absent means
+	# "did not run", and the two must not read the same.
+	for check: String in checks_run:
+		if not counts.has(check):
+			counts[check] = 0
+
+	var message: String = "%d finding(s) across %d of %d check(s) at %dx%d" % [
+		findings.size(), checks_run.size(), FINDINGS_CHECKS.size(), int(vp.x), int(vp.y)]
+	if not checks_skipped.is_empty():
+		message += " (%d skipped)" % checks_skipped.size()
+
+	return {
+		"success": findings.is_empty(),
+		"message": message,
+		"data": {
+			"findings": findings,
+			"counts": counts,
+			"checks_run": checks_run,
+			"checks_skipped": checks_skipped,
+			"viewport": {"w": vp.x, "h": vp.y},
+			"baseline_in_use": baseline_in_use,
+			"new_count": new_count,
+			"pre_existing_count": pre_existing_count,
+		},
+	}
+
+
+func _append_finding(out: Array, counts: Dictionary, source: String, code: String,
+		severity: String, path: String, message: String) -> void:
+	out.append({
+		"source": source,
+		"code": code,
+		"severity": severity,
+		"path": path,
+		"message": message,
+	})
+	counts[source] = int(counts.get(source, 0)) + 1
+
+
+## Signals a script DECLARES and nothing ever connects to -- the emit that goes
+## nowhere, which is silent at runtime and invisible to every other check here.
+##
+## Only script-declared signals, via Script.get_script_signal_list(). NOT
+## Object.get_signal_list(), which also returns the ~10 built-ins every Node
+## inherits (renamed, tree_entered, child_order_changed, ...). Those are
+## legitimately unconnected on essentially every node in the tree, so including
+## them would put thousands of non-findings in front of the handful that matter
+## and the report would be discarded on sight.
+##
+## The bridge's own subtree is excluded: it is harness plumbing, and a finding a
+## project cannot act on is noise.
+func _collect_unconnected_signals(node: Node, out: Array) -> void:
+	if node == self:
+		return
+	var script: Variant = node.get_script()
+	if script is Script:
+		var owner_script: Script = script as Script
+		for declared: Dictionary in owner_script.get_script_signal_list():
+			var signal_name: String = str(declared.get("name", ""))
+			if signal_name.is_empty() or not node.has_signal(signal_name):
+				continue
+			if node.get_signal_connection_list(signal_name).is_empty():
+				var source_path: String = owner_script.resource_path
+				if source_path.is_empty():
+					source_path = "<built-in script>"
+				out.append({
+					"path": str(node.get_path()),
+					"signal": signal_name,
+					"script": source_path,
+				})
+	for child: Node in node.get_children():
+		_collect_unconnected_signals(child, out)
 
 
 func _load_validator() -> GDScript:

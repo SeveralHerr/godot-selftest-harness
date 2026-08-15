@@ -3671,3 +3671,247 @@ tools/record_version.py --record` then `--check` — OK at `0.18.0`, 12 shipped 
 so it was run against two real scaffolded projects per the false-positive rule
 ([H-030]): `../moving-in` and `../gather` both `errors: 0 | warnings: 0 | advisory: 2`,
 unchanged from before the edit.
+
+## 2026-08-15 — Measuring whether the harness helps: an A/B against a session without it (0.18.0)
+
+Built `experiments/harness-ab/` and ran 8 real sessions (arm A = no plugin, arm B =
+scaffolded + `--plugin-dir`), graded by a 16-check runtime oracle driven over the
+bridge. Result: **no correctness gap** — 16/16 in all 8 sessions, both arms, on both a
+build task and a 6-bug repair task — and a consistent ~1.7x cost difference against
+arm B (repair: $0.96–1.23 vs $1.66–1.78, non-overlapping, 3/3). The cause is not that
+arm B wasted effort: it used the bridge properly (73 launches, 745 verb calls, 20
+verbs, own verbs registered through `devtools_ext/commands.gd`). It is that **arm A
+built its own harness rather than skipping verification** — on the build task a
+`tests/selftest.gd` with 51 runtime assertions plus a Vulkan screenshot pass. The
+tasks were small and fully specified, so ad-hoc verification was cheaper than a
+general tool. Report: `experiments/harness-ab/README.md`.
+
+- Gap: **there is no non-LLM way to install the harness into a project**, so anything
+  automated — CI, a benchmark, a grader, a scratch fixture — has to reimplement the
+  installer. `/scaffold-godot-harness` is an LLM-driven slash command, and
+  `tools/scaffold_install.py` covers only `files` and `config`: it does not wire the
+  `DevTools` autoload, create `devtools_ext/`, seed `test/`, or place
+  `CLAUDE.harness.md`. I wrote `experiments/harness-ab/setup_arms.py` to do those
+  four steps, which means a second definition of "installed" now exists beside the
+  slash command and will drift from it. `check_templates.py` has a third
+  (`stage_assemble`).
+  - [H-047] status: open | seen: 1 | harness: 0.18.0
+  - Improvement: add `scaffold_install.py full --project ROOT`, doing files + config
+    + autoload + `devtools_ext/` + `test/` + `CLAUDE.md` merge, and have both
+    `commands/scaffold-godot-harness.md` and `check_templates.py stage_assemble` call
+    it instead of open-coding those steps. One definition of a complete install,
+    testable directly, and usable by any automation.
+
+- Gap: **the autoload insert has to know to go last, and every caller re-derives it.**
+  Step 10 of the scaffolder documents that `DevTools=` belongs at the END of the
+  `[autoload]` block so project autoloads the extension depends on are ready first.
+  Writing that correctly in `setup_arms.py` took a fix after the naive version put it
+  first — the rule is documented in prose, in one place, and is not shipped as code.
+  Same root cause as [H-047].
+  - [H-048] status: open | seen: 1 | harness: 0.18.0
+  - Improvement: fold it into the `full` mode above so the ordering rule exists once,
+    as code, with a test that a project with its own `[autoload]` block ends up with
+    `DevTools=` after its own entries.
+
+- **Not a gap, recorded so the next session does not re-file it.** I was about to log
+  "two projects with the same `config/name` silently share one `user://` bus" as a
+  third gap, having avoided it by renaming each run's project pre-emptively. The
+  harness already solves this and I simply never looked: `--session <id>` splices the
+  id into all five bus filenames (`_build_bus_paths`, `dev_tools.gd:411`), it has its
+  own **Parallel verification (`--session`)** section in `REFERENCE.md:772`, it is in
+  `CLAUDE.harness.md:247`, and `devtools.py:249` already names this exact condition —
+  *"two instances launched without --session"* — when a reply arrives stamped with a
+  foreign pid. Textbook [H-033]: the `Improvement:` line I had drafted was written
+  from a workaround rather than a diagnosis, and would have added a second isolation
+  mechanism beside the working one. Checking it cost four minutes.
+
+**Validation run this turn:** no `templates/` file was touched, so
+`check_templates.py` was not run — templates unchanged since the last verified run.
+`python tools/record_version.py --check` — OK at `0.18.0`, 12 shipped files, 47 bus
+verbs + 49 CLI commands documented. The new work is confined to `experiments/`, whose
+own oracle was validated by planting 11 defects into a known-good game and asserting
+the judge failed exactly the right checks each time (11/11), per [H-035]; that suite
+caught two real bugs in the oracle before it graded anything — reading `get_state`
+properties from a nonexistent `data["properties"]` key, and ignoring a `set_state`
+`success:false` that was correctly refusing a dotted write into a `Vector2`.
+
+## 2026-08-15 — The A/B control was being told the answer (0.18.0)
+
+Follow-up to the entry above. The first three experiments appended one sentence to
+**both** arms: *"satisfy yourself that the game actually works when it runs — not
+merely that the code looks correct. Use whatever means you have."* That is this
+harness's thesis in plain English, handed to the arm meant to be ignorant of it, and
+it is the likeliest reason 8 sessions showed no gap. Removed it and re-ran.
+
+**With a naive control, the gap appeared.** Build task, n=1 each: arm A scored 15/16,
+shipping `GameOverPanel` at 800x600 positioned `(-368,-268)` — the entire end-of-run
+screen outside the viewport — while signing off *"Confidence: high … 70/67/79 checks,
+0 failures … I checked the real windowed build via captured frames of every state,
+including the game-over and all-clear panels."* Arm B: 16/16, $5.77 vs $5.62 (3%).
+The control still built its own harness unprompted; what it lacked was an on-screen
+assertion, which is exactly what a general tool carries and a hand-rolled one omits.
+
+**The regression experiment found nothing.** Three features added by three fresh
+sessions each on a shared 413-line base: zero regressions in either arm at every
+step. The metric the experiment was designed around came back flat.
+
+- **Correction to my own result, recorded because it nearly shipped.** Arm A's pause
+  scored 3 feature-check failures that are *my oracle's fault, not its code*. It reads
+  `ui_cancel` from both a polled `Input.is_action_just_pressed` and an event handler,
+  deduped per frame — correct for a human, whose key press yields both on one frame.
+  `input_tap` straddles frames and toggles twice, netting zero. Its own comment says
+  it was written for exactly that case.
+  - [H-050] status: open | seen: 1 | harness: 0.18.0
+  - Improvement: `input_tap` on an action a game both polls and listens for is
+    ambiguous, and nothing says so. Either press and release within one frame (so
+    `is_action_just_pressed` and the dispatched event land together, as a real key
+    does), or have the reply name the frames the press and release landed on, so a
+    caller asserting a toggle can see it fired twice. A verb that silently produces a
+    double-toggle reads as "the game's pause is broken".
+
+- **Methodological note for anything measuring this harness.** The oracle was written
+  in the harness's own vocabulary — node paths, properties, injected actions — which
+  is the interface arm B develops against. On any check depending on that interface,
+  arm B is structurally advantaged. [H-050] is that bias caught in the act, and it
+  argues for at least one check per experiment expressed in a way neither arm's tools
+  privilege.
+
+**Validation run this turn:** no `templates/` change; `record_version.py --check` OK at
+`0.18.0`. Oracle validated both directions before use — 11/11 planted defects with the
+right signature, reference implementation of all 3 features 31/31, featureless base
+exactly 16/31 (all 15 feature checks fail, all 16 base checks pass). 16 sessions,
+$46.64.
+
+## 2026-08-15 — Retraction: the one gap the A/B found was my oracle's, not the game's
+
+The entry above reports a naive-control session shipping `GameOverPanel` at
+`(-368,-268)`, "the entire end-of-run screen outside the viewport", as the single
+correctness difference in 16 sessions. **That is wrong and is retracted.** Running the
+same build **windowed** and screenshotting the game-over state shows a correctly
+centred card ("TIME UP / 0 of 8 coins collected / Press R or SPACE to play again"),
+and `get_node_bounds` on the running windowed game reports `{x:0, y:0, w:800, h:600},
+in_viewport: true`. The player sees exactly what they should.
+
+Across the whole study there is now **no measured correctness difference between a
+session with the harness and one without**, on any task, with or without a
+verification nudge.
+
+- Gap: **`get_node_bounds` (and therefore `validate_ui`'s off-screen findings) can be
+  wrong headless for a project using a stretch mode.** Both projects set
+  `window/stretch/mode="canvas_items"` with `aspect="keep"`. Headless there is no
+  window, so the stretch transform that `get_global_transform_with_canvas()` folds in
+  is not the one a player gets, and a correctly-placed Control resolves to a rect
+  outside `_screen_reference_rect()`. It reported `in_viewport: false` on a panel that
+  is dead centre in the real game. The verb was believed, and it produced a false
+  defect that reached a published report.
+  - [H-051] status: open | seen: 1 | harness: 0.18.0
+  - Improvement: when `DisplayServer.get_name() == "headless"` **and**
+    `ProjectSettings.get("display/window/stretch/mode") != "disabled"`, the reply must
+    say so — either refuse the geometry (`success: false`, naming the stretch mode) or
+    carry a `"geometry_trustworthy": false` flag plus the reason, so a caller cannot
+    read an off-viewport verdict as fact. Same for the `ui_offscreen` findings in
+    `validate_ui`. Silence here is the failure mode the whole project is written
+    against: a well-formed number that is not measuring what the caller thinks.
+
+- Method note: this was only caught because someone asked to *look at the game*. Eight
+  judged runs, a planted-defect suite, positive and negative controls, and a published
+  report all passed over it, because every one of them consumed the same headless
+  geometry. A screenshot took two minutes and overturned the headline. `capture.gd`'s
+  "must not be run headless" rule exists for exactly this reason and I did not extend
+  the suspicion to `get_node_bounds`.
+
+## 2026-08-15 — Acting on the A/B: lead with findings, report coverage, host the selftest (0.19.0)
+
+Implemented the three beads the A/B study produced (`ctj`, `mjn`, `djq`), fanning the
+two independent implementation tracks out to subagents and doing the doc inversion
+inline.
+
+- **`findings`** (bead ctj) — one bus verb running all five live checks (`ui_layout`,
+  `ui_reachable`, `signal_unconnected`, `performance`, `scene_validation`) into one
+  flat list, reusing each existing `_cmd_*` rather than re-deriving it. `signal_unconnected`
+  is the only new logic. README and `CLAUDE.harness.md` now lead with it; the verb table
+  is tiered to ten, with the rest named but pushed to `REFERENCE.md`.
+- **`tools/coverage_check.py`** (bead mjn) — reports on the *checks*: eight defect
+  classes, `UNCHECKED` with the cheapest cover or `COVERED` with the file:line that
+  convinced it. Never opens the project, so it is parallel-safe like `name_check.py`.
+- **`test_selftest.gd`** (bead djq) — the seed test renamed from `test_example.gd` and
+  reheaded *add to this*, plus a `Suite: N test script(s)` line on every run and a
+  `/verify` Phase 4 Step 5 that promotes durable checks into `test_dir`.
+
+- Value: **warranted** — validation caught things review would not have.
+  - Expected: the two subagent tracks would compile and I would spend the time on docs.
+  - Got: `stage 1.6 coverage` fired on a mutated `coverage_check.py` with `fixture A
+    reported ui_layout 'covered'. The docstring naming instantiate_ui/get_global_rect
+    flipped it - comments are not coverage.` — the stage can fail, which is the only
+    thing that makes its passing mean anything ([H-035]).
+  - Found: **`coverage_check.py` credited the harness's own seed test as the project's
+    coverage.** `moving-in` and `findmyballs` both reported `ui_layout` COVERED off
+    `test_example.gd:42` — the shipped example, which really does call
+    `_T.instantiate_ui()` and assert `ui.size`, on a two-node HUD it builds in code.
+    Every freshly scaffolded project would have read as covered on day one, for a check
+    about a scene the project does not own. This is precisely the false-COVERED class
+    the tool exists to prevent, and the scratch fixtures could not see it — it took the
+    real-project run the [H-030] rule requires. Fixed by keying the demotion on the
+    enclosing *method* rather than the file, so a project that adds real tests to the
+    seeded file still gets credit; all three real projects now cite their own UI
+    (`UnpackPanel`, `BUSH_SCENE`) instead. A third `check_templates` fixture pins it.
+    Also: a shipped em-dash inside a `print()` in `devtools.py:1804`
+    (`the tree is paused — nothing actually advanced`), the only non-ASCII printed
+    string in the file, found by a subagent hitting it on a Windows console. Fixed.
+    Also: `record_version.py --check` caught eight CLI verbs the tiered cheat-sheet had
+    dropped (`clear`, `drag`, `save-ui-baseline`, `sequence`, `tilemap-region`,
+    `ui-snapshot-diff`, `validate`, `validate-all`) — the doc-coverage rule doing
+    exactly its job against a deliberate doc shrink.
+  - Cheaper: nothing, and the cheapest step was the highest-yield one. Running
+    `coverage_check.py` against three real projects costs about fifteen seconds and is
+    the only thing that saw the seed-evidence bug; 32 green `check_templates` stages,
+    two subagents' own validation and a full read of the diff all passed over it. That
+    is [H-030] restated with a second tool — the scratch project is synthetic and
+    cannot measure what a checker does to a codebase it did not author.
+
+- Gap: **untracked work in this repo is unprotected against a subagent fan-out.**
+  `experiments/harness-ab/` — the A/B study that produced these three beads, untracked
+  at session start — was deleted during a two-agent fan-out. Both agents were scoped in
+  their prompts to a named file each, and `git status` afterwards confirmed neither had
+  modified a file outside its scope, so the deletion came from a repo-wide command
+  (a `git clean`-shaped one) rather than from an edit. Nothing recovered it: git had no
+  copy because it was never committed, `git stash list` was empty, `git fsck
+  --unreachable` held nothing relevant, and the Recycle Bin had no matching entry
+  (a shell `rm` does not populate it). The study's *conclusions* survive in this log's
+  previous entry; `run_ab.py`, `judge.py`, `blind_pack.py`, `setup_arms.py`,
+  `report.py`, the fixtures and the seed do not.
+  - [H-052] status: open | seen: 1 | harness: 0.18.0
+  - Improvement: two lines, both cheap. (1) A `Gotchas that have already cost time`
+    entry in `CLAUDE.md`: *never run `git clean`, `git checkout -- .`, or any repo-wide
+    discard in this repo — `experiments/` and `.devtools/` are untracked by design, and
+    a fan-out amplifies one such command into unrecoverable loss.* (2) A standing line
+    in every fan-out prompt: *you may edit only the files named above; run no repo-wide
+    git command of any kind.* Scoping an agent to a file list does not scope it away
+    from `git clean`, and this session proved the gap the expensive way.
+
+- Gap: **nothing enforces a subagent's declared file ownership.** The fan-out kept two
+  tracks off each other's files by prompt convention alone, and the only check that it
+  held was me reading `git status` afterwards. That worked, but it detects a collision
+  after both agents have finished rather than preventing it.
+  - [H-053] status: open | seen: 1 | harness: 0.18.0
+  - Improvement: before spawning, `git stash create` (or a plain `git add -A` to the
+    index) to give every untracked file a recoverable object, and diff the resulting
+    tree afterwards to see exactly which files each track touched. One command before
+    and one after, and it turns both this gap and [H-052] into recoverable events.
+
+**Validation run this turn:** `python tools/check_templates.py` — OK, 33 stages, including
+three new lines: `stage 1.6 coverage: fixture A -> unchecked, and the docstring trap did
+not flip it` / `fixture B -> covered, evidence test/unit/test_hud.gd:4` / `the shipped
+seed alone -> unchecked, with the seeded call named as a weak signal`, plus
+`stage 5 bridge: findings ran 5 of 5 checks, 4 finding(s) incl. 3 ui_layout on the
+planted defects; --no-scenes -> 4 checks with scene_validation named as skipped` and
+`stage 4 tests: Suite: 1 test script(s) in res://test/unit (matches 1 on disk)`. Stage 1.6
+was confirmed to FAIL before shipping by mutating `coverage_check.py` to report every
+class covered — it printed `fixture A reported ui_layout 'covered'. The docstring naming
+instantiate_ui/get_global_rect flipped it - comments are not coverage.` and the mutation
+was reverted. `python -m unittest discover -s tools` — 17 tests OK.
+`python tools/record_version.py --record` then `--check` — OK at `0.19.0`, 13 shipped
+files, 48 bus verbs + 50 CLI commands documented. Per [H-030], `coverage_check.py` was
+also run against three real scaffolded projects (`../gather` 1340 assertions/53 files,
+`../moving-in` 448/19, `../findmyballs` 46/3) — which is what caught the seed-evidence
+false COVERED described above.
