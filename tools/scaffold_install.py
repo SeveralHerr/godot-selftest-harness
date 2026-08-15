@@ -164,6 +164,18 @@ def patch_config(plugin_root, project, overrides):
     else:
         merged = dict(existing)
         last, owned = read_record(existing)
+        # A key not passed via --set this call proposes the *shipped template*
+        # default (see `proposed` above). That default has only actually changed
+        # since scaffold last wrote this key if the harness version has moved on;
+        # within the same version it's identical to what's already on disk, so
+        # there's nothing to "sync". This distinction matters because the scaffold
+        # command calls `config --set ...` more than once per run (steps 7 and 11
+        # each detect and set different keys) - without it, a later call's
+        # unrelated `--set` silently reverted every scaffold-owned key the earlier
+        # call had just written back to the stale template default (H-041).
+        prev_record = existing.get(SCAFFOLD_DEFAULTS_KEY)
+        same_version = (isinstance(prev_record, dict)
+                         and prev_record.get("harness_version") == plugin_version(plugin_root))
         for key, value in proposed.items():
             if key not in merged:
                 merged[key] = value
@@ -188,9 +200,15 @@ def patch_config(plugin_root, project, overrides):
 
             if scaffold_owns:
                 owned.add(key)
-                if merged[key] != value:
-                    print("  ^ %s: %s -> %s" % (key, json.dumps(merged[key]), json.dumps(value)))
-                    merged[key] = value
+                # Only actually (re)write the value when this call was explicitly
+                # told to (an override), or a version bump means the template
+                # default may genuinely have changed. Otherwise leave it as-is -
+                # it may be a value a *different* `--set` call in this same
+                # scaffold run wrote a moment ago.
+                if key in overrides or not same_version:
+                    if merged[key] != value:
+                        print("  ^ %s: %s -> %s" % (key, json.dumps(merged[key]), json.dumps(value)))
+                        merged[key] = value
             else:
                 owned.discard(key)
                 print("  = %s kept as %s (%s)" % (key, json.dumps(merged[key]), reason))
