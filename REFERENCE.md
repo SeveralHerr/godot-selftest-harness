@@ -533,13 +533,38 @@ Notable behaviors:
   contradict it, so this is a read rather than an assumption.
 - **`get_node_bounds` works on any `CanvasItem`**, not just a `Control`. It used to
   answer `Node is not a Control`, so every visual check on a game object meant
-  rebuilding the camera transform by hand. For a `Control` the rect is
-  `get_global_rect()`; for anything else it is `get_global_transform_with_canvas()` —
-  the same transform the renderer uses, so it accounts for the camera, every ancestor's
-  scale and the `CanvasLayer` — applied to whatever extent the node can report (a
-  `Sprite2D`'s texture rect, a `CollisionShape2D`'s shape, a `TileMapLayer`'s used
-  rect). `data.size_source` names which of those produced the size; see the sharp edge
-  on `0x0`.
+  rebuilding the camera transform by hand. Every rect comes from
+  `get_global_transform_with_canvas()` — the same transform the renderer uses, so it
+  accounts for the camera, every ancestor's scale and the `CanvasLayer` — applied to
+  whatever extent the node can report (a `Control`'s `size`, a `Sprite2D`'s texture
+  rect, a `CollisionShape2D`'s shape, a `TileMapLayer`'s used rect).
+  `data.size_source` names which of those produced the size; see the sharp edge on
+  `0x0`.
+- **Every screen-position check measures in screen space, not `CanvasLayer` space**
+  (0.17.0). `Control.get_global_rect()` stops at the `CanvasLayer`, so a HUD on a
+  layer with a `scale` — an ordinary way to get resolution independence — used to
+  report rects in layer units while the viewport was measured in pixels. On one real
+  project that was **51 of 51 `ui_overflow` findings false**, and `reachable-ui`
+  called visible, clickable buttons `OFF-SCREEN`. `validate-ui`, `reachable-ui`,
+  `node-bounds`, `ui-snapshot` and `ui-snapshot-diff` all now transform through the
+  canvas. `get-state` reports both: `transform.global_rect` is the Control's own
+  layer-space answer, `transform.screen_rect` is where it lands.
+- **Headless runs measure against the project's *designed* viewport.** Headless has
+  no window, so `root.size` is `64x64` and every `Control` wider than 64px would
+  "extend past viewport". The UI verbs fall back to
+  `display/window/size/viewport_width`/`_height`, which is what a windowed run of the
+  same project reports.
+- **`set-state` writes through a dotted path** (0.17.0), the same one `get-state`
+  reads through. `--property environment.ambient_light_energy` resolves the container
+  and writes the leaf, which is how every knob in a lighting rig, a material or a sky
+  is reachable — they all live one level in. Note this mutates the **Resource**: a
+  material shared by several nodes changes for all of them. A component of a built-in
+  struct (`size.x`) is refused, naming the call that works (`--property size`).
+- **Verbs are accepted hyphenated or underscored** (0.17.0). Handlers register with
+  underscores, the CLI and the docs use hyphens, and the sequence-step dispatcher
+  already normalized between them — so `cmd light-get` failed while the identical
+  step inside a sequence worked. An action that matches nothing now suggests the
+  nearest registered verb instead of a bare `Unknown action`.
 - **`canvas_scale` also reports `canvas_layer` and `canvas_layer_path`.** A
   `CanvasModulate` tints exactly one canvas, so "will that tint reach this node" is a
   question about `CanvasLayer` ancestry — previously answered by grepping the `.tscn`
@@ -1245,14 +1270,20 @@ Run it after any script/scene/gameplay change, before committing.
   behaviour and `raycast` inherits it — its `clear` message says so out loud — so five
   bisecting probes can all come back `clear` with a wall sitting between them. Start the
   ray outside the geometry you are asking about.
-- **`node-bounds` on a non-`Control` derives the extent, and `0x0` means "unknown".** A
-  `Control` reports its own `get_global_rect()`; anything else is the canvas transform
-  applied to whatever the node can report about itself. When it can report nothing, the
-  rect is a correct origin with a **zero size** — "where on screen is this" answered,
-  "how big is it" not. That is not the same claim as "this node is zero-sized", and
-  `data.size_source` is what tells them apart (`Control.get_global_rect`,
-  `canvas transform x Sprite2D texture rect`, `… x origin only (this class reports no
-  extent)`).
+- **`node-bounds` on a non-`Control` derives the extent, and `0x0` means "unknown".**
+  The rect is always the canvas transform applied to whatever the node can report
+  about itself. When it can report nothing, the rect is a correct origin with a
+  **zero size** — "where on screen is this" answered, "how big is it" not. That is not
+  the same claim as "this node is zero-sized", and `data.size_source` is what tells
+  them apart (`canvas transform x Control.size`, `canvas transform x Sprite2D texture
+  rect`, `… x origin only (this class reports no extent)`).
+- **A wedged handler still costs the caller its timeout.** GDScript has no catchable
+  exception: a runtime error raised by *project* code reacting to a verb (a setter, a
+  signal, an `Area` `body_entered`) kills the handler before it can reply, and the
+  game survives, so the verb looks selectively broken while every later verb answers
+  normally. The client says so and points at stderr; the dispatch watchdog releases
+  the bus and now writes a failure reply rather than only a log line. `[SCRIPT ERROR]`
+  on the game's stderr is what names the line.
 - **The unresolved-string-reference lint is advisory and structurally blind to common
   names.** It suppresses anything `ClassDB` knows on *any* engine class, so `open`,
   `close`, `start`, `stop`, `play` and `clear` can never be flagged — some engine class

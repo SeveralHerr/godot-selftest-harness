@@ -24,8 +24,8 @@ extends RefCounted
 ##
 ## See commands.example.gd for a fuller worked reference (spawn-entity,
 ## get-actor-state, reset-session). Copy patterns from there as you grow this
-## file. Verbs are addressed over the bus with underscores ("example_ping") and
-## via the Python client with hyphens ("cmd example-ping").
+## file. Register verbs with underscores ("example_ping"); the bus accepts either
+## spelling, so `cmd example-ping` and `cmd example_ping` both reach this handler.
 
 var _dev: Node
 

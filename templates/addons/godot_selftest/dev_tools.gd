@@ -14,14 +14,14 @@ extends Node
 ## extension loads AFTER the generic handlers, a project may override a generic
 ## verb by registering the same action string (last-writer-wins).
 
-# harness-version: 0.16.0
+# harness-version: 0.17.0
 # --- Constants ---
 
 ## Version of the godot-selftest-harness these files were copied from. Reported by the
 ## `harness_version` verb and stamped into every copied tool script, so a gap logged
 ## against a project can name the version it was seen on, and a refresh can tell a
 ## stale file from a customized one. Bump with .claude-plugin/plugin.json.
-const HARNESS_VERSION: String = "0.16.0"
+const HARNESS_VERSION: String = "0.17.0"
 
 ## Default bus filenames. With a session id (see _resolve_session) the id is spliced in
 ## before the extension, so two instances can each own a bus in the same user:// dir.
@@ -561,9 +561,23 @@ func _check_for_commands() -> void:
 		return
 
 	if not _handlers.has(action):
-		_write_result(action, {"success": false, "message": "Unknown action: %s" % action})
-		_write_log("error", "Unknown action: %s" % action)
-		return
+		# Handlers register with underscores; the CLI, the docs and every generic
+		# verb spell them with hyphens, and the sequence-step dispatcher already
+		# normalizes one to the other. Accepting both here is what makes `cmd
+		# light-get` behave like the identical step inside a sequence, which it
+		# did not (gh#1) -- and the reply for the wrong spelling was
+		# indistinguishable from the reply for a verb that was never registered.
+		var underscored: String = action.replace("-", "_")
+		if _handlers.has(underscored):
+			action = underscored
+		else:
+			var msg: String = "Unknown action: %s" % action
+			var near: String = _nearest_handler(underscored)
+			if not near.is_empty():
+				msg += " (did you mean '%s'? list_commands names them all)" % near
+			_write_result(action, {"success": false, "message": msg})
+			_write_log("error", msg)
+			return
 
 	_write_log("command", "Executing: %s" % action, args)
 	_write_breadcrumb(action, args, request_id)
@@ -583,6 +597,23 @@ func _check_for_commands() -> void:
 	_write_result(action, result)
 
 
+## The registered verb closest to `action`, or "" when nothing is close enough.
+##
+## A bare "Unknown action" cannot tell a typo from a verb the project never
+## registered, and those want opposite next steps. String.similarity() is a cheap
+## bigram score; 0.6 keeps "set_stat" -> "set_state" while refusing to guess at a
+## name that is simply absent.
+func _nearest_handler(action: String) -> String:
+	var best: String = ""
+	var best_score: float = 0.6
+	for name: String in _handlers.keys():
+		var score: float = name.similarity(action)
+		if score > best_score:
+			best_score = score
+			best = name
+	return best
+
+
 ## Releases a guard that a handler has held past DISPATCH_WATCHDOG_MSEC.
 ##
 ## A GDScript runtime error inside an awaiting handler does not raise -- the coroutine
@@ -598,9 +629,20 @@ func _check_dispatch_watchdog() -> void:
 	var stuck_action: String = _dispatch_busy_action
 	_dispatch_busy = false
 	_dispatch_busy_action = ""
-	_write_log("error", "Dispatch guard force-released after %.1fs in '%s'; that handler never returned (a runtime error inside an await never resumes). Accepting commands again -- if '%s' does resume, its reply may cross another." % [
+	var detail: String = "Dispatch guard force-released after %.1fs in '%s'; that handler never returned (a runtime error inside an await never resumes). Accepting commands again -- if '%s' does resume, its reply may cross another." % [
 		held_msec / 1000.0, stuck_action, stuck_action,
-	])
+	]
+	_write_log("error", detail)
+	# ANSWER the caller, do not just log at it (gh#1). _current_request_id still
+	# holds the wedged request's id, so a client that is still waiting gets a real
+	# failure instead of its full timeout and a log line written long after it gave
+	# up. A client that already gave up ignores the reply -- it is stamped with an
+	# id that is no longer anyone's.
+	_write_result(stuck_action, {
+		"success": false,
+		"message": detail,
+		"data": {"wedged_action": stuck_action, "held_seconds": held_msec / 1000.0},
+	})
 
 
 ## Writes the single result file. `id` is always present -- the request's id verbatim,
@@ -1104,6 +1146,30 @@ func _resolve_property_path(root: Variant, path: String) -> Dictionary:
 	return {"ok": true, "value": current, "reason": ""}
 
 
+## One member read off whatever _resolve_property_path() landed on. Dictionary and
+## Object take different syntax, and set_state has to handle both because the walk
+## it shares with get_state hops through both.
+func _read_member(target: Variant, member: String) -> Variant:
+	if target is Dictionary:
+		var dict: Dictionary = target
+		return dict.get(member)
+	if target is Object:
+		return (target as Object).get(member)
+	return null
+
+
+## The write half of _read_member. A Dictionary key is created if absent -- that is
+## what writing to a Dictionary means -- while Object.set stays a silent no-op on an
+## unknown property, which is what the read-back in _cmd_set_state is there to catch.
+func _write_member(target: Variant, member: String, value: Variant) -> void:
+	if target is Dictionary:
+		var dict: Dictionary = target
+		dict[member] = value
+		return
+	if target is Object:
+		(target as Object).set(member, value)
+
+
 ## Resolves a node path segment by segment, matching child names literally.
 ##
 ## Godot auto-names an unnamed Control `@Label@249`, `scene-tree` prints exactly
@@ -1158,6 +1224,12 @@ func _read_transform(node: Node) -> Dictionary:
 		out["global_position"] = _serialize_variant(ctrl.global_position)
 		out["size"] = _serialize_variant(ctrl.size)
 		out["global_rect"] = _serialize_variant(ctrl.get_global_rect())
+		# global_rect above is the Control's own answer, in CANVAS-LAYER space --
+		# it belongs here beside position/size because it mirrors a property.
+		# screen_rect is where it lands after ancestor CanvasLayer transforms, and
+		# is the one every screen-position verb measures (gh#2). On a scaled layer
+		# the two differ, and that difference is the bug this key makes visible.
+		out["screen_rect"] = _serialize_variant(_screen_rect_of(ctrl))
 		out["rotation"] = ctrl.rotation
 		out["rotation_degrees"] = rad_to_deg(ctrl.rotation)
 		out["scale"] = _serialize_variant(ctrl.scale)
@@ -1365,6 +1437,15 @@ func _resolve_node(node_path: String) -> Dictionary:
 ##  * The property is READ BACK after the write and compared. `Object.set` on an
 ##    unknown property is a silent no-op, and a setter may clamp or reject the
 ##    value; either way "set had no effect" is a failure, not a success.
+##
+## A DOTTED path writes through to the object the path lands on, using the same
+## _resolve_property_path() get_state reads through (gh#1). Neither Object.set nor
+## Object.get walks dots, so `environment.ambient_light_energy` used to write
+## nothing and then blame the property name -- and every knob in a lighting rig,
+## a material or a sky lives exactly one level in, so the whole class was
+## unreachable while reading it back worked fine. NOTE this mutates the Resource
+## itself: a material shared by several nodes changes for all of them, which is
+## usually what a tuning call wants and is worth knowing when it is not.
 func _cmd_set_state(args: Dictionary) -> Dictionary:
 	var node_path: String = args.get("node_path", "")
 	if node_path.is_empty():
@@ -1379,7 +1460,41 @@ func _cmd_set_state(args: Dictionary) -> Dictionary:
 		return {"success": false, "message": "No property specified"}
 
 	var value: Variant = args.get("value")
-	var current: Variant = node.get(property)
+
+	# Resolve every segment but the last; the write lands on whatever that is.
+	# A single-segment property leaves target == node, i.e. the old behavior.
+	var target: Variant = node
+	var leaf: String = property
+	if property.contains("."):
+		var segments: PackedStringArray = property.split(".", false)
+		leaf = segments[segments.size() - 1]
+		segments.remove_at(segments.size() - 1)
+		var container_path: String = ".".join(segments)
+		var walk: Dictionary = _resolve_property_path(node, container_path)
+		if not walk["ok"]:
+			return {
+				"success": false,
+				"message": "Cannot set %s.%s: %s" % [node_path, property, walk["reason"]],
+				"data": {"property": property},
+			}
+		target = walk["value"]
+		if not (target is Object or target is Dictionary):
+			# Almost always a built-in struct (Vector2.x, Color.r). Those cannot be
+			# written a component at a time through this path, but they CAN be
+			# written whole, so say which call would have worked rather than
+			# leaving the caller to find it by guessing.
+			return {
+				"success": false,
+				"message": "Cannot set %s.%s: %s is a %s, not an object. Set it whole instead: --property %s --value <%s>" % [
+					node_path, property, container_path,
+					type_string(typeof(target)), container_path,
+					type_string(typeof(target)),
+				],
+				"data": {"property": property, "container": container_path,
+					"container_type": type_string(typeof(target))},
+			}
+
+	var current: Variant = _read_member(target, leaf)
 	var coerced: bool = false
 	if value != null and current != null and typeof(value) != typeof(current):
 		var conversion: Dictionary = _coerce_arg(value, typeof(current))
@@ -1392,16 +1507,26 @@ func _cmd_set_state(args: Dictionary) -> Dictionary:
 		value = conversion["value"]
 		coerced = true
 
-	node.set(property, value)
+	_write_member(target, leaf, value)
 
-	var read_back: Variant = node.get(property)
+	var read_back: Variant = _read_member(target, leaf)
 	if not _values_match(read_back, value):
+		# Name the object the write actually landed on. With a dotted path that is
+		# NOT the node, and "unknown property" against the wrong class is what sent
+		# a caller hunting for a typo in a correct name (gh#1).
+		var owner_desc: String = node.get_class()
+		if target is Object and target != node:
+			owner_desc = "%s (%s)" % [".".join(property.split(".", false).slice(0, -1)),
+				(target as Object).get_class()]
+		elif target is Dictionary:
+			owner_desc = "%s (Dictionary)" % ".".join(property.split(".", false).slice(0, -1))
 		return {
 			"success": false,
-			"message": "set had no effect on %s.%s: wrote %s but read back %s (unknown property, or a setter clamped/rejected it)" % [
+			"message": "set had no effect on %s.%s: wrote %s but read back %s -- %s has no property '%s', or its setter clamped/rejected the value" % [
 				node_path, property,
 				JSON.stringify(_serialize_variant(value)),
 				JSON.stringify(_serialize_variant(read_back)),
+				owner_desc, leaf,
 			],
 			"data": {
 				"property": property,
@@ -2592,6 +2717,46 @@ func _find_hud_node() -> Node:
 	return first_layer
 
 
+## The rectangle every screen-position check measures against, in the same units
+## _screen_rect_of() returns.
+##
+## NOT get_tree().root.size (gh#2). Two things are wrong with it:
+##  * It is window pixels. Under stretch/mode=canvas_items the root viewport is
+##    content_scale_size and the stretch to the window happens after, so a rect
+##    already in viewport units was being compared against a different scale.
+##  * Headless has no window at all, so root.size is 64x64 and EVERY Control
+##    wider than 64px "extends past viewport". check_templates.py drives the
+##    bridge headless, which is exactly why its UI stages never caught this.
+## get_visible_rect() answers the first. The project's designed viewport size
+## answers the second -- it is what a windowed run of the same project reports.
+func _screen_reference_rect() -> Rect2:
+	var vp: Viewport = get_viewport()
+	var rect: Rect2 = vp.get_visible_rect() if vp != null else Rect2()
+	if rect.size.x >= 2.0 and rect.size.y >= 2.0 and DisplayServer.get_name() != "headless":
+		return rect
+	var designed: Vector2 = Vector2(
+		float(ProjectSettings.get_setting("display/window/size/viewport_width", 0)),
+		float(ProjectSettings.get_setting("display/window/size/viewport_height", 0)))
+	if designed.x < 2.0 or designed.y < 2.0:
+		return rect
+	return Rect2(Vector2.ZERO, designed)
+
+
+## Where a Control actually lands on screen.
+##
+## Control.get_global_rect() stops at the CanvasLayer, so a HUD built on a layer
+## with a scale -- an ordinary way to get resolution independence -- reports rects
+## in layer units while the viewport is measured in pixels, and every
+## right/bottom-anchored Control reads as overflowing (gh#2: 55 false positives on
+## one project, which then had to baseline 53 of them to get a usable gate).
+## get_global_transform_with_canvas() is the transform the renderer uses; it
+## includes ancestor CanvasLayer transforms and the viewport's canvas transform.
+## A rotated Control yields the enclosing axis-aligned box, which is the right
+## answer for "is any of it off screen" and for "could a finger hit it".
+func _screen_rect_of(control: Control) -> Rect2:
+	return control.get_global_transform_with_canvas() * Rect2(Vector2.ZERO, control.size)
+
+
 # --- UI Validation Command Handlers ---
 
 ## Runs the UI checks over the current scene.
@@ -2604,7 +2769,7 @@ func _find_hud_node() -> Node:
 func _cmd_validate_ui(args: Dictionary) -> Dictionary:
 	var issues: Array = []
 	var interactive_controls: Array = []
-	var vp: Vector2 = Vector2(get_tree().root.size)
+	var vp: Vector2 = _screen_reference_rect().size
 
 	var inset: Dictionary = _resolve_safe_area_inset(args)
 	var check_safe_area: bool = inset["left"] != 0.0 or inset["top"] != 0.0 \
@@ -2784,7 +2949,7 @@ func _is_world_space_control(control: Control) -> bool:
 func _validate_ui_recursive(node: Node, vp: Vector2, issues: Array, interactive_controls: Array = [], safe_rect: Rect2 = Rect2(), check_safe_area: bool = false) -> void:
 	if node is Control and _is_effectively_visible(node):
 		var control: Control = node as Control
-		var rect: Rect2 = control.get_global_rect()
+		var rect: Rect2 = _screen_rect_of(control)
 
 		# World-space Controls get only the intrinsic checks (zero size,
 		# transparency); every screen-position check would report where the
@@ -2946,7 +3111,7 @@ func _validate_ui_recursive(node: Node, vp: Vector2, issues: Array, interactive_
 
 
 func _cmd_get_ui_snapshot(_args: Dictionary) -> Dictionary:
-	var vp: Vector2 = Vector2(get_tree().root.size)
+	var vp: Vector2 = _screen_reference_rect().size
 	var elements: Array = []
 	_snapshot_ui_recursive(get_tree().current_scene, vp, elements)
 
@@ -2967,7 +3132,7 @@ func _snapshot_ui_recursive(node: Node, vp: Vector2, elements: Array) -> void:
 		var eff_alpha: float = _get_effective_alpha(control)
 
 		if eff_visible or eff_alpha > 0.0:
-			var rect: Rect2 = control.get_global_rect()
+			var rect: Rect2 = _screen_rect_of(control)
 			elements.append({
 				"name": str(control.name),
 				"type": control.get_class(),
@@ -3000,7 +3165,10 @@ func _snapshot_ui_recursive(node: Node, vp: Vector2, elements: Array) -> void:
 ## get_global_transform_with_canvas() is the same transform the renderer uses,
 ## so it accounts for the camera, every ancestor's scale, and the CanvasLayer.
 ##
-## For a Control the rect is its own get_global_rect(). For any other CanvasItem
+## Both branches go through that transform. A Control used to take its own
+## get_global_rect() instead, which stops at the CanvasLayer -- so this verb
+## contradicted the paragraph above for exactly the nodes most likely to sit on a
+## scaled layer (gh#2). For any other CanvasItem
 ## the rect is derived from the canvas transform, sized from whatever the node
 ## can report (a Sprite2D's texture rect, a CollisionShape2D's shape) and
 ## degenerate (w=h=0) when it can report nothing -- an origin point is still a
@@ -3027,13 +3195,13 @@ func _cmd_get_node_bounds(args: Dictionary) -> Dictionary:
 		}
 
 	var item: CanvasItem = node as CanvasItem
-	var vp: Vector2 = Vector2(get_tree().root.size)
+	var vp: Vector2 = _screen_reference_rect().size
 	var rect: Rect2
 	var size_source: String
 
 	if item is Control:
-		rect = (item as Control).get_global_rect()
-		size_source = "Control.get_global_rect"
+		rect = _screen_rect_of(item as Control)
+		size_source = "canvas transform x Control.size"
 	else:
 		var xform: Transform2D = item.get_global_transform_with_canvas()
 		var local: Rect2 = _local_draw_rect(item)
@@ -3316,7 +3484,7 @@ func _capture_ui_snapshot_flat() -> Array:
 func _snapshot_flat_recursive(node: Node, elements: Array) -> void:
 	if node is Control and _is_effectively_visible(node):
 		var control: Control = node as Control
-		var rect: Rect2 = control.get_global_rect()
+		var rect: Rect2 = _screen_rect_of(control)
 		elements.append({
 			"path": str(control.get_path()),
 			"name": str(control.name),
@@ -3994,7 +4162,7 @@ func _cmd_curve(args: Dictionary) -> Dictionary:
 ## data keys: controls (Array of {path, type, text, rect, on_screen, blocked_by,
 ## kind}), count, reachable, viewport {w, h}.
 func _cmd_reachable_ui(_args: Dictionary) -> Dictionary:
-	var vp: Vector2 = Vector2(get_tree().root.size)
+	var vp: Vector2 = _screen_reference_rect().size
 	var found: Array = []
 	_collect_reachable(get_tree().root, vp, found)
 
@@ -4045,7 +4213,11 @@ func _collect_reachable(node: Node, vp: Vector2, out: Array) -> void:
 			kind = "gui_input"
 		if not kind.is_empty() and _is_effectively_visible(control) \
 				and control.mouse_filter != Control.MOUSE_FILTER_IGNORE:
-			var rect: Rect2 = control.get_global_rect()
+			# Screen space, not layer space: this verb answers "can a finger hit
+			# it", so it has to measure where the renderer actually put it. A
+			# scaled CanvasLayer used to make visible, clickable buttons report
+			# OFF-SCREEN (gh#2).
+			var rect: Rect2 = _screen_rect_of(control)
 			if rect.size.x > 0.0 and rect.size.y > 0.0:
 				out.append({
 					"path": str(control.get_path()),
