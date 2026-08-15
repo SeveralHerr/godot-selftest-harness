@@ -137,6 +137,17 @@ It runs first because it is the cheapest gate and it names its causes directly. 
 import gate below tells you a cascade happened; this one tells you which identifier
 started it, and it does so on a working tree the import gate cannot even reach.
 
+**Clean here means the names resolve, not that the file compiles.** Type inference is the
+gap: `var kids := root.get_children()` on a `Node`-typed `root` is a hard parse error
+(`Cannot infer the type of "kids" variable because the value doesn't have a set type`),
+and `name_check.py` prints `errors: 0 | warnings: 0` straight over it. Deciding it needs
+method resolution order and return types — i.e. opening the project, the one thing this
+gate exists not to do. The import gate below is where that class of error surfaces, so a
+`name_check` pass never licenses skipping it. The tool prints this itself as a
+`NOT COVERED:` line on every clean run. This matters most in a fan-out: `name_check` is
+the only gate that is concurrency-safe, so it is the only one a parallel agent gets, and
+an agent reporting "verified" on it alone has not verified that its code builds.
+
 **In a fresh worktree, this is the only Phase 1 gate that works at all.** A never-imported
 worktree has no class cache, so lint reports a thousand `Identifier "X" not declared`
 errors and still exits 0, and the test runner prints `[PASS]` for tests whose first
@@ -430,6 +441,7 @@ This prints all currently registered action strings. Any verb beyond the generic
 | `set-game-speed N` | Speed up time-dependent behavior (timers, tweens, physics) |
 | `wait-frames N` | Advance N physics frames deterministically |
 | `node-bounds PATH` | Exact **screen-space** position/size of a node (ground truth for layout/movement). Ancestor `CanvasLayer` transforms are applied, so a HUD built on a scaled layer reports where it actually renders |
+| `aabb --node PATH` | Merged **world-space** AABB of a 3D node's geometry — `min`/`max`/`size`/`center`, `top_y`, `bottom_y`. The 3D answer to "is this actually on the table / sunk into the floor / overlapping that". Excludes `Light3D` (an `OmniLight3D`'s AABB is a cube of twice its range); fails rather than returning a zero box when a node has no geometry |
 | `scene-tree --depth N` | The live hierarchy as JSON. Every node carries `script` (its `res://` script path, `""` if none) and `scene_file` (set on instanced scene roots) — which is how Phase 5 computes reach, and also the fastest way to map a changed `.gd` to the node path that runs it |
 | `ui-snapshot` / `ui-snapshot-diff` | Structured UI state; diff against a saved baseline |
 | `clear-nodes --group N` / `--class C` / `--method M` | Free matching nodes. Prefer `--via-method NAME` (with `--via-args JSON`), which calls the game's own removal path on each match: bare `queue_free()` skips death handling entirely, so a cleared enemy drops nothing, pays no xp, and the teardown you thought you tested never ran |
@@ -510,6 +522,8 @@ Three things are no longer scored as misses, and each is printed by name so you 
 - **`reach_aliases`** in `devtools_config.json` lets the project name an observed Node that vouches for a script no snapshot can ever see (a `RefCounted` helper, a `Resource` subclass). Those land in a **separate** `reached_alias` bucket with the voucher printed alongside, never folded into `reached` — a config declaration is the project's claim, not this run's observation.
 - **Autoloads and the DevTools extension** are `reached_implicit`: they run in every session but own no persistent node.
 
+**A checkout with no git repository prints `reach: unavailable (not a git repository)`, not a ratio.** There is no changed set for the run to have covered, so there is no denominator — and a `0/0` reads as "nothing to check" when the truth is "cannot tell". This is *not* `insufficient`: that verdict is a claim about the run, this is a statement about the checkout. Judge the run on its checks and say plainly in the summary that reach could not be computed. A genuine `0/0` in a real repository is a different line and says so.
+
 So `reached 1/4` with three annotated credits is not a bad run, and a 100% line built on aliases is not the same evidence as one built on observation. Quote the line as printed rather than reducing it to a fraction.
 
 Then append this run to the ledger. **Writing `run.json` and running `record` are one step, not two — if you wrote `run.json` you MUST run `record` in the same breath**, in the same command block; a summary written from a `run.json` that never reached the ledger is a row lost forever. Write the results you have into a JSON object and hand it over; everything else — timestamp, sha, branch, changed files, and reach — is derived, not asked for:
@@ -585,7 +599,7 @@ Append an entry to `log-devtools.md` at the project root (create it if missing).
 |---|---|
 | `warranted` | Runtime produced a claim the diff could not. Name it specifically — "the tween rests at 0.85, not 1.0", not "verified the animation". **Requires a non-empty `found`**; Phase 5 downgrades a `warranted` with `found: []` to `overkill` automatically. |
 | `overkill` | Everything passed and confirmed what was already known. Renames, comments, constants, pure refactors, and anything lint alone settled belong here. This is the verdict for `found: []`. |
-| `insufficient` | It ran but could not reach or assert the thing that mattered. **Reach from Phase 5 decides this, not your impression** — if the changed file was never loaded, the verdict is `insufficient` even when every check passed, and a `reach_aliases` credit is a declaration rather than an observation, so it does not rescue one. File the gap. |
+| `insufficient` | It ran but could not reach or assert the thing that mattered. **Reach from Phase 5 decides this, not your impression** — if the changed file was never loaded, the verdict is `insufficient` even when every check passed, and a `reach_aliases` credit is a declaration rather than an observation, so it does not rescue one. Reach printed as `unavailable` does not decide it either way — that is the ledger declining to answer, not an answer of zero. File the gap. |
 | `inconclusive` | Aborted (a runner exit `2` from the import gate, lint, or the test runner, or the game never came up), or the change was too small to judge. |
 
 Three rules that keep this honest:

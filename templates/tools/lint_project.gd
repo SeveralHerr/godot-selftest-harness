@@ -104,10 +104,10 @@ extends SceneTree
 # console. Redirect to a file and read it back. Every line this script emits goes
 # to stdout via print(), so one redirect captures the whole report.
 
-# harness-version: 0.17.0
+# harness-version: 0.18.0
 ## Harness revision these files were copied from. Printed in the header of every run so
 ## a lint result, and any gap logged from it, can name the version it was produced on.
-const HARNESS_VERSION: String = "0.17.0"
+const HARNESS_VERSION: String = "0.18.0"
 
 const CONFIG_PATH: String = "res://addons/godot_selftest/devtools_config.json"
 const DEFAULT_SCAN_ROOT: String = "res://"
@@ -231,9 +231,14 @@ func _initialize() -> void:
 		scenes = _find_all_scenes(scan_root)
 
 	# Paths exempt from the missing-sidecar check. Defaults cover the files the
-	# scaffolder copies in: it cannot generate a valid .uid (the ids are engine
-	# assigned), so without this every fresh install would report findings that are
-	# nobody's fault - and a gate that cries wolf on install day gets ignored.
+	# scaffolder copies in. The original reason was that it could not mint a valid
+	# .uid (the ids being engine assigned); that stopped being true once
+	# `devtools.py new-uid` reimplemented ResourceUID's encoding offline, and
+	# scaffold_install.py now mints a sidecar for every .gd it installs
+	# (moving-in:G-004). The default stays anyway, for a different reason: this same
+	# array also gates the class-cache, compile, shader and string-ref passes below,
+	# so opening it up would run all four across the addon on install day. If you
+	# narrow it, narrow it per-pass rather than here.
 	var uid_ignore: Array = config.get("uid_check_ignore", ["res://addons/", "res://tools/"])
 
 	var results := {

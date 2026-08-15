@@ -10,6 +10,39 @@ Every shipped file carries a `# harness-version: X.Y.Z` stamp and a matching
 refresh tell a stale file from a customized one, so they must never lag the release.
 This is the exact sequence, in order. Do not skip a step because the change felt small.
 
+## 0a. Confirm you are looking at the current HEAD
+
+**Do this before reading a single source file.** The `gitStatus` block in a session's
+context is a snapshot taken when the session started, and this repo can move under a long
+session — a merged PR, a parallel session, a `pull --ff-only` between turns.
+
+```bash
+git log --oneline -3
+git status --short
+```
+
+Compare the top sha against whatever your context claims. If they differ, **re-read every
+file you were about to change** and re-derive line numbers; do not edit by remembered
+offsets. Then check whether the work you are about to do is already in the log:
+
+```bash
+git log --oneline -20 -- templates/          # has this shipped already?
+grep -n "status: fixed | fixed-in" log-devtools.md | tail -20
+```
+
+This is not hypothetical. In one session three of five assigned fixes had already shipped
+in a release committed minutes earlier, and were within one step of being rewritten on top
+of a better version of themselves — the shipped fix covered five call sites where the
+rewrite covered three, and had been validated against a real project the scratch one
+cannot measure ([H-030]). A stale snapshot does not announce itself; the files simply read
+as though the work is still to do.
+
+The same applies to a gap you are about to close: check that it is not already `fixed` in
+`log-devtools.md` under a different id. Gaps arrive by two paths — pooled from a project
+by `tools/upstream_gaps.py` as `<project>:G-NNN`, and filed as GitHub issues by
+`skill-feedback-issue` as `gh#N` — and **neither dedupes against the other**, so the same
+defect can be open under one id and fixed under another ([H-044]).
+
 ## 0. Decide whether this is a release at all
 
 A docs-only turn that touches nothing under `templates/` **does not need a bump**, and

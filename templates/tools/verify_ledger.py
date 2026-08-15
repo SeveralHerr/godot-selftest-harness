@@ -59,6 +59,17 @@ its readers to discount the number, which is worse than not printing it.
   and never in `reached` — a declaration is a project's claim, not an observation, and
   the whole value of this field is that it does not blur the two.
 
+**Reach has three states, not two.** `reached N/M` is one; `reach not computed` (no
+capture) is the second; and `reach: unavailable (not a git repository)` is the third,
+added in 0.17.0 after a project with no `.git` was handed `reached 0/0 changed file(s)`
+and a ledger row saying `reached: [], unreached: []` (moving-in:G-003). Its coverage
+that run was in fact good, and nothing said so; worse, a row went into the permanent
+record claiming a denominator it never had. A 0/0 reads as "nothing to check" and is
+indistinguishable from a clean sweep, which is the exact failure this file exists to
+prevent one level down. So the no-VCS case now carries `changed_unavailable: true` and
+null buckets - the same null-means-unknown shape `stats` and older readers already skip
+rather than average - and prints a line that cannot be mistaken for a score.
+
 **The other half is whether it was worth running at all.** Reach says the harness did
 something; it cannot say the something was needed. A log that only records gaps can only
 ever recommend more harness — it has no vocabulary for *this task didn't need the tool*,
@@ -132,8 +143,8 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
-# harness-version: 0.17.0
-HARNESS_VERSION = "0.17.0"
+# harness-version: 0.18.0
+HARNESS_VERSION = "0.18.0"
 
 LEDGER_PATH = Path(".devtools") / "verify-runs.jsonl"
 
@@ -201,11 +212,30 @@ def _norm(path):
     return p
 
 
+def _git_present(root):
+    """Whether `root` is inside a git working tree at all.
+
+    `_git` returns None for two unrelated reasons - the command failed, and there is no
+    repository for it to have succeeded in - and every caller that cannot tell them apart
+    ends up reporting the second as if it were an ordinary empty result. This is the one
+    probe that asks the question directly, so `changed_branch` can say "no base ref
+    resolved" and "there is no git here" as two different answers (moving-in:G-003).
+    """
+    return _git(root, "rev-parse", "--is-inside-work-tree") is not None
+
+
 def changed_worktree(root):
     """Uncommitted working-tree changes - what *this session* plausibly edited.
 
     None when git itself is unavailable (not a repo): reach is then not computable,
     and says so, rather than being an empty set that scores as a clean sweep.
+
+    That None used to be coerced back to `set()` at both call sites, so a checkout with
+    no `.git` reported `reached 0/0` - a line that reads as "nothing to check" when it
+    means "cannot tell" - and `record` wrote the same 0/0 into the permanent ledger
+    (moving-in:G-003). It is now carried through `split_reach` to the printed line and to
+    the recorded row, because a check that cannot tell must not be indistinguishable from
+    a check that passed.
     """
     status = _git(root, "status", "--porcelain", "--untracked-files=all")
     if status is None:
@@ -225,7 +255,17 @@ def changed_branch(root):
 
     Empty set (not None) when no base ref resolves: "nothing beyond base" is a fact,
     unlike git being absent altogether.
+
+    That reasoning was sound and the code did not implement it. With no repository at
+    all, every `_git` call here returns None, no base resolves, and the function fell out
+    of the loop returning the empty set that its own docstring reserves for a *fact* -
+    reporting "nothing beyond base" in a directory that has no base and no branch
+    (moving-in:G-003). The distinction is now made rather than assumed: `_git_present`
+    is asked first, and git being absent returns None like `changed_worktree` does. The
+    empty set keeps its original meaning, and now only ever carries it.
     """
+    if not _git_present(root):
+        return None
     changed = set()
     base = None
     for ref in ("origin/main", "main", "origin/master", "master"):
@@ -238,6 +278,20 @@ def changed_branch(root):
         if diff:
             changed.update(_norm(p) for p in (l.strip() for l in diff.splitlines()) if p)
     return changed
+
+
+def _union_changed(worktree, branch):
+    """The union denominator, or None when there was no VCS to ask.
+
+    None only when *both* halves are None, which is the no-repository case: if git
+    answered one question and failed the other, we still know something changed and the
+    honest union is what it told us. Written once because both `record` and `reach`
+    need it and they used to spell it differently - `record` returned None, `reach`
+    coerced to `set()`, and the two disagreed about the same checkout.
+    """
+    if worktree is None and branch is None:
+        return None
+    return (worktree or set()) | (branch or set())
 
 
 def _walk(node, out):
@@ -490,8 +544,34 @@ def split_reach(changed, observed, implicit, root, cfg=None):
       headless_tools   - subset of not_applicable: under `reach_headless_dirs`. Same
                          structural argument as test_scripts, one directory over -
                          a `--headless --script` runner has no node to be the script of
+      changed_unavailable - True when the *changed set itself* could not be determined
+                         (no git repository). Every list is then None, including the ones
+                         that do not depend on `observed`
     When observed is None the observation-dependent lists are None.
+
+    Two different unknowns, kept apart. `observed is None` means the run produced no
+    capture: we know what changed, we cannot say what ran. `changed is None` means there
+    is no VCS: we may know exactly what ran, we cannot say what it was supposed to cover.
+    Both used to be flattened into an empty set somewhere upstream, and an empty set
+    scores as a clean sweep - `reached 0/0`, which reads as "nothing to check"
+    (moving-in:G-003). Neither is a zero and neither is reported as one.
     """
+    if changed is None:
+        # Not `{}`-with-empty-lists: every bucket is None, which is the shape this file
+        # already uses for "could not tell" (see load_snapshots) and which `stats` and
+        # every older reader already skip rather than average in as a zero.
+        return {
+            "reached": None,
+            "reached_implicit": None,
+            "reached_alias": None,
+            "reached_alias_via": None,
+            "unreached": None,
+            "not_applicable": None,
+            "deleted": None,
+            "test_scripts": None,
+            "headless_tools": None,
+            "changed_unavailable": True,
+        }
     cfg = load_config(root) if cfg is None else cfg
     test_dir = _test_dir(cfg)
     headless_dirs = _headless_dirs(cfg)
@@ -518,6 +598,10 @@ def split_reach(changed, observed, implicit, root, cfg=None):
         "deleted": deleted,
         "test_scripts": tests,
         "headless_tools": headless,
+        # Explicitly False rather than absent: a reader that has to infer "the changed
+        # set was knowable" from a missing key is one bug away from inferring it from a
+        # missing row, and this is the key that separates 0/0-real from 0/0-unknown.
+        "changed_unavailable": False,
     }
     if observed is None:
         return result
@@ -547,11 +631,18 @@ def _sub_reach(split):
     Keys are only ever added here, never repurposed: `stats` reads rows written by
     every past version, and a bucket name that changed meaning would silently mix two
     populations in one average.
+
+    `changed_unavailable` (0.17.0+) is an addition of exactly that kind. It is safe to
+    add because a reader that has never heard of it still cannot misread the row: when it
+    is True every list beside it is None, and null buckets are the shape both `stats` and
+    `verify.md` already treat as "reach unknown, not counted". The key tells a new reader
+    *which* unknown it was; it does not have to be read for the row to be read correctly
+    (moving-in:G-003).
     """
     return {k: split[k] for k in
             ("reached", "reached_implicit", "reached_alias", "reached_alias_via",
              "unreached", "not_applicable", "deleted", "test_scripts",
-             "headless_tools")}
+             "headless_tools", "changed_unavailable")}
 
 
 # The four verdicts a run can carry. `warranted` needs a named claim, `overkill` means
@@ -687,7 +778,10 @@ def cmd_record(args, root):
 
     worktree = changed_worktree(root)
     branch_set = changed_branch(root)
-    union = None if worktree is None else (worktree | branch_set)
+    # None from both halves means git is absent, not that nothing changed. It is carried
+    # into split_reach as None rather than coerced to set(), which is what used to write
+    # `reached: 0, total: 0` into the permanent record (moving-in:G-003).
+    union = _union_changed(worktree, branch_set)
     cfg = load_config(root)
     implicit = implicit_scripts(root, cfg)
 
@@ -705,9 +799,9 @@ def cmd_record(args, root):
         reach_obj = None
         u = split_reach(set(), None, implicit, root, cfg)  # _reconcile inputs stay None
     else:
-        u = split_reach(union or set(), observed, implicit, root, cfg)
-        w = split_reach(worktree if worktree is not None else set(),
-                        observed, implicit, root, cfg)
+        # None passes straight through in all three: `or set()` here was half of the bug.
+        u = split_reach(union, observed, implicit, root, cfg)
+        w = split_reach(worktree, observed, implicit, root, cfg)
         b = split_reach(branch_set, observed, implicit, root, cfg)
         reach_obj = _sub_reach(u)
         reach_obj["worktree"] = _sub_reach(w)
@@ -784,6 +878,12 @@ def cmd_record(args, root):
 
     print("verify_ledger: recorded %s run, value=%s - %s"
           % (row["verdict"], value, _reach_line(u)))
+    if reach_obj is not None and reach_obj.get("changed_unavailable"):
+        print("verify_ledger: reach recorded as UNAVAILABLE (not a git repository), not "
+              "as 0/0 - the row's buckets are null, so `stats` excludes it instead of "
+              "averaging in a clean sweep it never made. Note in the summary that reach "
+              "could not be computed; do not report this as `insufficient`, which is a "
+              "claim about the run rather than about the checkout.", file=sys.stderr)
     if note:
         print("verify_ledger: %s" % note, file=sys.stderr)
     if not cheaper:
@@ -794,6 +894,13 @@ def cmd_record(args, root):
 
 
 def _reach_line(split):
+    # Three lines, three states, and they have to be told apart at a glance or the
+    # distinction may as well not be computed. "unavailable" (no VCS, no denominator)
+    # borrows the voice of the existing "not computed" line rather than inventing a
+    # second dialect for the same idea (moving-in:G-003).
+    if split is not None and split.get("changed_unavailable"):
+        return ("reach: unavailable (not a git repository) - there is no changed set to "
+                "score against, so this is not a 0/0 and must not be read as one")
     if split is None or split.get("reached") is None:
         return "reach not computed (no scene-tree / scripts-seen capture)"
     reached = split["reached"]
@@ -804,7 +911,16 @@ def _reach_line(split):
     headless = split.get("headless_tools") or []
     unreached = split.get("unreached") or []
     total = len(reached) + len(implicit) + len(alias) + len(unreached)
-    detail = "reached %d/%d changed file(s)" % (len(reached), total)
+    if total:
+        detail = "reached %d/%d changed file(s)" % (len(reached), total)
+    elif split.get("not_applicable"):
+        # A zero that git can vouch for: files did change, and every one of them is
+        # excused from the denominator. The annotations below name which.
+        detail = ("reached 0/0 changed file(s) - a real zero: every changed file is "
+                  "excused from the denominator")
+    else:
+        detail = ("reached 0/0 changed file(s) - a real zero: git reports nothing "
+                  "changed here, which is a fact rather than an unknown")
     if implicit:
         detail += " (+%d implicit: %s)" % (len(implicit), ", ".join(implicit))
     if alias:
@@ -842,19 +958,35 @@ def cmd_reach(args, root):
     """
     worktree = changed_worktree(root)
     branch_set = changed_branch(root)
-    union = (worktree or set()) | branch_set
+    union = _union_changed(worktree, branch_set)
     cfg = load_config(root)
     implicit = implicit_scripts(root, cfg)
     observed = _observed(args)
 
     u = split_reach(union, observed, implicit, root, cfg)
-    w = split_reach(worktree if worktree is not None else set(),
-                    observed, implicit, root, cfg)
+    w = split_reach(worktree, observed, implicit, root, cfg)
     b = split_reach(branch_set, observed, implicit, root, cfg)
 
     print("worktree (this session's edits - the honest number): " + _reach_line(w))
     print("branch   (all commits since base - dilutes as the branch grows): "
           + _reach_line(b))
+    if u.get("changed_unavailable"):
+        # Deliberately printed instead of the `insufficient` warning below, not as well
+        # as it. "I cannot tell" and "nothing was reached" are different claims and the
+        # ledger's whole argument is that they must not print the same (moving-in:G-003).
+        # The observed count is offered as a count, never as a ratio: without a diff to
+        # compare it against there is no denominator to make it one.
+        seen = "unknown (no capture was readable)" if observed is None \
+            else "%d script/scene path(s)" % len(observed)
+        print("\nReach is UNAVAILABLE, not zero. This checkout has no git repository, so "
+              "there is no changed set for the run to have covered.")
+        print("  This run observed: %s. That is a count, not a ratio - nothing here can "
+              "turn it into one." % seen)
+        print("  Phase 6: this is NOT grounds for `insufficient`. `insufficient` means "
+              "the run could not reach the thing that mattered; this means the ledger "
+              "cannot say what the thing that mattered was. Judge the run on its checks "
+              "and state plainly that reach could not be computed.")
+        return 0
     if u["not_applicable"]:
         print("not applicable (reach cannot speak to these): "
               + ", ".join(u["not_applicable"]))
@@ -927,6 +1059,11 @@ def cmd_stats(args, root):
     runtime_findings = 0
     static_only_findings = 0
     no_snapshot = 0
+    # Rows whose reach was unknown because there was no VCS (0.17.0+). Both land in the
+    # excluded-from-the-ratio pile, but reporting one as the other would be this file
+    # telling the same lie in a smaller font: "no snapshot" blames the run for not
+    # capturing, "no repository" blames nothing at all.
+    no_vcs = 0
     durations = []
     # `found` (0.10.0+). Rows predating it carry no key at all and are excluded from the
     # denominator - scoring a silence as "found nothing" would read as a tool that helps
@@ -965,7 +1102,10 @@ def cmd_stats(args, root):
         reach = row.get("reach") or {}
         r, u = reach.get("reached"), reach.get("unreached")
         if r is None:
-            no_snapshot += 1
+            if reach.get("changed_unavailable"):
+                no_vcs += 1
+            else:
+                no_snapshot += 1
         else:
             reached_n += len(r)
             unreached_n += len(u or [])
@@ -1036,6 +1176,10 @@ def cmd_stats(args, root):
               "--headless --script, so no node ever carries them" % headless_n)
     if no_snapshot:
         print("       %d run(s) recorded no snapshot - reach unknown, not counted" % no_snapshot)
+    if no_vcs:
+        print("       %d run(s) had no git repository - reach was not computable at all, "
+              "not 0/0. Excluded from the ratio; a checkout with no VCS has no diff for "
+              "a run to have covered." % no_vcs)
 
     if len(per_version) > 1 or args.verbose:
         print("reach by harness version:")

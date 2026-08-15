@@ -89,11 +89,11 @@ from pathlib import Path
 from typing import Optional  # noqa: F401
 
 
-# harness-version: 0.17.0
+# harness-version: 0.18.0
 # Version of the godot-selftest-harness this client was copied from. Compared against
 # the running game's own stamp by the `harness-version` verb, so a half-refreshed
 # install (new client, old autoload) is visible instead of mysterious.
-HARNESS_VERSION = "0.17.0"
+HARNESS_VERSION = "0.18.0"
 
 COMMANDS_FILE = "devtools_commands.json"
 RESULTS_FILE = "devtools_results.json"
@@ -482,7 +482,12 @@ def get_user_data_path(project_path: Path) -> Path:
     return _platform_data_dir() / godot_dir / "app_userdata" / _sanitize_dir_name(project_name)
 
 
-_MANGLED_ROOT = re.compile(r"^[A-Za-z]:[\/].*?[\/](root[\/].*)$")
+# The trailing segment is OPTIONAL. It used to be `root[\/].*`, which required
+# something AFTER "root", so "/root/House/Player" recovered and bare "/root" did
+# not -- the shortest and most obvious path in the whole system was the one path
+# the guard missed, and `get-state --node /root` failed with
+# "Node not found: C:/Program Files/Git/root" (moving-in:G-016).
+_MANGLED_ROOT = re.compile(r"^[A-Za-z]:[\/].*?[\/](root(?:[\/].*)?)$")
 
 
 def normalize_node_path(path):
@@ -497,7 +502,10 @@ def normalize_node_path(path):
         return path
     m = _MANGLED_ROOT.match(path)
     if m:
-        return "/" + m.group(1).replace("\\", "/")
+        recovered = "/" + m.group(1).replace("\\", "/")
+        # A trailing separator survives the rewrite ("<...>/Git/root/") and Godot
+        # does not resolve a node path that ends in one.
+        return recovered.rstrip("/") or "/"
     if path.startswith("//"):
         return "/" + path.lstrip("/")
     return path
@@ -2133,6 +2141,84 @@ def cmd_node_bounds(args, project_path: Path):
         if r["w"] == 0 and r["h"] == 0:
             print("                (0x0: this class reports no extent - the "
                   "position is real, the size is unknown)")
+    # The accumulated canvas scale belongs beside the rect, not behind a second
+    # verb: a HUD on a scaled CanvasLayer is the commonest reason a rect looks
+    # wrong, and the reader has no reason to suspect canvas-scale exists
+    # (moving-in:G-008/G-015). Loud on absence rather than quietly skipped - a
+    # silent fallback is what hid three wire mismatches in 0.4.0.
+    cs = data.get("canvas_scale")
+    if cs is None:
+        print("node-bounds: the reply carried no 'canvas_scale' key. "
+              f"Keys: {sorted(data)}", file=sys.stderr)
+    else:
+        note = "" if (abs(cs["x"] - 1.0) < 1e-6 and abs(cs["y"] - 1.0) < 1e-6) else \
+            "   <- not 1.0: this rect is screen space, but a CanvasLayer is scaling it"
+        print(f"  Canvas scale: {cs['x']:.3f}, {cs['y']:.3f}{note}")
+
+
+def cmd_aabb(args, project_path: Path):
+    """Merged world-space AABB of a 3D node's geometry (bus verb: aabb, G-002/G-006).
+
+    The 3D counterpart of node-bounds, which is CanvasItem-only. Light3D nodes are
+    excluded by the game side (an OmniLight3D's AABB is a box of twice its range,
+    which measured a 0.2-unit lamp at 7.2 units), and everything skipped comes back
+    in data["excluded"] with the reason - printed here, because a merge count that
+    is lower than expected is only diagnosable if the skips are visible.
+    """
+    args.node = normalize_node_path(args.node)  # G-025
+    result = send_command(project_path, "aabb", {"node_path": args.node})
+    if not result["success"]:
+        print(f"Failed: {result['message']}", file=sys.stderr)
+        # A node with no geometry fails on purpose rather than reporting a zero box;
+        # the excluded list is the explanation, so it is worth printing on failure.
+        for entry in (result.get("data", {}) or {}).get("excluded", []) or []:
+            print(f"  excluded: {entry.get('path')} [{entry.get('class')}] "
+                  f"- {entry.get('reason')}", file=sys.stderr)
+        sys.exit(1)
+
+    data = result.get("data", {}) or {}
+    missing = [k for k in ("min", "max", "size", "center", "top_y", "bottom_y",
+                           "merged_count", "merged", "excluded", "node_transform")
+               if k not in data]
+    if missing:
+        # Never paper over a shape mismatch with a friendly line: three key
+        # mismatches shipped at once in 0.4.0 because the client fell back quietly.
+        print(f"aabb reply is missing key(s) {missing} (keys: {sorted(data)})",
+              file=sys.stderr)
+        sys.exit(1)
+
+    lo, hi, size, mid = data["min"], data["max"], data["size"], data["center"]
+    print(f"{data.get('name')} ({data.get('type')}) {data.get('path')}")
+    print(f"  Size:      {size['x']:.3f} x {size['y']:.3f} x {size['z']:.3f}")
+    print(f"  Min:       {lo['x']:.3f}, {lo['y']:.3f}, {lo['z']:.3f}")
+    print(f"  Max:       {hi['x']:.3f}, {hi['y']:.3f}, {hi['z']:.3f}")
+    print(f"  Center:    {mid['x']:.3f}, {mid['y']:.3f}, {mid['z']:.3f}")
+    print(f"  Top y:     {data['top_y']:.3f}   (rest something on this)")
+    print(f"  Bottom y:  {data['bottom_y']:.3f}")
+
+    xform = data["node_transform"] or {}
+    if xform and not {"rotation_deg", "scale", "axis_aligned"} <= set(xform):
+        print(f"aabb node_transform is missing key(s) (keys: {sorted(xform)})",
+              file=sys.stderr)
+        sys.exit(1)
+    if xform:
+        rot, scl = xform["rotation_deg"], xform["scale"]
+        aligned = xform["axis_aligned"]
+        note = "" if aligned else "  <- ROTATED: the box encloses the footprint, it is not the footprint"
+        print(f"  Rotation:  {rot.get('x'):.1f}, {rot.get('y'):.1f}, {rot.get('z'):.1f} deg"
+              f"   scale {scl.get('x'):.3f}, {scl.get('y'):.3f}, {scl.get('z'):.3f}{note}")
+    else:
+        print("  Rotation:  (this node is not a Node3D; the box comes from its "
+              "3D descendants)")
+
+    print(f"  Merged:    {data['merged_count']} GeometryInstance3D node(s)")
+    for entry in data["merged"]:
+        vis = "visible" if entry.get("visible") else "HIDDEN"
+        print(f"    {entry.get('path')} [{entry.get('class')}] {vis}")
+    if data["excluded"]:
+        print(f"  Excluded:  {len(data['excluded'])}")
+        for entry in data["excluded"]:
+            print(f"    {entry.get('path')} [{entry.get('class')}] - {entry.get('reason')}")
 
 
 # ==================== LAUNCH / TILEMAP / SCRIPT CENSUS ====================
@@ -2635,6 +2721,15 @@ def cmd_find_nodes(args, project_path: Path):
     if not nodes:
         # An empty match is a legitimate answer, but exiting 0 on it makes a typo'd
         # predicate indistinguishable from a real absence in a shell pipeline.
+        #
+        # The game side appends the denominator to `message` when a --where matched
+        # nothing ("0 of 89 matched on mouse_filter", or "no candidate exposes
+        # 'mouse_filter '" when the name never resolved). Printing it is the whole
+        # fix for moving-in:G-011 -- a silent empty result is what let a UI be
+        # cleared of exactly the fault it had.
+        detail = result.get("message") or ""
+        if " -- " in detail:
+            print(f"  {detail.split(' -- ', 1)[1]}", file=sys.stderr)
         sys.exit(1)
 
 
@@ -3120,6 +3215,13 @@ def main():
     p = subparsers.add_parser("node-bounds", help="Get bounds for a specific node")
     p.add_argument("node_path", help="Node path (e.g., /root/Main/HUD/TopBar/CurrencyLabel)")
     p.set_defaults(func=cmd_node_bounds)
+
+    # aabb - the 3D counterpart of node-bounds
+    p = subparsers.add_parser("aabb",
+                              help="Merged world-space AABB of a 3D node's geometry (Light3D excluded)")
+    p.add_argument("--node", "-n", required=True,
+                   help="Node path (e.g., /root/House/Living/tableCoffeeGlass)")
+    p.set_defaults(func=cmd_aabb)
 
     args = parser.parse_args(_glue_leading_dash_values(sys.argv[1:]))
 

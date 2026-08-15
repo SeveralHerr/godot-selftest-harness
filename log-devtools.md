@@ -3270,3 +3270,404 @@ fixture change on its own (`count is 4, expected 2`), and an early fixture typo 
 stages 3, 4 and 5 in a row. Real-project false-positive count reported above.
 `python -m unittest discover -s tools` — 17 tests OK. `record_version.py --record` then
 `--check` — OK at `0.17.0`, 12 shipped files, 46 bus verbs + 48 CLI commands documented.
+
+## 2026-08-14 - Upstreamed 16 open gap(s) from moving-in (harness 0.11.0, 0.16.0)
+
+Pooled by `tools/upstream_gaps.py` from `C:\Users\gotmi\Documents\GitHub\moving-in\log-devtools.md`. Gap text is the project's,
+verbatim; only the id line is rewritten (qualified with the project name so
+ids from two projects cannot collide, plus a `source:` back-pointer).
+
+- Gap: **no 3D equivalent of `node-bounds`** — `node-bounds` is CanvasItem-only, so a 3D
+  project cannot ask the harness where a node actually is.
+  `python tools/devtools.py node-bounds /root/House/Home/Bedroom/lampSquareCeiling` →
+  `Failed: Node is not a CanvasItem, so it has no screen rect: ... (Node3D)`. Workaround:
+  wrote `HouseBuilder.local_aabb()` plus an `audit()` method on the builder and reached it
+  via `run-method --json`. Every 3D project will need to rebuild that.
+  - [moving-in:G-002] status: fixed | fixed-in: 0.18.0 | seen: 1 | harness: 0.11.0 | source: moving-in 2026-08-14
+  - Improvement: make `node-bounds` return the world-space AABB (position/size/end, and
+    the transform) for a `Node3D`, merging `GeometryInstance3D` children and excluding
+    `Light3D` — the exclusion is not obvious and cost this run a bug.
+
+- Gap: **reach is silently 0/0 in a non-git project** — this checkout has no `.git`, so
+  `git diff --name-only HEAD` fails, Phase 0.5 triage has no input, and
+  `verify_ledger.py reach` prints `worktree ... reached 0/0 changed file(s)` /
+  `branch ... reached 0/0`. A `0/0` reads as "nothing to check" rather than "cannot tell",
+  and `record` accepted the row without comment. Coverage was in fact good — the
+  `scripts-seen` set names 3 of the 4 new scripts, the fourth being a static-only
+  `RefCounted` that owns no node — but nothing in the ledger says so.
+  - [moving-in:G-003] status: fixed | fixed-in: 0.18.0 | seen: 1 | harness: 0.11.0 | source: moving-in 2026-08-14
+  - Improvement: have `reach` distinguish "0 changed files" from "no VCS" and report
+    `reach: unavailable (not a git repository)`, and have Phase 0.5 name an explicit
+    no-VCS tier that goes straight to a full run instead of failing its first command.
+
+- Gap: **scaffold installs new `.gd` tools without a `.uid` sidecar, and
+  `uid_check_ignore` hides it** — the refresh added `tools/capture.gd` as the only
+  new file. `scaffold_install.py files` copies the script alone; the plugin ships no
+  `templates/tools/*.uid`, and a `--headless --script` run does not import it. Lint
+  still printed `UIDs: OK`, because the default config has
+  `"uid_check_ignore": ["res://addons/", "res://tools/"]` — so the one check that
+  would have caught it is switched off exactly where scaffold writes. The result is
+  a `tools/` directory with `eval.gd.uid`, `lint_project.gd.uid`, `run_tests.gd.uid`
+  and no `capture.gd.uid`, which reads as drift on the next refresh. Workaround:
+  `python tools/devtools.py new-uid --write tools/capture.gd` → `uid://cfltmy4sah1s`.
+  - [moving-in:G-004] status: fixed | fixed-in: 0.18.0 | seen: 1 | harness: 0.16.0 | source: moving-in 2026-08-14
+  - Improvement: have `scaffold_install.py files` emit a `.uid` for any `.gd` it
+    installs that lacks one (it can call the same generator `new-uid` uses), or ship
+    the sidecars in `templates/`. Either way scaffold should report it, since the
+    project's own lint is configured never to.
+
+- Gap: **no gate for asset conformance** — the harness lints scripts, scenes, shaders
+  and UIDs, but `assets/furniture/` is unchecked. `scripts/house_builder.gd:18` loads
+  by directory (`const MODEL_DIR := "res://assets/furniture/"`), so a new `.glb` with a
+  stray material name, a centred pivot or a base above y=0 enters the game with lint
+  clean, tests green and no error anywhere — it just sits wrong in the room. This is
+  the same class of silent failure `Shaders: N of M compiled OK` was added for.
+  - [moving-in:G-005] status: open | seen: 3 | harness: 0.16.0 | source: moving-in 2026-08-14
+  - Improvement: an `asset_check.py` in the `name_check.py` mould — no engine, walks
+    the glTF JSON, and fails any model in `scan_root`'s asset dirs whose material names
+    fall outside the kit's established set or whose pivot/base/facing deviates. The
+    reference values should be captured from the existing kit into a baseline file
+    (same `--baseline` / `--baseline-write` split lint already uses) so the check
+    describes *this* project's kit rather than hardcoding Kenney's.
+
+- Gap: **`node-bounds` is `Control`-only, so there is no way to ask the bridge what a
+  `Node3D` occupies** — `node-bounds /root/House/Home/Living/tableCoffeeGlass` returns
+  `Failed: Node is not a CanvasItem, so it has no screen rect`. In a 3D game the
+  equivalent question ("where does this table's top surface actually end") is asked
+  constantly, and `HouseBuilder` already answers it internally via `local_aabb()`. With no
+  verb for it I read `global_position`, separately probed the model's size out of the
+  `.glb`, and did the arithmetic by hand — and got it wrong first time, placing the book
+  4 cm over the table edge, which only the screenshot revealed.
+  - [moving-in:G-006] status: fixed | fixed-in: 0.18.0 | seen: 2 | harness: 0.16.0 | source: moving-in 2026-08-14
+  - Improvement: an `aabb --node PATH` verb returning the merged world-space AABB of the
+    node's `GeometryInstance3D` descendants (position, size, centre, and the y of the top
+    face), excluding non-geometry `VisualInstance3D`s — the skill's own notes warn that an
+    `OmniLight3D`'s AABB is a cube of twice its range and will silently corrupt any
+    measurement that includes it. That single verb would have removed every manual step
+    above and the placement error with it.
+
+- Gap: **`aabb --node PATH` still missing — hit a second time in the same session.**
+  - [moving-in:auto-04954d] status: open | seen: 1 | source: moving-in 2026-08-14
+  Verifying the placement meant re-deriving the table's world extent by hand: read
+  `global_position` off the bridge, read the pivot offset and size out of `tableCoffeeGlass.glb`
+  with a separate script, add them, then rotate the book's own footprint by -12 deg in a
+  throwaway Python file to get its bounds. Roughly 25 lines to answer "do these two boxes
+  overlap", against a game that computes exactly this internally on every single
+  `b.item()` call.
+  - (see [G-006] above — `seen:` bumped to 2)
+  - Improvement: unchanged, and now with a second use case. Beyond the verb itself,
+    `audit()` is the natural home for the check that was actually wanted: it already
+    tests room escape and floor-item overlap, but exempts anything resting on furniture,
+    so an item can sit 90% off the table it stands on and audit stays clean. A
+    `supported_by` check — footprint of a raised item against the footprint of whatever
+    it rests on — would have made this whole manual pass a single call.
+
+- Gap: **lint reports `UIDs: OK` and exit `0` on an asset the engine cannot load** — its
+  sidecar check covers `.gd`/`.uid` pairs but not imported resources, so a `.glb`, `.png`
+  or `.ogg` added outside the editor with no `.import` is invisible to every Phase 1 gate.
+  Ran `godot --headless --path . --script res://tools/lint_project.gd` immediately after
+  writing `bookOpenMCP.glb`; got `UIDs: OK` … `exit 0` with no `.import` file on disk.
+  Workaround: run `godot --headless --path . --import` by hand before trusting lint on any
+  turn that adds a non-script asset.
+  - [moving-in:G-007] status: open | seen: 1 | harness: 0.16.0 | source: moving-in 2026-08-14
+  - Improvement: extend the existing UID pass to walk `scan_root` for importable
+    extensions and report `MISSING IMPORT <path>` when a recognised asset has no
+    `.import` sidecar — the same shape as the `.uid` check already beside it, and it would
+    have turned this turn's silent pass into a one-line failure.
+
+- Gap: **`validate-ui` and `node-bounds` ignore the CanvasLayer transform, so a scaled
+  HUD reports as entirely off-screen** — `validate-ui` returned 64 findings, including
+  `ui_overflow: PanelContainer 'Room_Office' extends past viewport (rect: 1618,455 ->
+  1854,507, viewport: 1152x648)`, for a panel that a screenshot shows sitting correctly
+  inside the right edge. `node-bounds` agreed: `Rect: 1586, 32, 302x497 / In viewport:
+  False`. Both read `Control.get_global_rect()`, which is in the CanvasLayer's own
+  space; `python tools/devtools.py canvas-scale --node .../Panel` reports
+  `accumulated scale: (0.6, 0.6)`, and 1586 x 0.6 = 952 — exactly where it draws. The
+  harness already computes the missing factor in a different verb. Workaround: read
+  each finding, confirm against a screenshot and `canvas-scale`, then
+  `validate-ui --baseline-write` — which is accepting 64 findings to silence a
+  coordinate-space bug, and would equally silence a real overflow appearing later.
+  - [moving-in:G-008] status: fixed | fixed-in: 0.17.0 | seen: 1 | harness: 0.16.0 | source: moving-in 2026-08-14
+  - Arrived twice: pooled here as `moving-in:G-008`, and separately as GitHub issue
+    [gh#2], which is the id 0.17.0 closed it under. Same defect, two intake paths, two
+    id namespaces — see [H-044].
+  - Improvement: multiply the Control's rect by the accumulated `CanvasLayer.transform`
+    (the calculation `canvas-scale` already does) before comparing against the viewport
+    in both `validate-ui`'s `ui_overflow` rule and `node-bounds`' `In viewport` line.
+    Failing that, have both print the accumulated scale alongside the rect, so a reader
+    can see in one line that the numbers are not in screen space.
+
+- Gap: **`name_check.py` cannot see GDScript type-inference errors, and it is the only
+  gate a fan-out agent is allowed to run** — `:=` against a call on a `Node`-typed
+  variable is a hard compile error (`Parse Error: Cannot infer the type of "name"
+  variable because the value doesn't have a set type`), but `python tools/name_check.py`
+  reported `errors: 0 | warnings: 0` on the same file. It bit twice in one session: once
+  in an agent's `devtools_ext/commands.gd`, once in a test I wrote myself. Because
+  `CLAUDE.md` correctly forbids parallel agents from running lint (shared `.godot/`),
+  every agent's "verified" claim excluded the entire class.
+  - [moving-in:G-009] status: fixed | fixed-in: 0.18.0 | seen: 1 | harness: 0.16.0 | source: moving-in 2026-08-14
+  - Improvement: teach `name_check.py` the narrow, high-value case it can already
+    almost see — `var x := <call on a variable whose declared type is a base class that
+    does not declare that method>` — and report it as an error. It resolves declared
+    types and engine members today, which is most of the machinery. Short of that, say
+    plainly in the `--only` help text and in `CLAUDE.md` that a clean `name_check` does
+    **not** imply the file compiles, so a fan-out agent knows what its one permitted
+    gate does not cover.
+
+- Gap: **no way to simulate mouse motion, so first-person look is unverifiable** —
+  `input list` covers only InputMap actions and mouse look goes nowhere near the
+  InputMap; `key`, `input tap` and `touch` cover everything except the one device that
+  aims the camera. The result is that a game whose camera cannot turn passes every gate
+  the harness has. Workaround: wrote a project verb, `mouse_look`, that builds an
+  `InputEventMouseMotion` and pushes it with `get_viewport().push_input()` — entering at
+  the Viewport deliberately, so anything that would swallow it in a real session
+  (a Control with `mouse_filter` STOP, an earlier `set_input_as_handled()`) swallows it
+  here too. It reports before/after heading and pitch and says outright
+  `Camera did NOT move — the motion event was delivered and ignored`.
+  - [moving-in:G-010] status: open | seen: 1 | harness: 0.16.0 | source: moving-in 2026-08-14
+  - Improvement: promote it to a generic verb — `mouse move --by DX,DY [--to X,Y]`
+    and `mouse button left|right [--pressed]` — since nothing in it is project-specific
+    beyond reading back a heading. Pair it with a `--report NODE.method` or simply have
+    it return the active `Camera3D`'s global basis before and after, which is
+    game-agnostic and enough to tell a turning camera from a frozen one.
+
+- Gap: **`find-nodes --where` cannot match an enum property, which is how this bug was
+  nearly missed** — `find-nodes --class Control --where mouse_filter=0` returned nothing
+  at all, while `--class Control --property mouse_filter` listed all 89 Controls with
+  `mouse_filter=0` plainly visible among them. The filtered form silently answered "no
+  such nodes" for a predicate that has four matches; taken at face value it clears the
+  UI of exactly the fault it has.
+  - [moving-in:G-011] status: fixed | fixed-in: 0.18.0 | seen: 1 | harness: 0.16.0 | source: moving-in 2026-08-14
+  - Improvement: make `--where` compare numerically when the property's value is an int
+    or a float (`mouse_filter=0`, `layer=6`), rather than only by string equality — and,
+    when a `--where` predicate matches zero nodes but the property exists on candidates,
+    say so (`0 of 89 matched on mouse_filter`) instead of printing nothing. A silent
+    empty result and a genuine absence must not look the same; that is the same failure
+    the test runner's `Selected: N of M` line exists to prevent.
+
+- Gap: **`set-state` cannot write through a dotted path, only read through one** — every
+  knob in a Godot lighting rig lives on a sub-resource, so tuning the thing this change is
+  about was unreachable from the generic verbs. `python tools/devtools.py set-state --node
+  /root/House/WorldEnvironment --property environment.ambient_light_energy --value 0.30`
+  returned `Failed: set had no effect ... wrote 0.3 but read back null (unknown property,
+  or a setter clamped/rejected it)`, while `get-state --property environment.ambient_light_energy`
+  reads it fine. The asymmetry is undocumented: the CLAUDE.md table advertises dotted paths
+  under `get-state` and says nothing either way under `set-state`, so the natural reading is
+  that both support them. Workaround: wrote a project verb (`light_get` / `light_set` in
+  `devtools_ext/commands.gd`) that reaches the Environment and the OmniLight3Ds directly.
+  - [moving-in:G-012] status: fixed | fixed-in: 0.17.0 | seen: 1 | harness: 0.16.0 | source: moving-in 2026-08-14
+  - Closed under [gh#1.1] — same defect, arrived by both intake paths. See [H-044].
+  - Improvement: make `set-state` walk the same dotted path `get-state` already walks —
+    resolve every segment but the last, then set the last on whatever object that lands on
+    (Resource, Dictionary, or nested Object). Failing that, the error message should name
+    the real cause ("dotted paths are read-only; `environment` is a Resource") instead of
+    "unknown property", which sent me looking for a typo in a name that was correct.
+
+- Gap: **`set-state --property position` on a `CharacterBody3D` hangs the bus for the full
+  timeout** — `set-state --node /root/House/Player --property position --value "1.5,0,-5.5"`
+  returned `No response from Godot after 30.0s. The command WAS picked up (the game is
+  alive) but 'set_state' never answered`, and the read-back afterwards showed the player
+  still at its spawn `(0.5, 0.0, -3.5)`: 30 seconds spent, nothing written, no error.
+  Workaround: called the game's own `teleport_to_grid` through `run-method`, which is
+  instant — but that only exists because this project happens to have written one.
+  - [moving-in:G-013] status: wontfix | seen: 1 | harness: 0.16.0 | source: moving-in 2026-08-14
+  - Investigated under [gh#1.2] for 0.17.0 and **did not reproduce**: a scratch project
+    with a `CharacterBody3D` running `move_and_slide()` every physics frame answered in
+    0.1 s, `success=True`, reading back `1.5,0,-5.5` exactly. `_cmd_set_state` is
+    synchronous and contains nothing that can block, so the report's proposed
+    `call_deferred` would have moved an abort one frame later while breaking the
+    read-back guarantee that is the verb's whole point — clean review, clean lint, fixes
+    nothing, the [H-033] failure mode exactly.
+  - wontfix reason: the reported *mechanism* is wrong, but the *symptom* was real. What
+    actually produces it is a GDScript runtime error raised by **project** code reacting
+    to a verb (a setter, a signal, an `Area.body_entered`), which kills the handler
+    before it can reply with no exception to catch. That is tracked as [H-043] and is
+    where any further work belongs. Closing this id rather than leaving it open so it
+    cannot be picked up again and built to its wrong Improvement line.
+  - Improvement: whatever `set_state` does after the write (a read-back that re-enters the
+    physics server on a body mid-`_physics_process` is the likely culprit) needs a guard:
+    defer the write to the next idle frame, or bound the read-back and answer with what it
+    got. A verb that can consume the whole timeout and write nothing is worse than one that
+    refuses the property outright, because the failure costs 30 s and looks like a crash.
+
+- Gap: **`cmd <verb>` does not accept the hyphenated spelling its own scaffolding
+  documents** — `python tools/devtools.py cmd light-get` replied `"message": "Unknown
+  action: light-get", "success": false`, and only `cmd light_get` works. Both the harness
+  CLAUDE.md and the header comment scaffolded into `devtools_ext/commands.gd` state the
+  opposite: *"Verbs are addressed over the bus with underscores ("example_ping") and via
+  the Python client with hyphens ("cmd example-ping")."* Every generic verb IS hyphenated
+  (`scene-tree`, `find-nodes`), so the hyphen is the form the whole CLI trains you to type.
+  (This is the same defect the project already tracks as bd `moving-in-c67`, filed against
+  the docs; recording it here is what puts it in front of the harness.)
+  - [moving-in:G-014] status: fixed | fixed-in: 0.17.0 | seen: 1 | harness: 0.16.0 | source: moving-in 2026-08-14
+  - Closed under [gh#1.3] — same defect, arrived by both intake paths. See [H-044]. The
+    fix is `action.replace("-", "_")` at `dev_tools.gd:570`; note the sequence-step
+    dispatcher had always done this, so only `_check_for_commands` matched verbatim.
+  - Improvement: one line in the `cmd` handler — try the verb as given, then retry with
+    `-` translated to `_` before reporting `Unknown action`. Cheaper and less breakable
+    than correcting two documents, and it makes the project verbs match the generic ones.
+    If the hyphen form is deliberately unsupported, the fix is instead to correct the
+    scaffolded header and the CLAUDE.md sentence, and to have `Unknown action: light-get`
+    add "(did you mean `light_get`?)" when the underscore form is registered.
+
+- Gap: **`validate-ui` and `reachable-ui` compare canvas-space rects against screen
+  pixels, so any UI on a scaled `CanvasLayer` is reported as off-screen** —
+  `validate-ui` returned `[FAIL] 65 UI issues found (55 NEW, 10 pre-existing)` on a diff
+  that touched no UI file, every NEW one a `ui_overflow` like `MarginContainer ... (rect:
+  1598,40 -> 1874,521, viewport: 1152x648)`, while the screenshot showed all of them on
+  screen. `node-bounds` gave `Rect: 1586, 32, 302x497` and
+  `get-state --node /root --property content_scale_size` gave `(1152, 648)` — so not a
+  stretch-mode issue — and the layer itself reported `scale: {"x": 0.6, "y": 0.6}`.
+  1586 × 0.6 = 952, which is exactly where it draws. `reachable-ui` shares the bug and
+  labelled two clickable buttons `OFF-SCREEN`. Workaround: read each finding, prove the
+  cause, then accept 53 of them into `ui_findings_baseline.json` — which is the outcome
+  the baseline feature exists to prevent.
+  - [moving-in:G-015] status: fixed | fixed-in: 0.17.0 | seen: 1 | harness: 0.16.0 | source: moving-in 2026-08-14
+  - The same defect as `moving-in:G-008` above, reported a second time by the project
+    itself, and closed under [gh#2]. Three ids for one bug across two intake paths is
+    the clearest evidence for [H-044]. 0.17.0 fixed it in five call sites, not the two
+    the report named, and found a sixth viewport bug ([H-042]) while in there.
+  - Improvement: use `control.get_global_transform_with_canvas() * Rect2(Vector2.ZERO,
+    control.size)` instead of `control.get_global_rect()` in `_validate_ui_recursive()`
+    and in `reachable-ui`'s off-screen test — it is the same call but it includes
+    ancestor `CanvasLayer` transforms. Filed upstream with the diff. A regression test
+    is one Control on a `CanvasLayer` with `scale = 0.5` at x = 1200 of a 1152-wide
+    viewport, asserting **no** overflow finding.
+
+- Gap: **a bare `/root` node path is mangled by Git Bash on Windows** —
+  `python tools/devtools.py get-state --node /root --property size` came back
+  `Failed: Node not found: C:/Program Files/Git/root`. MSYS path conversion rewrites a
+  single-segment absolute path into a Windows one; `/root/House/Player` survives because
+  multi-segment paths are left alone, so this only bites on the shortest and most
+  obvious path in the system. Workaround: `MSYS_NO_PATHCONV=1` (or quoting as `//root`).
+  - [moving-in:G-016] status: fixed | fixed-in: 0.18.0 | seen: 1 | harness: 0.16.0 | source: moving-in 2026-08-14
+  - Improvement: the client already knows what a node path looks like. When `--node`
+    arrives matching `^[A-Za-z]:[\/].*[\/]root$` — a Windows path ending in `/root`
+    that no Godot tree could contain — it should either recover it as `/root` or fail
+    with "looks like your shell rewrote this; try MSYS_NO_PATHCONV=1". A one-line note
+    in the CLAUDE.md Gotchas would do nearly as well, since the symptom is baffling and
+    the fix is a shell variable.
+
+## 2026-08-14 — Nine gaps from `moving-in`, four agents, and a release that landed underneath them (0.18.0)
+
+- Value: **warranted** — the gate caught a parse error in a new verb that four
+  independent static checks had passed, and the investigation half of the turn
+  rejected two of the nine reports outright.
+  - Expected: that the five code fixes I had scoped from `moving-in`'s log were all
+    real and all still open, and that the main risk of a four-agent fan-out was file
+    collisions.
+  - Got: neither. **Three of the five had already shipped in 0.17.0**, committed and
+    merged to `master` two minutes before the agents started, from a parallel session
+    working the same findings through GitHub issues. Zero file collisions occurred;
+    the actual hazard was a stale context snapshot. And `check_templates.py --full`
+    then failed on `Parse Error: Cannot find member "get_column" in base "Basis"` —
+    Godot 4.7's `Basis` exposes `x`/`y`/`z` and no `get_column()`.
+  - Found: five things. (1) The `Basis.get_column` parse error above, in the new
+    `aabb` verb — invisible to `name_check.py`, to `py_compile`, to a bracket-balance
+    pass and to a hand review, because the agent that wrote it was forbidden the
+    engine ([H-021]/[H-034]) and the only gate that sees this class of error needs it.
+    (2) `get_node_bounds` was missing the `canvas_scale` key its own agent reported
+    adding — caught by the contract row, not by the report. (3) Two new stages I added
+    passed **silently**, printing nothing on success, which is the exact shape [H-035]
+    forbids; they now name what they proved. (4) `moving-in:G-011` does not reproduce
+    (below). (5) `moving-in:G-013` did not reproduce either — established in 0.17.0
+    and independently confirmed here on a separate fixture.
+  - Cheaper: for the *investigation* half, yes and decisively — reading
+    `_values_match` settled `G-011` before any scratch project existed, and the
+    scratch project's only job was to prove it by planting the removal. For the `aabb`
+    half nothing was cheaper: a GDScript parse error has no static detector in this
+    repo, which is now [H-045].
+
+**What shipped.** `aabb --node PATH` (merged world-space AABB of a 3D node's geometry,
+`Light3D` excluded and every exclusion named in `data.excluded`, failing rather than
+returning a zero box); the `find-nodes --where` denominator; reach's third state;
+`.uid` sidecars minted at install; `name_check`'s `NOT COVERED:` line; `node-bounds`
+gaining `canvas_scale`; bare `/root` recovered from Git Bash's rewrite; `set-state`
+routed through `_resolve_node`.
+
+**What was rejected, and why that is the more useful half.** Two of the nine reports
+asked for fixes to code that was already correct:
+
+- `moving-in:G-011` claimed `--where` compares only by string equality, so
+  `mouse_filter=0` matched nothing. It does not. Godot's JSON parser makes **every**
+  number a float, so the predicate genuinely arrives as `float(0.0)` against an
+  `int(0)` property — and `_values_match`'s `_is_number` widening branch has caught
+  exactly that since 0.8.0 (`git log -S` confirms the branch and the function shipped
+  in the same commit). Deleting that one branch in a scratch copy reproduces the
+  report **verbatim**: int predicates silently zero, floats/bools/Strings fine,
+  `--property` still printing the value plainly. The reporter's own installed 0.16.0
+  file was read and is intact. The likely real cause is whitespace or case in the
+  argument — `--where "mouse_filter = 0"` and `--where "Mouse_filter=0"` both return 0
+  silently, because `cmd_find_nodes` partitions on `=` without stripping. Building the
+  requested fix would have added a second numeric path beside the working one.
+- `moving-in:G-013` proposed `call_deferred` for a `set-state` timeout on a
+  `CharacterBody3D`. Answered in 0.17.0 and re-confirmed here: 0.1 s, `success=True`,
+  exact read-back, with `_physics_process` demonstrably live at ~9700 ticks. One
+  addition to the record — the reporter's "still at spawn" read-back is their own grid
+  code re-asserting position on the next physics tick, not a write that never landed.
+
+The [H-033] rule paid for itself twice in one turn. Both reports carried confident
+patches; both patches would have reviewed clean, linted clean and fixed nothing.
+
+- Gap: **two intake paths allocate ids in different namespaces and neither dedupes
+  against the other** — gaps arrive pooled from a project by `tools/upstream_gaps.py`
+  as `<project>:G-NNN`, and filed as GitHub issues by `skill-feedback-issue` as
+  `gh#N`. 0.17.0 closed the canvas-space defect as `gh#2` and the dotted `set-state`
+  as `gh#1.1`; pooling the same project's log an hour later re-appended them as
+  `moving-in:G-008`, `G-015` and `G-012`, all `status: open`. Three ids for one bug.
+  Nothing detected it — I reconciled the five duplicates by hand after noticing HEAD
+  had moved. A project that files an issue AND gets pooled is the normal case here,
+  not an edge one.
+  - [H-044] status: open | seen: 1 | harness: 0.18.0
+  - Improvement: have `upstream_gaps.py` refuse to append a gap whose evidence block
+    substantially matches one already `fixed` in the destination, printing
+    `SKIPPED <id>: looks like <other-id>, already fixed in X.Y.Z` rather than
+    appending silently. A `see-also:` field on the status line would let the two
+    namespaces point at each other once a human confirms the match.
+
+- Gap: **no way to compile-check GDScript without the engine, so a concurrent agent
+  writes it blind** — `check_templates.py` and every Godot invocation are serialized
+  by the shared `.godot` cache ([H-021], [H-034]), so a fan-out agent editing
+  `dev_tools.gd` is forbidden the only tool that can parse what it just wrote. The
+  agent substituted `py_compile` on the Python half, a bracket-balance pass, a
+  tab-indentation check and a precedent search for every syntax form it used — and
+  still shipped `Basis.get_column()`, which does not exist in Godot 4.7.
+  `name_check.py` did not catch it either: it resolves members on engine **classes**,
+  and `Basis` is a builtin, so a bogus method on a builtin-typed local passes. The
+  engine API index it already downloads *does* carry `builtins.Basis.members` — the
+  data is present and unused.
+  - [H-045] status: open | seen: 1 | harness: 0.18.0
+  - Improvement: two independent halves, smallest first. (a) Teach `name_check.py` to
+    check member access on locals whose declared type is a builtin it has members for.
+    It already parses `var x: Basis` and already holds the member list, so this is a
+    lookup, not new inference — and it would have caught this exact defect. (b) Add a
+    real parse-only gate that needs no project (`gdtoolkit`'s `gdparse`, or
+    tree-sitter-gdscript), runnable concurrently because it touches no `.godot/`.
+
+- Gap: **`find-nodes --property` prints `null` for a path it could not resolve** — a
+  dotted path into a built-in struct (`position.x`, `modulate.a`, `size.y`) is
+  unresolvable, because `_resolve_property_path` walks only `Object` and `Dictionary`.
+  `get-state` is honest about it (`position is a Vector3, not an object -- cannot read
+  .x off it`, exit 1); `find-nodes` prints `position.x=null`, indistinguishable from a
+  property that genuinely holds null. `--where` shares the root cause and is fixed
+  this release by carrying the resolver's reason; the `--property` half still lies.
+  Found while investigating `moving-in:G-011`, reported by nobody.
+  - [H-046] status: open | seen: 1 | harness: 0.18.0
+  - Improvement: the report loop in `_cmd_find_nodes` should carry the resolver's
+    `reason` instead of `null` — either as `{"unresolved": reason}` or by omitting the
+    key and listing it once per query. Alternatively, let `_resolve_property_path`
+    read components off Vector2/3/4, Color and Rect2, which is plainly what a caller
+    writing `position.x` means; that closes the cause rather than the symptom.
+
+**Validation run this turn:** `python tools/check_templates.py --full` — **OK**, 74/74
+contract rows, including two new stage-5 lines that plant the defect they detect
+([H-035]): `aabb measured the prop at 0.200 (the box), not ~10 (the OmniLight3D's
+range volume); 1 node(s) excluded by name`, and `find_nodes --where int predicate
+matched 4 (the numeric widening works), and the two empty results read differently`.
+Stage 1.5 gained `no-VCS distinct from a real zero`, confirmed to FAIL when the fix is
+reverted. `python -m unittest discover -s tools` — 17 OK. `python
+tools/record_version.py --record` then `--check` — OK at `0.18.0`, 12 shipped files,
+47 bus verbs + 49 CLI commands documented. `name_check.py` was touched this release,
+so it was run against two real scaffolded projects per the false-positive rule
+([H-030]): `../moving-in` and `../gather` both `errors: 0 | warnings: 0 | advisory: 2`,
+unchanged from before the edit.

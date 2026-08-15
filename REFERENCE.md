@@ -56,6 +56,16 @@ of it from scripts — and Claude Code can do the same to check its own changes.
    `project.godot`; adds the `DevTools` autoload; and runs a headless smoke
    check. See `commands/scaffold-godot-harness.md` for the exact steps.
 
+   Every installed `.gd` also gets a `.uid` sidecar minted offline, using the same
+   encoding `new-uid` implements — the scaffolder used to copy the script alone, and
+   because the default `uid_check_ignore` covers exactly the paths it writes to, lint
+   reported `UIDs: OK` over the hole (`moving-in:G-004`). An existing sidecar is
+   **never** rewritten: a uid is an identity, and churning one breaks every scene that
+   references the script. The sidecars are deliberately absent from
+   `.harness_manifest.json` for the same reason — a recorded hash would let a later
+   refresh judge the project's own identity "pristine" and clobber it. Projects
+   declaring a Godot older than 4.4 are skipped, since uids arrive in 4.4.
+
 > Note: if the Godot editor has the project open while you scaffold, close and
 > reopen it so the editor picks up (and doesn't clobber) the edited
 > `project.godot`.
@@ -308,7 +318,7 @@ Lives at `res://addons/godot_selftest/devtools_config.json`.
 | `hud_layer_name` | String | `HUD` | CanvasLayer name used by UI snapshot/validation verbs. |
 | `test_dir` | String | `res://test/unit` | Directory the test runner scans for `test_*.gd`. |
 | `scan_root` | String | `res://` | Root for scene/UID scanning. |
-| `uid_check_ignore` | Array | `["res://addons/", "res://tools/"]` | Path prefixes exempt from the missing-`.uid`-sidecar warning. The defaults cover the files the scaffolder copies in — it can't generate a valid `.uid` (ids are engine-assigned), and a gate that cries wolf on install day gets ignored. |
+| `uid_check_ignore` | Array | `["res://addons/", "res://tools/"]` | Path prefixes exempt from the missing-`.uid`-sidecar warning. The defaults cover the files the scaffolder copies in. The original reason — that it could not mint a valid `.uid` — no longer holds: `new-uid` mints them offline and the scaffolder now does so for every `.gd` it installs. The default stays because this same array also gates the class-cache, compile, shader and string-ref passes, so widening it runs all four across the addon. Narrow it per-pass, not here. |
 | `name_check_extra_types` | Array | `[]` | Type names `tools/name_check.py` should accept without proof — the escape hatch for classes a GDExtension registers at runtime, which `--dump-extension-api` cannot see. Leave empty until the checker reports a false positive; every name added here is a name it will never again tell you is missing. |
 | `name_check_ignore` | Array | `[]` | Path prefixes exempt from `name_check.py` findings. Generated or vendored-but-not-plugin code goes here. Vendored addons (an `addons/<name>/` holding a `plugin.cfg`) and `.gdignore` directories are already exempt without configuration. |
 | `reach_aliases` | Object | `{}` | Credits a script reach can never observe to the observed script(s) that vouch for it: `{"world/tile_path_finder.gd": ["world/tile_scenes/bone_worker.gd"]}`. A `RefCounted` or `Resource` held as a plain field is never any node's script, so no amount of exercising it registers — and a permanently deflated reach number teaches readers to ignore the field. Credited files land in a **separate bucket** (`+N by alias`), never folded into `reached`: it is a claim your config makes, shown so a reader can disbelieve it. A voucher that was itself not reached credits nothing. |
@@ -621,7 +631,7 @@ touch <press|release|drag|clear|list>, set-feature, step-time,
 set-game-speed, wait-frames, clear-nodes, validate-ui, ui-snapshot,
 node-bounds, save-ui-baseline, ui-snapshot-diff, tilemap-cells,
 tilemap-region, scripts-seen, canvas-scale, set-resolution,
-find-nodes, press, raycast, sample-pixels, reachable-ui, new-uid
+find-nodes, press, raycast, sample-pixels, reachable-ui, aabb, new-uid
 ```
 
 `new-uid` is the one subcommand that never touches the bus — see below.
@@ -636,6 +646,13 @@ Notable flags:
 - `set-resolution --size W,H` — resize the game window and read back what was
   actually applied; a headless or tiling environment that clamps the resize is
   reported as a failure, not "Resized".
+- `aabb --node PATH` — the merged **world-space** AABB of a 3D node's geometry:
+  `min`, `max`, `size`, `center`, plus `top_y` ("what do I rest something on") and
+  `bottom_y` ("is it sunk into the floor"). This is `node-bounds`' 3D counterpart —
+  `node-bounds` answers *where on screen*, `aabb` answers *where in the world*. It
+  merges `GeometryInstance3D` descendants and reports both what it merged
+  (`merged`) and what it skipped and why (`excluded`); see the sharp edge below,
+  because what it excludes is the whole point.
 
 - `get-state --node PATH --property NAME` — repeatable. Without it a single `Label`
   read returns ~120 keys, which is why every assertion used to be piped through an
@@ -955,6 +972,17 @@ python tools/name_check.py                  # every run after that, no engine
 | `class_cache_stale` | warning | A `class_name` present in the source but absent from `.godot/global_script_class_cache.cfg` — read-only, so it stays safe with other agents running. Says the engine will disagree with your files until you import. |
 | `string_ref_unresolved` | advisory | The name inside `has_method("x")` / `connect("x", …)` and friends, matching `lint_project.gd`'s rule of the same name. Advisory for the same structural reason. |
 
+**A clean run is not a compile, and the tool now says so itself.** Every run that ends
+with zero errors prints a `NOT COVERED:` line, and `--json` carries the same text under
+a `not_covered` key. The gap is type inference: `var kids := root.get_children()` where
+`root` is typed only `Node` is a hard parse error, and every name in that line resolves,
+so this checker passes it. Deciding it would need method resolution order and return
+types — i.e. opening the project, the one thing this gate exists not to do. It matters
+because this is the only concurrency-safe gate, so it is the only one a fan-out agent is
+allowed to run: two agents in one real session shipped code that did not compile behind a
+clean `name_check` (`moving-in:G-009`). The line is suppressed when there are errors to
+report, so it never buries a real finding.
+
 Exit codes follow the harness convention: `0` clean, `1` findings that count (errors,
 plus warnings under `--strict`), `2` could not run. Flags: `-p/--project`, `--json`,
 `--strict`, `--only <prefix>` (repeatable — filters the *report* while still scanning
@@ -1083,6 +1111,18 @@ python tools/verify_ledger.py stats
 `record` derives everything it can — timestamp, sha, branch, changed files — and takes
 only runner exit codes, Phase 4 check results, and duration from the caller. The split
 is deliberate: a run can misreport its own checks, but not whether it touched the diff.
+
+**Reach has three states, not two.** A ratio (`reached 1/4`), a *real* zero (git is
+present and reports nothing changed — a fact), and **unavailable** (there is no git
+repository at all, so there is no changed set to score against). The third used to print
+as `reached 0/0`, which reads as "nothing to check" when the truth is "cannot tell", and
+the row went into the ledger carrying a denominator it never had (`moving-in:G-003`). In
+the recorded row this is `changed: null` plus an explicit `changed_unavailable: true`,
+with every reach bucket `null` — `null` being this file's established shape for "could
+not tell", so older readers already skip the row rather than scoring it as a clean
+sweep. `stats` counts those runs separately instead of blaming them for having no
+snapshot. Reach `unavailable` never drives an `insufficient` verdict: that verdict is a
+claim about the run, and this is a statement about the checkout.
 
 **Reach is the field that matters.** `scene-tree` reports each node's `script` and
 `scene_file` (0.6.0+), so reach is the intersection of a snapshot with `git diff` rather
@@ -1275,8 +1315,33 @@ Run it after any script/scene/gameplay change, before committing.
   about itself. When it can report nothing, the rect is a correct origin with a
   **zero size** — "where on screen is this" answered, "how big is it" not. That is not
   the same claim as "this node is zero-sized", and `data.size_source` is what tells
-  them apart (`canvas transform x Control.size`, `canvas transform x Sprite2D texture
-  rect`, `… x origin only (this class reports no extent)`).
+  them apart, and it now names the transform outright rather than paraphrasing it
+  (`get_global_transform_with_canvas() x Control.size (screen space)`,
+  `… x Sprite2D texture rect (screen space)`, `… x origin only (this class reports
+  no extent)`). `data.canvas_scale` carries the accumulated canvas scale alongside
+  the rect, so a layer-scale problem is diagnosable from this one call instead of a
+  second trip through `canvas-scale`.
+- **`aabb` excludes `Light3D`, and that exclusion is load-bearing.** `Light3D` is a
+  `VisualInstance3D`, so a naive geometry walk includes it — and an `OmniLight3D`'s
+  AABB is a cube of *twice its range*, not its visible size. A ceiling lamp with a
+  light child measured 7.2 x 7.2 units instead of 0.2 in a real project, which
+  silently corrupted every "what is the top of this" computed from it. `aabb` also
+  skips zero-size `GeometryInstance3D`s (a mesh-less `MeshInstance3D`, an unbuilt
+  CSG) rather than letting their origin drag the box, and non-geometry
+  `VisualInstance3D`s such as `Decal` and `ReflectionProbe`. Everything skipped is
+  listed in `data.excluded` with its reason, so a suspiciously small `merged_count`
+  is traceable rather than mysterious. Children *under* an excluded node are still
+  walked — a mesh parented to a lamp is still geometry.
+- **`aabb` on a node with no geometry FAILS.** It does not return a zero box. A zero
+  AABB at the origin is indistinguishable from a real measurement of a small object
+  at the origin, and that is exactly the kind of plausible-looking wrong number this
+  harness exists to refuse. `GPUParticles3D` is merged rather than excluded: it is
+  genuinely geometry, but its AABB is a *visibility* volume and is often deliberately
+  generous, so read `merged` if a particle-bearing node measures large.
+- **A rotated node's `aabb` encloses the footprint, it is not the footprint.** The box
+  is axis-aligned by definition; `data.node_transform.axis_aligned` is `false` when
+  the node is rotated off-axis, and the CLI says so on the rotation line. Comparing
+  two enclosing boxes overstates overlap for anything turned off the grid.
 - **A wedged handler still costs the caller its timeout.** GDScript has no catchable
   exception: a runtime error raised by *project* code reacting to a verb (a setter, a
   signal, an `Area` `body_entered`) kills the handler before it can reply, and the
