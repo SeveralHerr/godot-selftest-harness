@@ -53,9 +53,6 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 TEMPLATES = REPO_ROOT / "templates"
 
-# Template files that are content for humans, not part of the runnable project.
-SKIP_COPY = {"CLAUDE.harness.md", "log-devtools.md"}
-
 GODOT_TIMEOUT = 180          # seconds, per subprocess call
 BOOT_TIMEOUT = 30            # seconds to wait for the bridge to answer ping
 
@@ -403,15 +400,33 @@ def stage_coverage():
 
 
 def stage_assemble(scratch, user_dir_name):
-    for src in TEMPLATES.rglob("*"):
-        if not src.is_file():
-            continue
-        rel = src.relative_to(TEMPLATES)
-        if rel.name in SKIP_COPY:
-            continue
-        dst = scratch / rel
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(src, dst)
+    # The project's own files first (project.godot, the fixture scene), then the
+    # REAL installer over them. This stage used to copy templates/ by hand, which
+    # made it a third definition of "installed" beside the slash command and every
+    # benchmark rig (gh#9 / H-047); now `scaffold_install.py full` is the one
+    # definition and this check exercises it, autoload wiring included.
+    (scratch / "project.godot").write_text(
+        "\n".join([
+            "config_version=5",
+            "",
+            "[application]",
+            "",
+            'config/name="harness_check"',
+            'run/main_scene="res://main.tscn"',
+            'config/features=PackedStringArray("4.3")',
+            "config/use_custom_user_dir=true",
+            'config/custom_user_dir_name="%s"' % user_dir_name,
+            "",
+            "[display]",
+            "",
+            # Stated rather than left to default, because check_canvas_layer_space()
+            # asserts these exact numbers. Headless has no window, so the UI verbs
+            # fall back to this designed size -- without the fallback the root
+            # viewport is 64x64 and every Control wider than 64px "overflows".
+            "window/size/viewport_width=1152",
+            "window/size/viewport_height=648",
+            "",
+        ]), encoding="utf-8")
 
     # Fixture script for the contract table: a typed-argument method (run_method
     # coercion rows) and a painted TileMapLayer child named "Cells" (tilemap_cells /
@@ -601,33 +616,22 @@ def stage_assemble(scratch, user_dir_name):
             "",
         ]), encoding="utf-8")
 
-    (scratch / "project.godot").write_text(
-        "\n".join([
-            "config_version=5",
-            "",
-            "[application]",
-            "",
-            'config/name="harness_check"',
-            'run/main_scene="res://main.tscn"',
-            'config/features=PackedStringArray("4.3")',
-            "config/use_custom_user_dir=true",
-            'config/custom_user_dir_name="%s"' % user_dir_name,
-            "",
-            "[display]",
-            "",
-            # Stated rather than left to default, because check_canvas_layer_space()
-            # asserts these exact numbers. Headless has no window, so the UI verbs
-            # fall back to this designed size -- without the fallback the root
-            # viewport is 64x64 and every Control wider than 64px "overflows".
-            "window/size/viewport_width=1152",
-            "window/size/viewport_height=648",
-            "",
-            "[autoload]",
-            "",
-            'DevTools="*res://addons/godot_selftest/dev_tools.gd"',
-            "",
-        ]), encoding="utf-8")
-    print("stage 2 assemble: scratch project at %s" % scratch)
+    sys.path.insert(0, str(REPO_ROOT / "tools"))
+    import scaffold_install  # noqa: E402  (the installer under test)
+    rc = scaffold_install.install_full(REPO_ROOT, scratch, {}, hook=False)
+    if rc != 0:
+        return fail("scaffold_install.py full returned %d on the scratch project" % rc)
+    project_text = (scratch / "project.godot").read_text(encoding="utf-8")
+    if project_text.count(scaffold_install.AUTOLOAD_LINE) != 1:
+        return fail("full did not wire the DevTools autoload exactly once:\n" + project_text)
+    for rel in scaffold_install.SHIPPED_FILES + [
+            "devtools_ext/commands.gd", "test/unit/test_selftest.gd", "CLAUDE.md",
+            "log-devtools.md", scaffold_install.CONFIG_REL]:
+        if not (scratch / rel).is_file():
+            return fail("full did not install %s" % rel)
+    print("stage 2 assemble: scratch project at %s (installed by scaffold_install.py full: "
+          "%d shipped files, config, devtools_ext, test seed, CLAUDE.md, log, autoload)"
+          % (scratch, len(scaffold_install.SHIPPED_FILES)))
     return True
 
 
@@ -818,6 +822,7 @@ def stage_runners(godot, scratch):
                 ok = check_shader_denominator(proc.stdout) and ok
     if ok:
         ok = stage_vacuous_control(godot, scratch) and ok
+        ok = stage_runner_controls(godot, scratch) and ok
         ok = stage_shader_control(godot, scratch) and ok
         ok = stage_capture(godot, scratch) and ok
     return ok
@@ -983,6 +988,62 @@ def stage_vacuous_control(godot, scratch):
         return True
     finally:
         planted.unlink(missing_ok=True)
+
+
+def stage_runner_controls(godot, scratch):
+    """Two more positive controls for run_tests.gd, each planting the defect it
+    claims to detect (H-035).
+
+    1. gh#10: a test script that does not compile, selected by --file. The verdict
+       must blame the compile failure, not the selector.
+    2. H-029: no class cache (never-imported project). The runner must refuse with
+       exit 2 naming --import, not report a pass over tests that could not run.
+    """
+    ok = True
+    broken = scratch / "test" / "unit" / "test_broken_control.gd"
+    broken.write_text(
+        "extends RefCounted\n"
+        "var _T\n"
+        "\n"
+        "func test_never_reached() -> String:\n"
+        "\tvar err := _T.assert_true(true, \"x\")  # := on an untyped call: cannot infer\n"
+        "\treturn err\n",
+        encoding="utf-8")
+    try:
+        proc = run_godot(godot, scratch, ["--script", "res://tools/run_tests.gd",
+                                          "--", "--file", "test_broken_control.gd"])
+        out = proc.stdout
+        if proc.returncode != 2:
+            ok = fail("--file on a script that fails to compile exited %d, expected 2\n%s"
+                      % (proc.returncode, out))
+        elif "FAILED TO COMPILE" not in out or "test_broken_control.gd" not in out.split("SELECTED NOTHING")[-1]:
+            ok = fail("--file on an uncompilable script did not blame the compile "
+                      "failure by name in the verdict (gh#10)\n%s" % out)
+        elif "--filter matches method names" in out:
+            ok = fail("--file on an uncompilable script still printed selector-syntax "
+                      "advice - the verdict points at the wrong cause (gh#10)\n%s" % out)
+        else:
+            print("stage 4 tests: uncompilable --file target -> verdict names the compile "
+                  "failure, not the selector (exit 2)")
+    finally:
+        broken.unlink(missing_ok=True)
+
+    cache = scratch / ".godot" / "global_script_class_cache.cfg"
+    if not cache.exists():
+        return fail("expected %s to exist after --import; cannot run the H-029 control" % cache)
+    hidden = cache.with_suffix(".cfg.hidden")
+    cache.rename(hidden)
+    try:
+        proc = run_godot(godot, scratch, ["--script", "res://tools/run_tests.gd"])
+        out = proc.stdout
+        if proc.returncode != 2 or "never been imported" not in out or "--import" not in out:
+            ok = fail("run_tests.gd with no class cache exited %d; expected 2 with a line "
+                      "naming --import (H-029)\n%s" % (proc.returncode, out))
+        else:
+            print("stage 4 tests: no class cache -> exit 2 naming --import (H-029 control)")
+    finally:
+        hidden.rename(cache)
+    return ok
 
 
 def stage_capture(godot, scratch):
@@ -1270,7 +1331,8 @@ def check_envelope(action, reply):
 
 
 _FINDINGS_KEYS = ("findings", "counts", "checks_run", "checks_skipped", "viewport",
-                  "baseline_in_use", "new_count", "pre_existing_count")
+                  "baseline_in_use", "new_count", "pre_existing_count",
+                  "geometry_trustworthy", "geometry_caveat")
 _FINDINGS_CHECKS = ("ui_layout", "ui_reachable", "signal_unconnected",
                     "performance", "scene_validation")
 
@@ -1346,6 +1408,62 @@ def check_findings_aggregate(client, scratch):
           "ui_layout on the planted defects; --no-scenes -> %d checks with "
           "scene_validation named as skipped"
           % (len(ran), len(_FINDINGS_CHECKS), len(data["findings"]), ui, len(ran2)))
+
+    # H-051: this stage runs HEADLESS, which is exactly the condition under which
+    # a screen-position verdict is not what a player sees (the window is 64x64;
+    # a node the game centres from window size sits 368px off). The aggregate
+    # must say so, and the flag must survive the trip through the aggregate -
+    # findings re-shapes each check's reply and would otherwise drop it. The
+    # planted ScaledOutside button is a geometry finding (ui_overflow), so a
+    # per-finding caveat must be present on at least one.
+    if data.get("geometry_trustworthy") is not False or not str(data.get("geometry_caveat", "")):
+        return fail("findings headless reports geometry_trustworthy=%r, caveat=%r - a "
+                    "headless run must flag its screen geometry as not-what-a-player-sees "
+                    "(H-051)" % (data.get("geometry_trustworthy"), data.get("geometry_caveat")))
+    geometry_hits = [f for f in data["findings"] if f.get("caveat")]
+    if not geometry_hits:
+        return fail("findings headless carries the aggregate caveat but no per-finding "
+                    "`caveat` on any geometry finding; the planted ScaledOutside overflow "
+                    "should have one (H-051)")
+    if any(f.get("caveat") for f in data["findings"] if f.get("code") in ("ui_transparent", "small_tap_target")):
+        return fail("findings stamped the headless caveat on a non-geometry finding "
+                    "(ui_transparent / small_tap_target are the same headless or windowed)")
+    print("stage 5 bridge: findings headless -> geometry_trustworthy=false, %d of %d finding(s) "
+          "carry the H-051 caveat (geometry codes only)" % (len(geometry_hits), len(data["findings"])))
+    return True
+
+
+def check_geometry_caveat_and_hide(client, scratch):
+    """node-bounds must say its rect is headless geometry (H-051); screenshot
+    --hide must refuse a path it cannot hide, and accept a CanvasLayer (gh#5).
+
+    Screenshot cannot capture headless, so the hide check stops at the collect
+    step: an unhideable path returns the refusal BEFORE any capture is attempted
+    (distinct message), while a CanvasLayer path gets past it (and then fails on
+    the capture, which is the headless-only part). Both branches are asserted so
+    a `--hide` that silently ignores everything cannot pass.
+    """
+    reply = client.send_command(scratch, "get_node_bounds", {"node_path": "/root/Main/Go"})
+    data = reply.get("data") or {}
+    if data.get("geometry_trustworthy") is not False or not data.get("geometry_caveat"):
+        return fail("node-bounds headless: geometry_trustworthy=%r caveat=%r; a headless rect "
+                    "must carry the H-051 caveat" % (data.get("geometry_trustworthy"),
+                                                     data.get("geometry_caveat")))
+    if "HEADLESS" not in str(data["geometry_caveat"]):
+        return fail("node-bounds caveat does not name HEADLESS: %r" % data["geometry_caveat"])
+
+    bad = client.send_command(scratch, "screenshot", {"hide": ["/root/Main/NoSuchNode"]})
+    if bad.get("success") or "matched nothing it could hide" not in str(bad.get("message", "")):
+        return fail("screenshot --hide on a missing node did not refuse: %r" % bad)
+    bad2 = client.send_command(scratch, "screenshot", {"hide": ["/root/Main/Prop3D"]})
+    if bad2.get("success") or "no visibility" not in str(bad2.get("message", "")):
+        return fail("screenshot --hide on a Node3D (no `visible`) did not refuse by class: %r" % bad2)
+    layer = client.send_command(scratch, "screenshot", {"hide": ["/root/Main/ScaledHud"]})
+    if "matched nothing it could hide" in str(layer.get("message", "")):
+        return fail("screenshot --hide on a CanvasLayer was refused as unhideable - the "
+                    "gh#5 fix (CanvasLayer counts) is not in effect: %r" % layer)
+    print("stage 5 bridge: node-bounds headless carries the H-051 caveat; screenshot --hide "
+          "refuses a missing node and a Node3D by name, accepts a CanvasLayer")
     return True
 
 
@@ -1655,6 +1773,8 @@ def check_paused_bridge(client, scratch):
 
     if call("ping")["data"].get("paused") is not False:
         return fail("ping must report paused=False on an unpaused game")
+    if call("performance").get("data", {}).get("tree_paused") is not False:
+        return fail("performance must report tree_paused=False on an unpaused game")
 
     r = call("run_method", {"node_path": "/root/Main",
                             "method": "harness_set_paused", "args": [True]})
@@ -1673,8 +1793,19 @@ def check_paused_bridge(client, scratch):
                              ("validate_ui", {})):
             if not call(action, args).get("success") and action != "validate_ui":
                 return fail("%s failed while paused" % action)
+        # gh#6: performance answers on a paused tree with plausible numbers, and
+        # a whole /verify phase validated a frozen game on them. The reply must
+        # carry the fact.
+        perf = call("performance")
+        if perf.get("data", {}).get("tree_paused") is not True:
+            return fail("performance on a paused tree reported tree_paused=%r; the reply "
+                        "must say the numbers describe a game that is not stepping (gh#6)"
+                        % perf.get("data", {}).get("tree_paused"))
+        if "PAUSED" not in str(perf.get("message", "")):
+            return fail("performance message on a paused tree does not say PAUSED: %r"
+                        % perf.get("message"))
         print("stage 5 bridge: paused tree still answers (ping/scene_tree/find_nodes/"
-              "validate_ui), ping reports paused=True")
+              "validate_ui), ping reports paused=True, performance says tree_paused=True")
     finally:
         call("run_method", {"node_path": "/root/Main",
                             "method": "harness_set_paused", "args": [False]})
@@ -1877,6 +2008,7 @@ def stage_bridge(godot, scratch, full):
         # moves the planted UI findings to pre-existing, and this check needs them
         # gating so a zero here means "the check did not run".
         ok = check_findings_aggregate(client, scratch) and ok
+        ok = check_geometry_caveat_and_hide(client, scratch) and ok
         ok = check_ui_baseline(client, scratch) and ok
         ok = check_paused_bridge(client, scratch) and ok
         ok = check_dispatch_reentrancy(client, scratch) and ok

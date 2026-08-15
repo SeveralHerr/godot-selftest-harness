@@ -17,6 +17,14 @@ Every step below must be **idempotent**: re-running this command on an
 already-scaffolded project must not corrupt it, duplicate autoload lines, or
 clobber project-authored files.
 
+**One installer, not thirteen hand-runs.** Steps 3–10 are performed by a single call
+to `tools/scaffold_install.py full` (step 3). It is the one definition of "installed"
+— `check_templates.py` exercises the same code, and any automation (CI, a benchmark, a
+grader) can call it with no LLM in the loop (gh#9). The prose in steps 4–10 stays as
+the specification of what `full` did, the report you write from its output, and the
+without-Python fallback. Do **not** re-run those steps by hand after `full` unless the
+Python interpreter probe in step 1 failed.
+
 Work through the steps in order. Report a short summary at the end.
 
 ---
@@ -113,16 +121,44 @@ If `use_custom_user_dir` is true, the path is instead
 some platforms). Keep this for the final report only; the config file never
 stores the name.
 
-## Step 3 — Install the addon core
+## Step 3 — Run the installer (`full`): addon core, tools, config, extension, tests, CLAUDE.md, log, hook, autoload
 
-Install the addon files into `res://addons/godot_selftest/`:
+One call does steps 3–10. Detect `hud_layer_name` first (step 7 says how: the name of
+the first `CanvasLayer` in the main scene, else `"HUD"`) and pass it; `main_scene` is
+detected by the installer from `run/main_scene`. Pass `--hook-python "$PY"` so the
+`Stop` hook runs the interpreter that actually executes on this machine (step 1's
+probe), not the Store alias.
+
+```bash
+"$PY" "${CLAUDE_PLUGIN_ROOT}/tools/scaffold_install.py" full --project "$ROOT" \
+  --plugin-root "${CLAUDE_PLUGIN_ROOT}" \
+  --hook-python "$PY" \
+  --set hud_layer_name=<detected>
+```
+
+It prints one line per file/key/step. Read it and carry into the summary: every
+`.bak` it created (step 4), every `.uid` it minted (step 4), which config keys it kept
+as project-owned (step 7), whether `commands.gd` / `CLAUDE.md` / `log-devtools.md`
+already existed (steps 5, 8, 9), and how the autoload landed (`present` / `appended
+last` / `section created`, step 10). It leaves for later steps only what needs a
+running engine or a scene reader: the Godot binary (step 11) and the import + lint
+smoke check (step 12).
+
+Without Python: fall through steps 3–10 below by hand, and say in the summary that
+pristine-file detection, `.uid` minting and the ownership-tracking config merge were
+skipped.
+
+### What `full` did for the addon core (was step 3)
+
+Installed `addons/godot_selftest/dev_tools.gd` and `scene_validator.gd` into
+`res://addons/godot_selftest/` (`devtools_config.json` is merged, not copied — step 7).
+Equivalent to:
 
 ```bash
 "$PY" "${CLAUDE_PLUGIN_ROOT}/tools/scaffold_install.py" files --project "$ROOT" \
   --plugin-root "${CLAUDE_PLUGIN_ROOT}" \
   addons/godot_selftest/dev_tools.gd \
   addons/godot_selftest/scene_validator.gd
-# devtools_config.json is merged in step 7, not copied.
 ```
 
 Without Python: `mkdir -p "$ROOT/addons/godot_selftest"` and `cp` the two files
@@ -131,9 +167,10 @@ from `${CLAUDE_PLUGIN_ROOT}/templates/addons/godot_selftest/`.
 The validator is namespaced (`GodotSelftestSceneValidator`) to avoid `class_name`
 collisions. See step 4 for what the installer does about existing files.
 
-## Step 4 — Install the tool scripts
+## Step 4 — Install the tool scripts (done by `full` in step 3)
 
-Same installer, for `res://tools/`:
+Same installer, for `res://tools/` — `full` installs exactly this list (it is
+`SHIPPED_FILES` in `scaffold_install.py`, the one list `record_version.py` also stamps):
 
 ```bash
 "$PY" "${CLAUDE_PLUGIN_ROOT}/tools/scaffold_install.py" files --project "$ROOT" \
@@ -184,7 +221,7 @@ say in the summary that pristine-file detection **and** `.uid` minting were skip
 Mint them afterwards with `python tools/devtools.py new-uid --write <file>.gd` — it
 refuses to overwrite an existing one, so it is safe to run over the whole set.
 
-## Step 5 — Create the registry extension (never overwrite)
+## Step 5 — Create the registry extension (never overwrite) (done by `full` in step 3)
 
 `res://devtools_ext/commands.gd` is where the project registers its own debug
 verbs. Create it from the stub **only if it does not already exist** — never
@@ -202,7 +239,7 @@ fi
 cp "${CLAUDE_PLUGIN_ROOT}/templates/devtools_ext/commands.example.gd" "$ROOT/devtools_ext/commands.example.gd"
 ```
 
-## Step 6 — Seed the project's selftest and a sequence example (only if empty)
+## Step 6 — Seed the project's selftest and a sequence example (only if empty) (done by `full` in step 3)
 
 Create `res://test/unit/` and copy `test_selftest.gd` **only if the test dir is
 missing or empty** (do not litter a project that already has tests). Always copy
@@ -226,7 +263,7 @@ fi
 cp "${CLAUDE_PLUGIN_ROOT}/templates/test/sequences/smoke.json" "$ROOT/test/sequences/smoke.json"
 ```
 
-## Step 7 — Write `devtools_config.json` with detected values
+## Step 7 — Write `devtools_config.json` with detected values (done by `full` in step 3; `config --set` for anything detected later)
 
 Write `res://addons/godot_selftest/devtools_config.json` from the shipped schema plus
 the values detected below, preserving anything the project customized:
@@ -323,7 +360,7 @@ bookkeeping, not configuration — every consumer ignores unknown keys. It is wo
 committing (it is what makes the next refresh non-destructive); deleting it just
 resets the tracking to the first-run heuristic.
 
-## Step 8 — Install/refresh the CLAUDE.md guidance section
+## Step 8 — Install/refresh the CLAUDE.md guidance section (done by `full` in step 3)
 
 Create or update `<ROOT>/CLAUDE.md` so future Claude sessions know the harness
 exists and how to drive it. The full section body — including its delimiter
@@ -381,7 +418,7 @@ The template section is deliberately **lean and reference-style** (a pointer /
 cheat-sheet, not a manual) because `CLAUDE.md` is always-on, per-session context.
 Keep the full procedures in `/verify`, this command, and `REFERENCE.md`.
 
-## Step 9 — Install the devtools gaps log + its `Stop` hook
+## Step 9 — Install the devtools gaps log + its `Stop` hook (done by `full` in step 3)
 
 The harness improves from evidence, and the evidence is perishable: the moment a
 workaround is found, the friction that forced it is forgotten. `log-devtools.md`
@@ -468,7 +505,7 @@ A project that finds the warning easy to ignore can set `"log_check_block": true
 section carries the matching instruction — the hook only reminds; the convention
 itself lives in `CLAUDE.md`.
 
-## Step 10 — Wire the DevTools autoload (idempotent)
+## Step 10 — Wire the DevTools autoload (idempotent) (done by `full` in step 3)
 
 Add the DevTools autoload to `project.godot` **only if it is not already
 present**. Find the `[autoload]` section; if there is no `DevTools=` line,
@@ -536,7 +573,27 @@ fi
 if [ -z "$GODOT" ] && [ -x "/Applications/Godot.app/Contents/MacOS/Godot" ]; then
   GODOT="/Applications/Godot.app/Contents/MacOS/Godot"
 fi
-if [ -z "$GODOT" ] && command -v godot >/dev/null 2>&1; then GODOT="$(command -v godot)"; fi
+if [ -z "$GODOT" ] && command -v godot >/dev/null 2>&1; then
+  GODOT="$(command -v godot)"
+  # Tier 4 can return a shell WRAPPER, not a binary (gh#7): `~/bin/godot` was a
+  # `#!/bin/sh` script exec-ing the real .exe. It runs fine from this shell, but
+  # `godot_bin` is executed by Windows Python (devtools.py, name_check.py), which
+  # can neither run a `#!` script nor resolve an MSYS `/c/...` path - the same
+  # trap as the Store alias in step 1: resolvable HERE is not executable THERE.
+  # Resolve a wrapper to its exec target, and put any MSYS path through cygpath.
+  if head -c 2 "$GODOT" 2>/dev/null | grep -q '#!'; then
+    TARGET="$(sed -n 's/^[[:space:]]*exec[[:space:]]\+"\?\([^"[:space:]]*\)"\?.*/\1/p' "$GODOT" | head -1)"
+    if [ -n "$TARGET" ] && [ -x "$TARGET" ]; then
+      echo "note: $GODOT is a shell wrapper; recording its exec target $TARGET instead"
+      GODOT="$TARGET"
+    else
+      echo "WARN: $GODOT is a shell script, not a binary, and its exec target could not be"
+      echo "      read. Python cannot run it. Set GODOT_BIN to the real executable."
+      GODOT=""
+    fi
+  fi
+  case "$GODOT" in /[a-zA-Z]/*) command -v cygpath >/dev/null 2>&1 && GODOT="$(cygpath -m "$GODOT")";; esac
+fi
 if [ -z "$GODOT" ]; then
   # The project's own X.Y, e.g. "4.7", from config/features in project.godot.
   WANT="$(sed -n 's/.*config\/features=PackedStringArray(\"\([0-9]\+\.[0-9]\+\)\".*/\1/p' \
@@ -567,10 +624,20 @@ if [ -n "$GODOT" ]; then
   echo "Godot version: ${GVER:-unknown}"
   # Record both so /verify, later scaffold runs and name_check.py skip the probe.
   # Uses the config mechanism from step 7, so a hand-edited value stays project-owned.
+  # ONE invocation (gh#7). Each `config` call proposes the shipped default for every
+  # scaffold-owned key it was not passed; two calls here used to reset the godot_bin
+  # the first had just written back to "" - silently, because step 12 uses $GODOT
+  # rather than reading it back. scaffold_install.py 0.20.0+ also refuses that
+  # revert on its own, but the doc must not rely on the guard.
+  set -- --set "godot_bin=$GODOT"
+  [ -n "$GVER" ] && set -- "$@" --set "godot_version=$GVER"
   "$PY" "${CLAUDE_PLUGIN_ROOT}/tools/scaffold_install.py" config --project "$ROOT" \
-    --plugin-root "${CLAUDE_PLUGIN_ROOT}" --set "godot_bin=$GODOT"
-  [ -n "$GVER" ] && "$PY" "${CLAUDE_PLUGIN_ROOT}/tools/scaffold_install.py" config --project "$ROOT" \
-    --plugin-root "${CLAUDE_PLUGIN_ROOT}" --set "godot_version=$GVER"
+    --plugin-root "${CLAUDE_PLUGIN_ROOT}" "$@"
+  # Read it back. The one value this step DETECTS is the one nothing downstream
+  # in this run consumes from the file, so a wrong write here surfaces only when
+  # /verify cannot find an engine.
+  REC="$("$PY" -c "import json; print(json.load(open('$ROOT/addons/godot_selftest/devtools_config.json')).get('godot_bin',''))")"
+  [ "$REC" = "$GODOT" ] || echo "ERROR: godot_bin read back as '$REC', expected '$GODOT' - the config write did not stick."
 else
   echo "WARN: no Godot binary found. Set GODOT_BIN or add godot_bin to devtools_config.json."
 fi
@@ -589,9 +656,17 @@ worktree, so a later parallel session never pays for it:
         engine-name checks will report as SKIPPED until --refresh-api succeeds."
 ```
 
-Then run the headless linter to confirm the project loads and the core parses:
+Then import, and only then lint. The import registers the `class_name` step 3 just
+installed; without it a fresh scaffold **always** reports
+`class_cache_stale ... "GodotSelftestSceneValidator" ... absent from
+.godot/global_script_class_cache.cfg`, which reads as a defect in the thing just
+installed (gh#7). `run_tests.gd` refuses outright on a never-imported project for the
+same reason (H-029). Redirect to a file — the Windows build often prints nothing to
+the console — and read it back:
 
 ```bash
+"$GODOT" --headless --path "$ROOT" --import > /tmp/godot_import.log 2>&1
+grep -iE "SCRIPT ERROR|Parse Error" /tmp/godot_import.log && echo "import reported parse errors above"
 "$GODOT" --headless --path "$ROOT" --script res://tools/lint_project.gd
 ```
 

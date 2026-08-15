@@ -89,11 +89,11 @@ from pathlib import Path
 from typing import Optional  # noqa: F401
 
 
-# harness-version: 0.19.0
+# harness-version: 0.20.0
 # Version of the godot-selftest-harness this client was copied from. Compared against
 # the running game's own stamp by the `harness-version` verb, so a half-refreshed
 # install (new client, old autoload) is visible instead of mysterious.
-HARNESS_VERSION = "0.19.0"
+HARNESS_VERSION = "0.20.0"
 
 COMMANDS_FILE = "devtools_commands.json"
 RESULTS_FILE = "devtools_results.json"
@@ -295,6 +295,8 @@ def pid_alive(pid) -> bool:
     """
     if not isinstance(pid, int) or pid <= 0:
         return False
+    if sys.platform == "win32":
+        return _pid_alive_windows(pid)
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -302,10 +304,42 @@ def pid_alive(pid) -> bool:
     except PermissionError:
         return True          # exists, we just may not signal it
     except OSError:
-        return True          # Windows raises here for cases we cannot classify
+        return True
     except Exception:
         return True
     return True
+
+
+def _pid_alive_windows(pid: int) -> bool:
+    """Windows liveness via OpenProcess + GetExitCodeProcess (gh#6).
+
+    `os.kill(pid, 0)` cannot answer this on Windows: for a pid that no longer
+    exists it raises WinError 87 (ERROR_INVALID_PARAMETER), which is a plain
+    OSError, and the tolerant mapping above read that as "alive". So `quit`
+    could never see the game exit and warned `STILL ALIVE` after every --wait,
+    naming a pid `tasklist` no longer had - the reporter, correctly, stopped
+    reading that exit code. Measured here: a headless game that had exited was
+    reported alive for the whole 13s window. Unknown still counts as alive, for
+    the reason the docstring above gives; only a definite answer says dead.
+    """
+    try:
+        import ctypes
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        STILL_ACTIVE = 259
+        handle = k32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if not handle:
+            # 87 = no such process. 5 = exists but is not ours to open (alive).
+            return ctypes.get_last_error() != 87
+        try:
+            code = ctypes.c_ulong()
+            if k32.GetExitCodeProcess(handle, ctypes.byref(code)):
+                return code.value == STILL_ACTIVE
+            return True
+        finally:
+            k32.CloseHandle(handle)
+    except Exception:
+        return True
 
 
 #: How many missed heartbeats before an owner counts as not polling. The game
@@ -647,6 +681,26 @@ def _wait_for_pickup(commands_path: Path, user_data: Path, action: str):
     )
 
 
+def _unlink_retry(path: Path, attempts: int = 20, delay: float = 0.025) -> bool:
+    """Delete `path`, riding out the brief exclusive lock Windows holds while the
+    game writes it (gh#5). Since 0.20.0 the game writes the reply to a temp name
+    and renames it into place, so the reply file only ever exists complete and
+    this rarely fires; older game-side harnesses still open the target directly,
+    and a client that raced that write got `PermissionError: [WinError 32]` AFTER
+    the verb had taken effect - the worst shape for a scripted caller, who cannot
+    tell whether to retry. `exists()` is not a promise that `unlink()` will work.
+    Returns False only if the lock outlived every attempt (~0.5s)."""
+    for _ in range(attempts):
+        try:
+            path.unlink()
+            return True
+        except FileNotFoundError:
+            return True
+        except PermissionError:
+            time.sleep(delay)
+    return False
+
+
 def send_command(project_path: Path, action: str, args: dict = None, timeout: float = 30.0) -> dict:
     """Send a command to the running Godot instance and wait for the result.
 
@@ -668,8 +722,10 @@ def send_command(project_path: Path, action: str, args: dict = None, timeout: fl
     owner_before = owner_status(user_data)
 
     # Clear any existing result
-    if results_path.exists():
-        results_path.unlink()
+    if results_path.exists() and not _unlink_retry(results_path):
+        print(f"WARNING: could not clear a stale reply at {results_path} (locked by another "
+              "process for >0.5s); if the reply below is not for this request it will be "
+              "ignored by id, but check for a second client on this bus.", file=sys.stderr)
 
     # Write command
     request_id = uuid.uuid4().hex[:12]
@@ -702,7 +758,7 @@ def send_command(project_path: Path, action: str, args: dict = None, timeout: fl
                 time.sleep(0.1)
                 continue
 
-            results_path.unlink()
+            _unlink_retry(results_path)
 
             # Bus-identity check (G-036a): a reply from a pid that differs from
             # the recorded bus owner means a foreign instance answered. Older
@@ -843,8 +899,20 @@ def cmd_screenshot(args, project_path: Path):
     if data.get("hidden"):
         print(f"Hidden for the capture (restored after): {', '.join(data['hidden'])}")
     elif args.hide or args.hide_group:
-        print("WARNING: --hide/--hide-group matched no CanvasItem - the capture "
-              "shows everything.", file=sys.stderr)
+        # Since 0.20.0 the game refuses (success:false, no file) when a --hide
+        # names nothing it can hide, so reaching here means an older game-side
+        # harness silently ignored the flag. That is not a capture of what was
+        # asked for (gh#5): exit 1, and remove the file so nothing downstream
+        # mistakes it for one.
+        print("ERROR: --hide/--hide-group matched nothing the game could hide, and the "
+              "installed harness wrote the capture anyway (older than this client). "
+              f"Discarding {data['path']} - a capture that ignored --hide is not the "
+              "capture asked for.", file=sys.stderr)
+        try:
+            Path(data["path"]).unlink()
+        except OSError:
+            pass
+        sys.exit(1)
 
 
 def cmd_validate(args, project_path: Path):
@@ -862,8 +930,44 @@ def cmd_validate_all(args, project_path: Path):
     print_validation_result(result)
 
 
-def print_validation_result(result: dict):
-    """Pretty-print validation results."""
+def print_geometry_caveat(data: dict, verb: str, *, only_if_suspect: bool = False) -> None:
+    """Print the game's own warning that its screen geometry was measured headless (H-051).
+
+    Every verb that returns screen-space rects (node-bounds, ui-snapshot,
+    validate-ui, findings) carries `geometry_trustworthy` + `geometry_caveat`
+    since 0.20.0. Headless the window is 64x64 whatever the project designed, so
+    a node the game positions from the window size lands off-viewport there and
+    dead centre for a player. The number is faithful to the headless run; what
+    the reader must not do is take it for the player's screen. An off-viewport
+    verdict shipped to a published report that way before anyone ran the game
+    windowed.
+
+    `only_if_suspect` prints only when the caveat applies (headless), which is
+    right for the list-style verbs; node-bounds prints its trust state always,
+    because a single rect is read as an answer.
+
+    Loud on absence, to stderr, like canvas_scale: a key this client expects and
+    the game does not send means the two halves are at different versions, and
+    a silent skip is how three wire mismatches shipped unnoticed in 0.4.0.
+    """
+    if "geometry_trustworthy" not in data or "geometry_caveat" not in data:
+        print(f"{verb}: the reply carried no 'geometry_trustworthy'/'geometry_caveat' key "
+              "(installed harness older than this client?). Whether this geometry was "
+              f"measured headless is UNKNOWN. Keys: {sorted(data)}", file=sys.stderr)
+        return
+    if data["geometry_trustworthy"]:
+        if not only_if_suspect:
+            print("  Geometry:     measured windowed (what a player sees)")
+        return
+    print(f"  GEOMETRY CAVEAT: {_printable(str(data['geometry_caveat']))}")
+
+
+def print_validation_result(result: dict, geometry_verb: str = ""):
+    """Pretty-print validation results.
+
+    `geometry_verb` names the CLI verb when the reply is screen geometry
+    (validate-ui); the scene validators are not, and print no caveat.
+    """
     if result["success"]:
         print("[OK] " + result["message"])
     else:
@@ -910,6 +1014,9 @@ def print_validation_result(result: dict):
         # that fires on correct-by-design UI ends up being ignored entirely.
         print("\nNo UI findings baseline. Every finding gates. "
               "Run `validate-ui --baseline-write` to accept the current set.")
+
+    if geometry_verb:
+        print_geometry_caveat(data, geometry_verb, only_if_suspect=True)
 
     if not result["success"]:
         sys.exit(1)
@@ -977,6 +1084,15 @@ def cmd_performance(args, project_path: Path):
     result = send_command(project_path, "performance", cmd_args)
     if result["success"]:
         data = result["data"]
+        # gh#6: the bridge answers on a paused tree, and the numbers look fine.
+        # Lead with the fact rather than burying it after the metrics.
+        if data.get("tree_paused"):
+            print("TREE IS PAUSED - every number below describes a game that is not "
+                  "stepping. Unpause (or set entry_hook) before reading these as health.")
+        elif "tree_paused" not in data:
+            print("performance: the reply carried no 'tree_paused' key (installed harness "
+                  "older than this client); whether the tree is paused is UNKNOWN - "
+                  "check `ping`.", file=sys.stderr)
         print(f"FPS:              {data['fps']:.1f}")
         print(f"Frame time:       {data['frame_time_ms']:.2f} ms")
         print(f"Physics FPS:      {int(data['physics_fps'])}")
@@ -1314,7 +1430,23 @@ def cmd_quit(args, project_path: Path):
             return
         time.sleep(0.2)
 
-    print(f"\nWARNING: pid {pid} is STILL ALIVE {args.wait:g}s after quit.\n"
+    # A slow-but-clean shutdown is not a survivor (gh#6). The reported case
+    # turned out to be pid_alive() itself - on Windows it could not see a dead
+    # pid at all (see _pid_alive_windows) - and that is fixed at the source. The
+    # grace re-poll stays for the genuine slow-exit case: an exit 1 that fires
+    # on a clean shutdown is an exit code people stop reading, which defeats
+    # the check, since a REAL survivor answers the bus alongside the next launch
+    # and the symptom is empty replies, not an error.
+    grace = 3.0
+    grace_deadline = time.time() + grace
+    while time.time() < grace_deadline:
+        if not pid_alive(pid):
+            print(f"  pid {pid} exited (slower than the {args.wait:g}s --wait, but it is gone; "
+                  f"pass --wait {int(args.wait) + int(grace) + 2} to stop seeing this)")
+            return
+        time.sleep(0.2)
+
+    print(f"\nWARNING: pid {pid} is STILL ALIVE {args.wait + grace:g}s after quit.\n"
           "A survivor answers the bus alongside any new instance, and the symptom "
           "is empty replies, not an error. Kill it before launching again:\n"
           + (f"  taskkill /F /PID {pid}" if sys.platform == "win32" else f"  kill -9 {pid}"),
@@ -2058,6 +2190,8 @@ _FINDINGS_REQUIRED_KEYS = (
     "baseline_in_use",
     "new_count",
     "pre_existing_count",
+    "geometry_trustworthy",
+    "geometry_caveat",
 )
 
 # Most severe first, so the worst finding in a report is the one at the top.
@@ -2069,7 +2203,8 @@ def cmd_findings(args, project_path: Path):
     """Every live check the harness knows, in one call (bus verb: findings).
 
     Data keys read: findings, counts, checks_run, checks_skipped, viewport,
-    baseline_in_use, new_count, pre_existing_count.
+    baseline_in_use, new_count, pre_existing_count, geometry_trustworthy,
+    geometry_caveat (and a per-finding `caveat` on headless geometry verdicts).
 
     Exit codes follow the rest of the tool: 0 clean, 1 gating findings, 2 could
     not run (which includes a reply whose shape this client does not recognize
@@ -2131,6 +2266,7 @@ def cmd_findings(args, project_path: Path):
         worst = min(_SEVERITY_ORDER.get(str(i.get("severity", "")), 3) for i in items)
         return (worst, -len(items), code)
 
+    caveated = 0
     for code, items in sorted(groups.items(), key=_rank):
         items.sort(key=lambda i: _SEVERITY_ORDER.get(str(i.get("severity", "")), 3))
         sources = sorted({str(i.get("source", "?")) for i in items})
@@ -2138,7 +2274,19 @@ def cmd_findings(args, project_path: Path):
         print(f"  {code:<22} {len(items):>3}  [{worst}] {', '.join(sources)}")
         for item in items:
             where = str(item.get("path", "")) or "-"
-            print(f"      {where}: {_printable(str(item.get('message', '')))}")
+            flag = "  [HEADLESS geometry - confirm windowed]" if item.get("caveat") else ""
+            caveated += 1 if item.get("caveat") else 0
+            print(f"      {where}: {_printable(str(item.get('message', '')))}{flag}")
+
+    # H-051: a screen-position finding measured headless is a finding about the
+    # headless run, not necessarily about what a player sees. It still gates
+    # (headless is where CI lives), but it must not be read as fact unqualified.
+    if not data["geometry_trustworthy"]:
+        if caveated:
+            print(f"\n{caveated} of {len(findings)} finding(s) are screen-position verdicts "
+                  f"measured HEADLESS - flagged above.\n  {_printable(str(data['geometry_caveat']))}")
+        else:
+            print(f"\nGeometry {_printable(str(data['geometry_caveat']))}")
 
     # Per-source counts, including the sources that ran and found nothing: a 0
     # and an absent source mean different things and must not print the same.
@@ -2189,7 +2337,7 @@ def cmd_validate_ui(args, project_path: Path):
     if getattr(args, "no_baseline", False):
         cmd_args["use_baseline"] = False
     result = send_command(project_path, "validate_ui", cmd_args)
-    print_validation_result(result)
+    print_validation_result(result, geometry_verb="validate-ui")
 
 
 def cmd_save_ui_baseline(args, project_path: Path):
@@ -2242,6 +2390,7 @@ def cmd_ui_snapshot(args, project_path: Path):
     elements = data.get("elements", [])
     print(f"Viewport: {vp['width']}x{vp['height']}")
     print(f"UI Elements: {len(elements)}")
+    print_geometry_caveat(data, "ui-snapshot", only_if_suspect=True)
     print()
     for el in elements:
         r = el["global_rect"]
@@ -2290,6 +2439,9 @@ def cmd_node_bounds(args, project_path: Path):
         note = "" if (abs(cs["x"] - 1.0) < 1e-6 and abs(cs["y"] - 1.0) < 1e-6) else \
             "   <- not 1.0: this rect is screen space, but a CanvasLayer is scaling it"
         print(f"  Canvas scale: {cs['x']:.3f}, {cs['y']:.3f}{note}")
+    # Whether this rect is what a player sees, or a headless run's (H-051). A
+    # single rect is read as an answer, so the trust state prints either way.
+    print_geometry_caveat(data, "node-bounds")
 
 
 def cmd_aabb(args, project_path: Path):
@@ -2784,7 +2936,7 @@ def cmd_new_uid(args, project_path: Path):
 def cmd_reachable_ui(args, project_path: Path):
     """What a finger or cursor could actually hit right now (bus verb:
     reachable_ui, gather:G-129). Data keys read: controls, count, reachable,
-    viewport.
+    viewport, geometry_trustworthy, geometry_caveat.
 
     Diff this between `set-feature --touchscreen true` and `false` to catch an
     affordance that exists on one device and not the other.
@@ -2809,6 +2961,7 @@ def cmd_reachable_ui(args, project_path: Path):
         label = f' "{_printable(c["text"])}"' if c.get("text") else ""
         print(f"  {c.get('path')}{label}  [{c.get('kind')}] "
               f"{r.get('x'):.0f},{r.get('y'):.0f} {r.get('w'):.0f}x{r.get('h'):.0f}{why}")
+    print_geometry_caveat(data, "reachable-ui", only_if_suspect=True)
 
 
 def cmd_find_nodes(args, project_path: Path):

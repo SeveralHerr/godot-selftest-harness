@@ -234,6 +234,47 @@ class SyntheticPluginCase(unittest.TestCase):
         self.assertEqual(cfg["delta"], "added in 0.2.0")
         self.assertIn("delta", cfg[scaffold_install.SCAFFOLD_DEFAULTS_KEY]["owned"])
 
+    def test_second_set_call_keeps_the_first_calls_detected_value(self):
+        # gh#7 / e8g, planted as a gate: /scaffold-godot-harness calls `config`
+        # more than once per run with different --set keys. The second call
+        # proposes the shipped default for every key it was not passed, and used
+        # to reset the value the first call had just detected. Same version, no
+        # override -> a scaffold-owned key is kept, not reverted.
+        self.config({"beta": "C:/detected/godot.exe"})
+        rc, out = self.config({"alpha": 7})
+        self.assertEqual(rc, 0)
+        self.assertIn('= beta kept as "C:/detected/godot.exe" (scaffold-owned, not passed to this call)', out)
+        cfg = self.read_config()
+        self.assertEqual(cfg["beta"], "C:/detected/godot.exe",
+                         "a second config call must not clobber the first call's --set")
+        self.assertEqual(cfg["alpha"], 7)
+        # Still scaffold-owned: an explicit later override may change it.
+        self.assertIn("beta", cfg[scaffold_install.SCAFFOLD_DEFAULTS_KEY]["owned"])
+        rc, out = self.config({"beta": "D:/other/godot.exe"})
+        self.assertEqual(self.read_config()["beta"], "D:/other/godot.exe")
+
+    def test_version_bump_updates_owned_defaults_but_never_to_empty(self):
+        # A new harness version may ship a changed default (alpha 1 -> 2): an
+        # owned key follows it. But a detected value must not be reset to the
+        # empty shipped default just because the version moved.
+        tmpl = self.plugin / "templates" / scaffold_install.CONFIG_REL
+        data = json.loads(tmpl.read_text(encoding="utf-8"))
+        data["path"] = ""
+        tmpl.write_text(json.dumps(data), encoding="utf-8")
+        self.config({"path": "C:/detected.exe"})
+
+        data["alpha"] = 2
+        tmpl.write_text(json.dumps(data), encoding="utf-8")
+        (self.plugin / ".claude-plugin" / "plugin.json").write_text(
+            json.dumps({"name": "synth", "version": "0.3.0"}), encoding="utf-8")
+        rc, out = self.config()
+        self.assertEqual(rc, 0)
+        cfg = self.read_config()
+        self.assertEqual(cfg["alpha"], 2, "an owned key follows a changed shipped default")
+        self.assertEqual(cfg["path"], "C:/detected.exe",
+                         "a version bump must not reset a detected value to the empty default")
+        self.assertIn("^ alpha: 1 -> 2", out)
+
     def test_invalid_config_json_is_refused(self):
         path = self.project / scaffold_install.CONFIG_REL
         path.parent.mkdir(parents=True)
@@ -359,6 +400,132 @@ class RealPluginCase(unittest.TestCase):
             scaffold_install.patch_config(REPO_ROOT, self.project, {})
         self.assertEqual(tree_snapshot(self.project), before)
         self.assertEqual(sorted(p.name for p in self.project.rglob("*.bak")), [])
+
+
+class FullInstallCase(unittest.TestCase):
+    """`full` against the real templates: the one definition of installed (gh#9)."""
+
+    PROJECT_GODOT = "\n".join([
+        "config_version=5",
+        "",
+        "[application]",
+        "",
+        'config/name="game"',
+        'run/main_scene="res://scenes/main.tscn"',
+        "",
+        "[autoload]",
+        "",
+        'GameState="*res://autoload/game_state.gd"',
+        'Audio="*res://autoload/audio.gd"',
+        "",
+        "[display]",
+        "",
+        "window/size/viewport_width=800",
+        "",
+    ])
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory(prefix="scafffull-")
+        self.project = Path(self._tmp.name) / "project"
+        self.project.mkdir()
+        (self.project / "project.godot").write_text(self.PROJECT_GODOT, encoding="utf-8")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def full(self, overrides=None, **kw):
+        with captured_stdout() as buf:
+            rc = scaffold_install.install_full(REPO_ROOT, self.project, overrides or {}, **kw)
+        return rc, buf.getvalue()
+
+    def test_full_installs_everything_and_devtools_autoload_is_last(self):
+        rc, out = self.full(hook=True, hook_python="python")
+        self.assertEqual(rc, 0, out)
+        for rel in scaffold_install.SHIPPED_FILES:
+            self.assertTrue((self.project / rel).is_file(), rel)
+        self.assertTrue((self.project / "devtools_ext" / "commands.gd").is_file())
+        self.assertTrue((self.project / "devtools_ext" / "commands.example.gd").is_file())
+        self.assertTrue((self.project / "test" / "unit" / "test_selftest.gd").is_file())
+        self.assertTrue((self.project / "test" / "sequences" / "smoke.json").is_file())
+        self.assertTrue((self.project / "log-devtools.md").is_file())
+        claude = (self.project / "CLAUDE.md").read_text(encoding="utf-8")
+        self.assertIn(scaffold_install.CLAUDE_BEGIN, claude)
+        settings = json.loads((self.project / ".claude" / "settings.json").read_text(encoding="utf-8"))
+        self.assertTrue(any(scaffold_install.HOOK_MARKER in h["command"]
+                            for e in settings["hooks"]["Stop"] for h in e["hooks"]))
+        cfg = json.loads((self.project / scaffold_install.CONFIG_REL).read_text(encoding="utf-8"))
+        self.assertEqual(cfg["main_scene"], "res://scenes/main.tscn", "main_scene is detected")
+
+        # THE rule (H-048): DevTools after every autoload the project declared,
+        # inside [autoload], and nothing else in project.godot touched.
+        text = (self.project / "project.godot").read_text(encoding="utf-8")
+        lines = text.split("\n")
+        i_auto = lines.index("[autoload]")
+        i_disp = lines.index("[display]")
+        i_dev = lines.index(scaffold_install.AUTOLOAD_LINE)
+        i_game = lines.index('GameState="*res://autoload/game_state.gd"')
+        i_audio = lines.index('Audio="*res://autoload/audio.gd"')
+        self.assertTrue(i_auto < i_game < i_audio < i_dev < i_disp,
+                        "DevTools must be LAST in [autoload]:\n" + text)
+        self.assertIn('config/name="game"', text)
+        self.assertIn("window/size/viewport_width=800", text)
+
+    def test_full_without_autoload_section_creates_one(self):
+        (self.project / "project.godot").write_text(
+            'config_version=5\n\n[application]\n\nconfig/name="g"\n', encoding="utf-8")
+        rc, out = self.full(hook=False)
+        self.assertEqual(rc, 0, out)
+        text = (self.project / "project.godot").read_text(encoding="utf-8")
+        self.assertIn("[autoload]\n\n" + scaffold_install.AUTOLOAD_LINE, text)
+        self.assertFalse((self.project / ".claude" / "settings.json").exists())
+
+    def test_full_is_idempotent_and_never_clobbers_project_owned_files(self):
+        self.full(hook=True, hook_python="python")
+        # The project makes the files its own.
+        ext = self.project / "devtools_ext" / "commands.gd"
+        ext.write_text("# my verbs\n", encoding="utf-8")
+        claude = self.project / "CLAUDE.md"
+        claude.write_text("# My game\n\nrules\n\n" + claude.read_text(encoding="utf-8"), encoding="utf-8")
+        (self.project / "test" / "unit" / "test_mine.gd").write_text("extends RefCounted\n", encoding="utf-8")
+        log = self.project / "log-devtools.md"
+        log.write_text(log.read_text(encoding="utf-8") + "\n## my entry\n- Gap: x\n", encoding="utf-8")
+        before = tree_snapshot(self.project)
+
+        rc, out = self.full(hook=True, hook_python="python")
+        self.assertEqual(rc, 0, out)
+        after = tree_snapshot(self.project)
+        self.assertEqual(after, before, "a second full run must change no byte")
+        self.assertEqual(ext.read_text(encoding="utf-8"), "# my verbs\n")
+        self.assertTrue(claude.read_text(encoding="utf-8").startswith("# My game"))
+        self.assertEqual(claude.read_text(encoding="utf-8").count(scaffold_install.CLAUDE_BEGIN), 1)
+        self.assertIn("## my entry", log.read_text(encoding="utf-8"))
+        text = (self.project / "project.godot").read_text(encoding="utf-8")
+        self.assertEqual(text.count("DevTools="), 1)
+        settings = json.loads((self.project / ".claude" / "settings.json").read_text(encoding="utf-8"))
+        self.assertEqual(sum(1 for e in settings["hooks"]["Stop"] for h in e["hooks"]
+                             if scaffold_install.HOOK_MARKER in h["command"]), 1)
+
+    def test_full_refuses_malformed_settings_json_and_leaves_it(self):
+        settings = self.project / ".claude" / "settings.json"
+        settings.parent.mkdir()
+        settings.write_text("{ not json", encoding="utf-8")
+        rc, out = self.full(hook=True, hook_python="python")
+        self.assertEqual(rc, 1)
+        self.assertEqual(settings.read_text(encoding="utf-8"), "{ not json")
+        # Everything else still landed - one failed step does not abort the install.
+        self.assertTrue((self.project / "tools" / "devtools.py").is_file())
+        self.assertIn(scaffold_install.AUTOLOAD_LINE,
+                      (self.project / "project.godot").read_text(encoding="utf-8"))
+
+    def test_full_cli_round_trip(self):
+        proc = subprocess.run(
+            [sys.executable, str(REPO_ROOT / "tools" / "scaffold_install.py"), "full",
+             "--project", str(self.project), "--no-hook", "--set", "hud_layer_name=Hud"],
+            capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        cfg = json.loads((self.project / scaffold_install.CONFIG_REL).read_text(encoding="utf-8"))
+        self.assertEqual(cfg["hud_layer_name"], "Hud")
+        self.assertEqual(cfg["main_scene"], "res://scenes/main.tscn")
 
 
 class CliGuardCase(unittest.TestCase):

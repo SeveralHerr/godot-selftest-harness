@@ -70,6 +70,37 @@ of it from scripts — and Claude Code can do the same to check its own changes.
 > reopen it so the editor picks up (and doesn't clobber) the edited
 > `project.godot`.
 
+### Installing without an LLM (`scaffold_install.py full`)
+
+Since 0.20.0 the whole install is one command with no slash command in the loop
+(gh#9 / H-047):
+
+```bash
+python <plugin>/tools/scaffold_install.py full --project <game> [--set key=value ...] \
+    [--no-hook] [--hook-python python3]
+```
+
+It is the **one definition of "installed"** — files (with pristine-hash backups and
+`.uid` minting) → `devtools_config.json` merge (with `main_scene` detected from
+`run/main_scene`) → `devtools_ext/` (never overwrites `commands.gd`) → `test/` seed
+(only if empty) → `CLAUDE.md` merge → `log-devtools.md` seed/refresh → `Stop` hook →
+`DevTools` autoload, **appended last** in `[autoload]` so a project's own autoloads are
+ready before the extension registers. `/scaffold-godot-harness` calls it in step 3 and
+`check_templates.py` builds its scratch project through it, so the installer the check
+exercises is the installer users get. Before it, the slash command (prose), the check
+(its own copy) and every benchmark rig each defined "installed" for themselves — and the
+autoload-ordering rule existed only as a sentence, which is how the first rig put
+`DevTools` first. What it leaves to the slash command: `hud_layer_name` detection (pass
+`--set`), the Godot binary (`config --set godot_bin=...`), and the import + lint smoke
+check. Idempotent — a second run changes no byte, and refuses (rather than overwrites) a
+malformed `.claude/settings.json`.
+
+`config --set` no longer reverts a scaffold-owned key it was **not** passed (0.20.0,
+gh#7): each call proposes the shipped default for every owned key, and a second call
+used to reset the `godot_bin` the first had just detected back to `""`. Owned keys now
+change only on an explicit `--set`, or when the harness version has moved on since the
+record was written — and even then never from a real value to an empty default.
+
 ### Project `CLAUDE.md`
 
 Scaffolding also creates or updates the project's `CLAUDE.md` with a delimited
@@ -568,7 +599,13 @@ Notable behaviors:
   reproducible from the command line instead of being two `set_state` calls plus a
   separate PIL crop. Each node's **previous** visibility is remembered, so an
   already-hidden node is not "restored" into view, and visibility is restored on every
-  failure path too — this verb cannot leave a HUD switched off.
+  failure path too — this verb cannot leave a HUD switched off. **`--hide` accepts a
+  `CanvasLayer`** (0.20.0, gh#5) — the node nearly every HUD, pause menu and overlay is
+  rooted in, and which is a `Node`, not a `CanvasItem`; before, those were silently
+  dropped and the "hidden" capture had the HUD in it. A `--hide` / `--hide-group` that
+  names **nothing it can hide is an error** (`success: false`, no file written, each
+  path explained: missing, or a class with no `visible`) rather than a warning beside a
+  capture that ignored the flag.
 - **`ping` reports `bus_dir` and `user_dir` separately**, always. When they differ the
   bus is isolated and saves/screenshots are not; when they match nothing is isolated.
   `launch --isolated` previously claimed an isolation it did not have and nothing could
@@ -596,6 +633,28 @@ Notable behaviors:
   "extend past viewport". The UI verbs fall back to
   `display/window/size/viewport_width`/`_height`, which is what a windowed run of the
   same project reports.
+- **Headless geometry is flagged as headless** (0.20.0, H-051). The fallback above
+  fixes the *reference rect*; it cannot fix a node the **game** positions from the
+  window size. `get_window().size` is `64x64` headless, so a panel centred with
+  `(get_window().size - size) / 2` on an 800×600 design sits at `(-368,-268)` headless
+  and at `(0,0)` for a player — reproduced exactly. That number reached a published
+  report as "the whole end-of-run screen off-viewport" before a windowed screenshot
+  overturned it. So `get_node_bounds`, `get_ui_snapshot`, `validate_ui`,
+  `reachable_ui` and `findings` all carry `geometry_trustworthy: bool` and
+  `geometry_caveat: String` (empty when windowed); `findings` additionally stamps
+  `caveat` on each *geometry-code* finding (`ui_overflow`, `ui_negative_pos`,
+  `ui_outside_safe_area`, `interactive_overlap`, `container_layout_drift`, and any
+  `unreachable_ui` that is off-screen), never on `ui_transparent` / `small_tap_target`
+  / text overflow, which are the same headless or windowed. The client prints the
+  caveat next to the numbers. Headless verdicts still gate — CI lives there — but an
+  off-viewport verdict measured headless is a fact about the headless run until it is
+  confirmed windowed.
+- **`performance` says when the tree is paused** (0.20.0, gh#6). The bridge is
+  `PROCESS_MODE_ALWAYS`, so it answers on a paused tree with a plausible FPS for a game
+  that is not stepping — a whole `/verify` phase validated a title-screen pause as
+  healthy on those numbers. The reply carries `tree_paused`, the message says `PAUSED`,
+  and the client prints `TREE IS PAUSED` above the metrics. `/verify` Phase 2 now
+  gates on `ping`'s `tree is PAUSED` before Phase 3 runs.
 - **`set-state` writes through a dotted path** (0.17.0), the same one `get-state`
   reads through. `--property environment.ambient_light_energy` resolves the container
   and writes the leaf, which is how every knob in a lighting rig, a material or a sky
@@ -712,8 +771,14 @@ Notable flags:
   instead of the whole scene (a deep UI subtree otherwise truncates); `--property` is
   repeatable and reports that property on every node.
 - `screenshot [--filename F] [--region X,Y,W,H] [--hide NODE] [--hide-group GROUP]` —
-  `--hide` / `--hide-group` are repeatable; the crop and the hiding happen game-side in
-  one command, and previous visibility is always restored.
+  `--hide` / `--hide-group` are repeatable and accept a `CanvasLayer` as well as any
+  `CanvasItem`; the crop and the hiding happen game-side in one command, and previous
+  visibility is always restored. Naming nothing hideable **exits 1 with no file**.
+- `quit [--wait S]` — sends the verb, then confirms the owner pid actually exited (with
+  a short grace beyond `--wait`), exit 1 only for a real survivor. On Windows the
+  liveness check uses `OpenProcess`/`GetExitCodeProcess` (0.20.0, gh#6): `os.kill(pid, 0)`
+  raises `WinError 87` for a **dead** pid, which read as "alive", so `quit` on Windows
+  used to warn `STILL ALIVE` after every wait and name a pid `tasklist` no longer had.
 - `run-method --node PATH --method NAME [--args JSON] [--json]` — `--json` prints the
   full reply envelope (pipeable, like `cmd`), which is where `returned_null` and
   `declared_return` are readable.
@@ -1370,6 +1435,19 @@ passed" are the same sentence otherwise.
 play (it reads `(no selector)` then). A line that only appears under a filter is a line
 nobody learns to read, and the number it carries is the one that distinguishes a real
 pass from an empty one.
+
+Two verdicts that used to point at the wrong cause (0.20.0):
+
+- **A selected script that fails to compile is blamed on the compile, not the
+  selector** (gh#10). It never reaches discovery, so it contributes 0 to `M` and the
+  selector "matches nothing"; the verdict used to be three lines of `--filter`/`--file`
+  syntax advice while the parse error sat 60 lines up. It now reads
+  `SELECTED NOTHING - 1 selected test script(s) FAILED TO COMPILE ... Fix the parse error
+  first: res://test/unit/<file>.gd`, and the JSON carries `selected_load_failures`.
+- **A never-imported project is refused, not passed** (H-029). With no
+  `.godot/global_script_class_cache.cfg` no `class_name` resolves, so a test whose first
+  statement uses one aborts on a runtime error — which is a pass to this runner. It now
+  exits `2` up front with one line naming `godot --headless --path . --import`.
 
 ### What the test runner cannot catch
 

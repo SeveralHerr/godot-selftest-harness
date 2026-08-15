@@ -258,6 +258,12 @@ runtime, which the static checker cannot see) and `name_check_ignore` (path pref
 - Prefer `findings` over a hand-built sweep of individual verbs; prefer `node-bounds` /
   `ui-snapshot` over `screenshot`. Only open a screenshot PNG when a genuine **visual**
   regression is suspected.
+- **A `GEOMETRY CAVEAT` / `[HEADLESS geometry]` tag means the number is a headless
+  measurement**: the window is 64×64 there, so anything the game positions from
+  `get_window().size` sits off-viewport headless and centred for a player. Confirm an
+  off-screen verdict windowed before reporting it as a defect.
+- **`TREE IS PAUSED`** on `ping` / `performance` means every metric describes a game
+  that is not stepping — unpause (or set `entry_hook`) before believing them.
 - `get-state` dumps ~120 keys for a `Label` — pass `--property NAME` (repeatable).
 - Run `/verify` **inline**; don't wrap routine validation in subagents/workflows.
 - On Windows, probe Python by running it (`python3` may be a Store alias stub that

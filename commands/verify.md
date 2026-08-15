@@ -111,7 +111,14 @@ git diff HEAD --stat
 | (a) Nothing Godot loads: only docs/`.md` outside code, `.beads/`, `log-devtools.md`, CI/git files | **Nothing** | Print "nothing to verify". Write **no** ledger row. Log the Phase 6 entry with `Value: **overkill** — avoided: triaged out at Phase 0.5, no res:// change` and **STOP the run here.** |
 | (b) Only comments/docstrings inside `.gd`/`.tscn` files, or `.md` files in code dirs | **Lint-only** | Phase 1 name gate + import gate + lint. Skip tests and runtime; say so in the summary. |
 | (c) Only `static func`s or `const` tables that existing unit tests cover | **Headless-only** | Phase 1 (name gate + import gate + lint + tests). Skip runtime; the Phase 6 entry must **name which tests** stood in for runtime. |
+| (d) The project **cannot be launched**: neither `project.godot`'s `run/main_scene` nor `config.main_scene` names a scene | **Headless-only (forced)** | Phase 1 only — there is nothing for Phase 2 to start. This is not a pass at runtime and must not be reported as one: the summary says `runtime unreached: project has no main scene`, the Phase 5 ledger row is written with `--no-reach` and `skipped: "no main_scene"`, and the Phase 6 verdict is **inconclusive**, not overkill (gh#10). Every Godot project is in this state for its first commits, which is exactly when the DEVELOPMENT RULE is followed most literally. |
 | Anything else — instance methods, signals, scenes, exports, node paths, config | **Full run** | All phases. |
+
+Check tier (d) mechanically rather than by recollection — an empty `main_scene` is a state, not a diff, and the diff will not show it:
+
+```bash
+grep -q '^run/main_scene=' project.godot || "$PY" -c "import json,sys; c=json.load(open('addons/godot_selftest/devtools_config.json')); sys.exit(0 if c.get('main_scene') else 1)" || echo "TIER (d): no main scene - runtime unreachable"
+```
 
 The name gate is cheap enough that it runs on every tier that reaches Phase 1, including lint-only — it costs no engine launch and catches the class of failure (a `class_name` that arrived from a rebase) the diff cannot show you.
 
@@ -322,6 +329,14 @@ sleep 3
 
 Then re-check `scene-tree` and confirm the root scene changed to the expected playable scene (use `config.main_scene`'s basename if set, otherwise just confirm it is no longer the entry screen). If `entry_hook` is empty, proceed with whatever scene loaded. If the scene is in an unexpected/error state (root name is `?` or empty), stop and report the failure.
 
+**Then confirm the tree is actually running.** `ping` reports this without being asked, and it is the gate for everything below (gh#6):
+
+```bash
+"$PY" tools/devtools.py ping | grep -i "PAUSED" && echo "TREE IS PAUSED - stop"
+```
+
+A `tree is PAUSED` here **stops the run**. The bridge is `PROCESS_MODE_ALWAYS`, so every verb keeps answering on a frozen game and the numbers look healthy: `performance` reports a plausible FPS for a tree that is not stepping (it now says `TREE IS PAUSED` first, but a run that reads only the exit code will not see it), `validate-all` passes, `screenshot` captures a still frame, and every Phase 4 assertion about a tween, a timer or a `queue_free` fails for a reason that has nothing to do with the diff. This is the common case for a project that boots behind a title screen with `get_tree().paused = true` and has no `entry_hook` — the pause is exactly what the hook exists to undo, so an empty hook plus a paused tree means the config is **incomplete**, not that the game is fine. Set `entry_hook` to the menu's own start handler (or `pause false` if the project has no such handler) and re-run; do not carry a paused tree into Phase 3.
+
 ### Named entry points (diff-aware)
 
 A single `entry_hook` reaches only the default playable scene, so a change to a script that only runs in some *other* scene — a boss room, a shop, a level-2 variant — has **no runtime path at all** and gets verified by reading code instead of by observing the game. Optional `config.entry_points` fixes that:
@@ -472,7 +487,7 @@ This prints all currently registered action strings. Any verb beyond the generic
 | `sample-pixels --rect X,Y,W,H` | Mean / dominant / brightest / darkest colour over a screen rect, so a colour regression is assertable rather than eyeballed. Same capture path as `screenshot`, summarised instead of saved; `dominant_share` says how much of the rect that colour owns |
 | `set-game-speed N` | Speed up time-dependent behavior (timers, tweens, physics) |
 | `wait-frames N` | Advance N physics frames deterministically |
-| `node-bounds PATH` | Exact **screen-space** position/size of a node (ground truth for layout/movement). Ancestor `CanvasLayer` transforms are applied, so a HUD built on a scaled layer reports where it actually renders |
+| `node-bounds PATH` | Exact **screen-space** position/size of a node (ground truth for layout/movement). Ancestor `CanvasLayer` transforms are applied, so a HUD built on a scaled layer reports where it actually renders. Prints `GEOMETRY CAVEAT` when the game is headless — the window is 64×64 there, so a node the game centres from `get_window().size` sits off-viewport headless and centred for a player; **confirm any off-viewport verdict windowed before reporting it** (H-051) |
 | `aabb --node PATH` | Merged **world-space** AABB of a 3D node's geometry — `min`/`max`/`size`/`center`, `top_y`, `bottom_y`. The 3D answer to "is this actually on the table / sunk into the floor / overlapping that". Excludes `Light3D` (an `OmniLight3D`'s AABB is a cube of twice its range); fails rather than returning a zero box when a node has no geometry |
 | `scene-tree --depth N` | The live hierarchy as JSON. Every node carries `script` (its `res://` script path, `""` if none) and `scene_file` (set on instanced scene roots) — which is how Phase 5 computes reach, and also the fastest way to map a changed `.gd` to the node path that runs it |
 | `ui-snapshot` / `ui-snapshot-diff` | Structured UI state; diff against a saved baseline |
