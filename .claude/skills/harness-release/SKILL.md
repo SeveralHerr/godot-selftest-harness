@@ -69,7 +69,9 @@ wrong.
 python .claude/skills/harness-release/bump_version.py 0.13.0 0.14.0
 ```
 
-It edits the 11 shipped templates plus the `tools/upstream_gaps.py` mirror and
+It edits every file in `record_version.py`'s `SHIPPED` list — 13 as of 0.19.0, and it
+reads that list at runtime, so adding a shipped file needs no edit here — plus the
+`tools/upstream_gaps.py` mirror and
 `.claude-plugin/plugin.json`, and prints a per-file count. **Every file must report
 `stamp=1 const=1`.** A `0` means a file drifted out of the expected shape — go look
 before continuing.
@@ -104,11 +106,17 @@ verified nothing — do not proceed.
 `python3` on Windows is the Microsoft Store alias stub: it satisfies `command -v` and then
 refuses to run. Use `python`.
 
-If the change touched a **static analysis** template (`name_check.py`, the lint passes),
+If the change touched a **static analysis** template (`name_check.py`,
+`coverage_check.py`, the lint passes),
 also run it against a real scaffolded project and report the finding count. The scratch
 project is small and synthetic and cannot measure a false-positive rate — `name_check.py`
-once passed every stage while emitting 466 bogus warnings on a real project. Candidates
-with the harness installed: `../gather`, `../findmyballs`, `../moving-in`.
+once passed every stage while emitting 466 bogus warnings on a real project, and
+`coverage_check.py` shipped in 0.19.0 only because this step caught it reporting
+`ui_layout` COVERED off the harness's **own seed test** on two of three real projects —
+every freshly scaffolded project would have read as covered on day one. In both cases the
+tool had already passed every scratch stage and its author's own fixtures. Fifteen
+seconds here is the cheapest step in this file and has the best hit rate. Candidates with
+the harness installed: `../gather`, `../findmyballs`, `../moving-in`.
 
 If you added a check, it must **plant the defect it claims to detect** and be confirmed
 to fail before shipping. A stage that can only report success is not a stage.
@@ -148,7 +156,16 @@ bd list --status=open
 
 ## 6. Commit and push
 
-Only when the user has asked. This repo commits directly to `master` — all releases do.
+Only when the user has asked. **Work on a `release/X.Y.Z` branch, never directly on
+`master`.** Every release in the log arrived that way — `Merge pull request #8 from
+SeveralHerr/release/0.18.0`, `#4 from SeveralHerr/fix/...` — and the standing rule in the
+user's global `CLAUDE.md` is *never commit to main*. Cut the branch before the first
+commit; if you are already on `master` with the work in the tree,
+`git checkout -b release/X.Y.Z` carries it over cleanly.
+
+Landing it on `master` is a **separate, explicit ask.** When it comes, prefer a PR;
+merge locally with `--no-ff` only if the user asked for `master` directly, so the history
+keeps the merge-commit shape the PRs produce.
 
 The commit message is the release note: what shipped, **why the obvious implementation
 was not used** if it wasn't, how it was validated, and what was considered and rejected.
