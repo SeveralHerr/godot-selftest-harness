@@ -181,6 +181,16 @@ probe is what found that, and the fix it produced was one line instead of a pass
   reverted on the editor's next save. The scaffolder warns about this; keep the warning.
 - **Keep addon `class_name`s namespaced** (`GodotSelftest*`) — they land in a project that
   has its own class names, and the core loads by path anyway.
+- **Never run a repo-wide git discard here** — `git clean -fd`, `git checkout -- .`,
+  `git reset --hard`. `experiments/` and `.devtools/` are untracked *by design*, so git
+  holds no copy of them and no stash, reflog or Recycle Bin entry survives the command.
+  This already cost the entire A/B study harness ([H-052]): its conclusions survived only
+  because they had been written into `log-devtools.md` first.
+- **Scoping a subagent to a file list does not scope it away from `git clean`.** When
+  fanning work out, say *"you may edit only the files named above; run no repo-wide git
+  command of any kind"* in the prompt, and give untracked work a recoverable object
+  (`git add -A`, or `git stash create`) **before** spawning anything. Verify ownership
+  held afterwards with `git status` — that catches a collision, but only after the fact.
 
 
 <!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:6cd5cc61 -->

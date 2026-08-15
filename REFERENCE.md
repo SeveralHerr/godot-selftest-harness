@@ -351,10 +351,42 @@ get_ui_snapshot, get_node_bounds, save_ui_baseline, ui_snapshot_diff,
 list_commands, touch_press, touch_release, touch_drag, touch_clear, touch_list,
 set_feature, tilemap_cells, tilemap_region, scripts_seen, canvas_scale,
 set_resolution, harness_version, find_nodes, press, raycast, sample_pixels,
-reachable_ui
+reachable_ui, findings
 ```
 
 Notable behaviors:
+
+- **`findings`** runs every live check at once — `ui_layout`, `ui_reachable`,
+  `signal_unconnected`, `performance`, `scene_validation` — and returns one flat
+  findings list with no assertions from the project. `data`:
+  `findings[{source, code, severity, path, message}]`, `counts`, `checks_run`,
+  `checks_skipped[{check, reason}]`, `viewport`, `baseline_in_use`, `new_count`,
+  `pre_existing_count`.
+
+  It reuses each verb's own implementation rather than re-deriving it, so it can
+  never disagree with `validate_ui` / `reachable_ui` / `performance` /
+  `validate_all` about the same scene, and a fix to one is a fix here too. It
+  respects the `user://ui_findings_baseline.json` NEW/PRE split: pre-existing UI
+  findings are excluded from the list and reported as a count, never silently
+  dropped.
+
+  `signal_unconnected` reports only signals a *script* declares
+  (`Script.get_script_signal_list()`), never the engine built-ins every `Node`
+  inherits — those are legitimately unconnected almost everywhere and would bury
+  the real findings.
+
+  **`checks_run` / `checks_skipped` are load-bearing.** A consolidated report is
+  the easiest place in the whole system for a check to quietly vanish from, so it
+  carries its own denominator: a check that could not run is named with a reason,
+  and the client prints `N findings across K of M checks`. A check that ran and
+  found nothing is `counts[id] = 0`, not an absent key — absent means it did not
+  run, and the two must never read alike. Sub-conditions skipped inside a check
+  that *did* run carry a dotted id (`performance.orphan_growth`) and do not count
+  toward M, so the denominator stays arithmetically true.
+
+  Exit codes: `0` clean, `1` gating findings, `2` could not run — including a
+  reply missing a required `data` key, which is reported as unreadable rather
+  than as a result.
 
 - **`clear_nodes`** is a generic replacement for game-specific "clear" verbs. It
   accepts one selector — `{"group": <name>}`, `{"method": <method_name>}`, or
@@ -1007,6 +1039,65 @@ constant, and a gate that cries wolf gets switched off, which is worse than the 
 And this is not a compiler — it does not type-check, evaluate, or see a name built at
 runtime.
 
+### `tools/coverage_check.py` — what your checks never ask
+
+Every other gate answers *"did the checks pass"*. This one answers *"which questions
+do the checks ask at all"* — the only thing a green run structurally cannot tell you.
+A hand-rolled suite is incapable of noticing what it forgot to check, and
+`70 checks, 0 failures` reads identically over a working screen and a broken one.
+
+It enumerates the eight defect classes this harness knows about from real Godot
+failures — `ui_layout`, `ui_reachable`, `signal_unconnected`, `orphan_growth`,
+`input_path`, `scene_validation`, `shader_compile`, `name_resolution` — counts the
+project's `_T.assert_*` call sites, and for each class prints either `UNCHECKED` with
+the cheapest command that would cover it, or `COVERED` with **the file:line and token
+that convinced it**.
+
+**The evidence line is the design.** A checker whose only possible output is "all
+covered" is indistinguishable from one that is not running — this repo has been burned
+by that three times ([H-035]). Printing the matched line is what lets a reader falsify
+a COVERED in ten seconds.
+
+Four statuses, because "something asked this once" is not the same claim as "the suite
+asks this every run":
+
+| Status | Means |
+|---|---|
+| `COVERED` | A check in this project's `test_dir` asks the question. |
+| `COVERED (gate)` | An always-run tool covers it — and only while that tool is actually installed. A project without `tools/name_check.py` correctly reports `name_resolution` UNCHECKED rather than inheriting a gate it does not have. |
+| `COVERED (session)` | Seen only in `.devtools/verify-runs.jsonl` or a `devtools_log*.jsonl`. Printed with its timestamp, because a past run is an observation, not a standing check. |
+| `UNCHECKED` | Nothing exercises it. |
+
+**Weak evidence never promotes a class.** `ui.size` without `instantiate_ui` (a Control
+outside a tree reports `0x0`, so that assertion asserts the failure mode itself),
+`PackedScene` without a `res://….tscn` literal (the shipped example test packs one in
+code, which would mark every scaffolded project covered on day one), `connect(` without
+`is_connected`, `InputEventKey` without a delivery call — and **anything inside the
+methods the harness itself seeds** into `test_selftest.gd`. That last one matters more
+than it sounds: the seed genuinely calls `_T.instantiate_ui()` and asserts `ui.size`, on
+a two-node HUD it builds in code, so crediting it marked every freshly scaffolded
+project `ui_layout`-covered on day one — two real projects were reported covered off
+`test_example.gd:42` before it was fixed. The rule keys on the enclosing *method*, not
+the file, so a project that adds its own tests to the seeded file gets full credit for
+them. Weak matches are printed
+underneath the UNCHECKED verdict with the reason they fell short — a false UNCHECKED
+costs a reader ten seconds, a false COVERED is the entire bug the tool exists to catch.
+Source is scanned with comments and string bodies blanked, so a token named in a
+docstring cannot fake coverage.
+
+**Like `name_check.py` it never opens the project** — no `godot`, no `--import`, no
+`.godot/` write — so N agents can run it at once and a never-imported worktree can run
+it at all.
+
+Advisory by design: **exit `0` always**, `--strict` exits `1` on any UNCHECKED class,
+`2` means it could not run. Flags: `--json`, `--only ID`, `--test-dir DIR`,
+`--config PATH`, `--project DIR`.
+
+A covered class means the question is asked. It never means the answer was right, and
+the eight classes are the failures this harness has been burned by — not every way a
+game can break. Coverage here is a floor, never a pass; the tool prints that itself as
+a `NOT COVERED:` line on every run.
+
 ### `tools/import_check.py`
 
 `godot --headless --path . --import` exits `0` whether or not the scripts it just
@@ -1197,6 +1288,41 @@ running a game at all. It also calls out a long stretch with no `overkill`, and 
 tool looks like.
 
 Commit the ledger. Its value is entirely in being long.
+
+### `test_dir` is the home for the checks a session writes
+
+An agent asked to verify a change writes a selftest whether or not the project has
+one — that instinct is robust enough to survive removing every prompt that asks for
+it. The failure is not that the checks are bad; it is that they are written into a
+scratch script or the transcript, thrown away at the end of the session, and written
+again from scratch by the next one. A project accumulates nothing.
+
+So `test_dir` (`res://test/unit` by default) is the documented destination, the
+scaffolder seeds it as **`test_selftest.gd`** — named and headed as *this project's
+selftest, extend it* rather than *example, delete me* — and `/verify` Phase 1 re-runs
+everything in it on every change. A check promoted there costs one edit and is then
+re-run for the life of the project.
+
+Every run prints the suite as a standing quantity:
+
+```
+  Assertions: 61 executed
+  Suite: 4 test script(s) in res://test/unit
+```
+
+That pair is the inherited-coverage reading. A project stuck at `Suite: 1` after
+twenty sessions is one where every session wrote a throwaway; the number is there to
+make that visible rather than inferable. `--json` carries it as `test_files` and
+`test_dir`.
+
+The split is by **what the check needs**, not by how important it is: anything that
+needs a live playing game — real input over time, physics, a tween landing, a scene
+mid-transition — stays a `/verify` Phase 4 bridge check. Everything else (pure logic,
+resources, data tables, and any layout `instantiate_ui` can resolve) belongs in
+`test_dir`. `/verify` Phase 4 Step 5 makes that decision an explicit, reported step.
+
+Installs predating 0.19.0 keep their `test_example.gd`; the scaffolder only seeds a
+test dir that is missing or empty, so nothing is renamed or clobbered under a refresh.
 
 ### Headless UI tests
 

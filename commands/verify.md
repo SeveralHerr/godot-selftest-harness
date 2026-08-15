@@ -68,7 +68,7 @@ DRIFTED=""
 for f in addons/godot_selftest/dev_tools.gd addons/godot_selftest/scene_validator.gd \
          tools/devtools.py tools/lint_project.gd tools/run_tests.gd tools/eval.gd \
          tools/import_check.py tools/name_check.py tools/check_devtools_log.py \
-         tools/upstream_gaps.py tools/verify_ledger.py; do
+         tools/upstream_gaps.py tools/verify_ledger.py tools/coverage_check.py; do
   src="${CLAUDE_PLUGIN_ROOT}/templates/$f"
   [ -f "$src" ] && [ -f "$f" ] || continue
   diff -q <(tr -d '\r' < "$src") <(tr -d '\r' < "$f") >/dev/null || { echo "DRIFT: $f"; DRIFTED="$DRIFTED $f"; }
@@ -227,6 +227,22 @@ cat tests.log
 
 `run_tests.gd` auto-discovers tests under the configured `test_dir`. Stop if any tests fail.
 
+**Read the `Suite:` line, and report it.** Every run prints `Suite: N test script(s) in res://test/unit` alongside `Assertions: M executed`. That pair is the checking previous sessions left behind for this one — say it out loud in your Phase 1 report (`inherited suite: 4 scripts, 61 assertions`), because it is what tells you whether to *extend* an existing selftest or start the project's first one. A project sitting at `Suite: 1` with only the seeded sanity checks has no accumulated coverage, and every session that writes a throwaway check instead of adding here keeps it at 1 forever.
+
+### Assertion coverage (advisory, no engine, parallel-safe)
+
+```bash
+"$PY" tools/coverage_check.py
+```
+
+A green suite says nothing about what the suite never asks. `coverage_check.py` reports on the *checks* rather than their results: it enumerates the defect classes the harness knows about — UI layout, UI reachability, unconnected signals, orphan growth, input path, scene validation, shader compile, name resolution — and names the ones nothing in this project exercises, printing the file:line evidence for each class it calls covered.
+
+This is advisory and **never fails the run** (it exits 0 by default; `--strict` is opt-in). Report the unchecked classes in the Phase 1 summary anyway. It is the one signal here that a project-authored suite structurally cannot produce for itself, and the failure mode it addresses is a session signing off "70 checks, 0 failures, confidence high" over a screen that was visibly broken in a way nothing in those 70 checks was looking at.
+
+If Phase 4 ends up writing a check that closes one of the named classes, promote it into `test_dir` (Phase 4 Step 5) and the class goes quiet on the next run — that is the loop working.
+
+It opens no project and writes nothing to `.godot/`, so it is safe alongside other agents and works in a never-imported worktree, same as `name_check.py`.
+
 **Narrowing the run.** `--filter NAME` matches a test's method name **or its script filename**; `--file NAME` matches the script path (bare name, filename, or substring). They combine with AND:
 
 ```bash
@@ -334,14 +350,30 @@ Note the difference from `entry_hook`: reaching a scene is rarely enough. A boss
 
 ## Phase 3: Validation
 
-Run in order:
+**One command does the whole sweep:**
 
-1. `"$PY" tools/devtools.py validate-all` — 0 issues required
-2. `"$PY" tools/devtools.py validate-ui` — 0 **NEW** issues required. If `config.safe_area_inset` is non-zero this also reports `ui_outside_safe_area` for Controls straying under an overlay/notch/rounded corner; with an all-zero inset the check is skipped entirely.
-3. `"$PY" tools/devtools.py screenshot` — visual verification (add a short `sleep` first if you just changed state)
-4. `"$PY" tools/devtools.py performance` — FPS must be `>= config.fps_min` (default 30); orphan **growth** since the baseline must be `<= config.orphan_growth_max`
+```bash
+"$PY" tools/devtools.py findings
+```
 
-   Gate on `orphan_growth`, not the absolute count. A real project reports dozens of orphans on a fresh launch before any test action, so the historical `orphan_max: 0` was unreachable — and a threshold nothing can ever satisfy trains you to skip the check entirely. Growth-since-baseline is the number that actually means "this change leaks". Report the absolute count alongside it for context, and if `orphan_growth` is unavailable (older harness install), say so rather than silently falling back to a check you know is noise.
+`findings` runs scene validation, UI layout, UI reachability, declared-but-unconnected signals, and FPS/orphan-growth in a single bus call, and returns one flat findings list. This is the zero-config half of the harness — it asserts things this project never asked it to, which is exactly why it catches what a project-authored suite omits. **Report its output verbatim in the Phase 3 summary**, including a clean one.
+
+Two numbers in that output are not optional reading:
+
+- **`N finding(s) across K of M checks`** — if `K < 5`, some check did not run. A check that could not run is listed under `checks_skipped` with a reason, and a report missing a check is not a clean report. Say which were skipped and why.
+- **`new_count` vs `pre_existing_count`** — only NEW UI findings gate (see the baseline discussion below).
+
+Add `--no-scenes` to skip the scene-validation pass when it is slow and the diff touched no `.tscn`; say so if you do. Then:
+
+```bash
+"$PY" tools/devtools.py screenshot   # visual verification; short `sleep` first if you just changed state
+```
+
+**When a finding fires, re-check that one thing alone after fixing it** — `validate-ui`, `reachable-ui`, `performance` and `validate-all` are still individually callable and are much faster than the full sweep.
+
+On the orphan check specifically: gate on `orphan_growth`, not the absolute count. A real project reports dozens of orphans on a fresh launch before any test action, so the historical `orphan_max: 0` was unreachable — and a threshold nothing can ever satisfy trains you to skip the check entirely. Growth-since-baseline is the number that actually means "this change leaks". Report the absolute count alongside it for context, and if `orphan_growth` is unavailable (older harness install), say so rather than silently falling back to a check you know is noise.
+
+If `config.safe_area_inset` is non-zero the UI pass also reports `ui_outside_safe_area` for Controls straying under an overlay/notch/rounded corner; with an all-zero inset that check is skipped entirely — and will say so.
 
 No game-specific exceptions are baked in, but a *permanent* finding is a real
 category and 0.12.0 gives it somewhere to go. `validate-ui` splits findings into
@@ -476,6 +508,17 @@ Also test at least one guard/edge case per behavior (e.g. the effect must NOT ha
 "$PY" tools/devtools.py run-method --node "/root/<Root>/Entities/Enemy" --method apply_damage --args "[30]"
 "$PY" tools/devtools.py get-state --node "/root/<Root>/Entities/Enemy"   # expect health unchanged
 ```
+
+### Step 5: Promote the durable checks into `test_dir`
+
+A Phase 4 check exists for the length of this run and then only in the transcript. Before you move on, decide for each check you just wrote: **does it need a live, playing game?**
+
+- **No** — it is pure logic, a resource, a layout that `_T.instantiate_ui` can resolve, a data table. Write it as a `test_*` method in the project's selftest (`test_dir`, seeded as `test/unit/test_selftest.gd`). It then runs in Phase 1 of *every* future `/verify`, for free, forever, and the next session inherits it.
+- **Yes** — real input over time, physics, a scene mid-transition, a tween landing. It stays a Phase 4 bridge check. Say so; that is a fine answer.
+
+This is the whole reason `test_dir` is re-run automatically. The check you just proved works is the cheapest test the project will ever get, and leaving it in the transcript throws it away. Do not create a new test file if one already exists — add the method to it, so `Suite:` counts scripts a human would want to read rather than one per session.
+
+Report the promotion explicitly: `promoted 2 of 5 checks into test/unit/test_selftest.gd; 3 need the running game`. If you promoted nothing, say which of the two reasons applied.
 
 ### Generic pitfalls (apply regardless of project)
 

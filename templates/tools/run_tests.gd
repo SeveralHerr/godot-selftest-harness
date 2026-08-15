@@ -43,6 +43,7 @@ extends SceneTree
 ##   Selected: 662 of 662 discovered  (no selector)
 ##   Autoloads: 6 of 6 ready
 ##   Assertions: 1184 executed
+##   Suite: 11 test script(s) in res://test/unit
 ## The bare run used to print only `Total: 662 | ...`, which is the same fact with
 ## nothing to compare it against - a discovery pass that silently found half the
 ## files it should have looked exactly like a full suite. `ALL TESTS PASSED` is
@@ -90,10 +91,10 @@ extends SceneTree
 ## (res://addons/godot_selftest/devtools_config.json key "test_dir", default
 ## "res://test/unit") for files named test_*.gd.
 
-# harness-version: 0.18.0
+# harness-version: 0.19.0
 ## Harness revision these files were copied from. See lint_project.gd / the
 ## `harness_version` bus verb; bump with .claude-plugin/plugin.json.
-const HARNESS_VERSION: String = "0.18.0"
+const HARNESS_VERSION: String = "0.19.0"
 
 const CONFIG_PATH: String = "res://addons/godot_selftest/devtools_config.json"
 const DEFAULT_TEST_DIR: String = "res://test/unit"
@@ -119,6 +120,15 @@ var _selected: int = 0
 ## Set when a selector matched nothing. Reported instead of "the suite did not
 ## complete", because the suite is fine - the selector isn't.
 var _selection_error: String = ""
+
+## The suite as an inherited asset, not just this run's tally. A session that
+## finds `Suite: 3 test script(s) in res://test/unit` knows there is prior work
+## to extend; one that finds `Suite: 1 test script(s)` (the seed alone) knows it
+## is the first. Without this line the only visible numbers describe methods and
+## assertions, and a project with no accumulated suite looks exactly like one
+## whose suite this run happened to filter down to nothing.
+var _test_files: int = 0
+var _test_dir: String = ""
 
 ## Autoload readiness, reported on every run. See _await_autoloads().
 var _autoloads_total: int = 0
@@ -150,6 +160,7 @@ func _initialize() -> void:
 	await _await_autoloads()
 
 	var test_dir: String = _load_test_dir()
+	_test_dir = test_dir
 	if not DirAccess.dir_exists_absolute(test_dir):
 		_runner_error = true
 		_errors.append({"script": test_dir, "error": "test_dir does not exist"})
@@ -158,6 +169,7 @@ func _initialize() -> void:
 		return
 
 	var test_scripts: Array[String] = _discover_test_scripts(test_dir)
+	_test_files = test_scripts.size()
 	if test_scripts.is_empty():
 		# "0 tests passed" is not a pass. Discovering nothing means the gate did
 		# not run, so say so rather than reporting a clean sweep of an empty set.
@@ -542,6 +554,8 @@ func _print_results() -> void:
 			"selected": _selected,
 			"vacuous": _vacuous,
 			"assertions": _assertions_run,
+			"test_files": _test_files,
+			"test_dir": _test_dir,
 			"autoloads_total": _autoloads_total,
 			"autoloads_ready": _autoloads_ready,
 			"autoloads_unready": _autoloads_unready,
@@ -608,6 +622,10 @@ func _print_results() -> void:
 			_autoloads_ready, _autoloads_total, autoload_note,
 		])
 	print("  Assertions: %d executed" % _assertions_run)
+	# The suite as a standing asset. Printed last of the denominators because it
+	# is the one a fresh session should read first: it says how much checking
+	# previous sessions left behind for this one to extend.
+	print("  Suite: %d test script(s) in %s" % [_test_files, _test_dir])
 	print("-" .repeat(60))
 
 	if _selection_error != "":

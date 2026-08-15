@@ -89,11 +89,11 @@ from pathlib import Path
 from typing import Optional  # noqa: F401
 
 
-# harness-version: 0.18.0
+# harness-version: 0.19.0
 # Version of the godot-selftest-harness this client was copied from. Compared against
 # the running game's own stamp by the `harness-version` verb, so a half-refreshed
 # install (new client, old autoload) is visible instead of mysterious.
-HARNESS_VERSION = "0.18.0"
+HARNESS_VERSION = "0.19.0"
 
 COMMANDS_FILE = "devtools_commands.json"
 RESULTS_FILE = "devtools_results.json"
@@ -1801,7 +1801,7 @@ def cmd_step_time(args, project_path: Path):
     if data.get("tree_paused"):
         # A paused tree still emits frames while nothing advances, so this would
         # otherwise look like a successful step of a frozen game.
-        print("  WARNING: the tree is paused — nothing actually advanced.")
+        print("  WARNING: the tree is paused - nothing actually advanced.")
     if data.get("budget_exhausted"):
         print("  WARNING: frame budget exhausted before the target was reached.")
 
@@ -2039,6 +2039,142 @@ def cmd_set_feature(args, project_path: Path):
             f"{', '.join(rejected)}",
             file=sys.stderr,
         )
+        sys.exit(1)
+
+
+# ==================== CONSOLIDATED FINDINGS ====================
+
+# Every data key the `findings` reply must carry. Checked as a set, up front,
+# and named in the error when one is missing. This is not defensive style for
+# its own sake: three key mismatches shipped green in 0.4.0 because each half
+# was tested against a fake of the other, and every one of them printed a
+# friendly line instead of admitting the key was gone.
+_FINDINGS_REQUIRED_KEYS = (
+    "findings",
+    "counts",
+    "checks_run",
+    "checks_skipped",
+    "viewport",
+    "baseline_in_use",
+    "new_count",
+    "pre_existing_count",
+)
+
+# Most severe first, so the worst finding in a report is the one at the top.
+_SEVERITY_ORDER = {"error": 0, "warning": 1, "info": 2}
+_SEVERITY_LABEL = {"error": "ERROR", "warning": "WARN", "info": "INFO"}
+
+
+def cmd_findings(args, project_path: Path):
+    """Every live check the harness knows, in one call (bus verb: findings).
+
+    Data keys read: findings, counts, checks_run, checks_skipped, viewport,
+    baseline_in_use, new_count, pre_existing_count.
+
+    Exit codes follow the rest of the tool: 0 clean, 1 gating findings, 2 could
+    not run (which includes a reply whose shape this client does not recognize
+    - an unreadable answer is not a clean one).
+    """
+    cmd_args = {}
+    if getattr(args, "no_scenes", False):
+        cmd_args["scenes"] = False
+    if getattr(args, "no_baseline", False):
+        cmd_args["use_baseline"] = False
+    if getattr(args, "baseline_write", False):
+        cmd_args["baseline_write"] = True
+
+    # Scene validation loads every scene under scan_root; give it room.
+    timeout = 30.0 if cmd_args.get("scenes") is False else 120.0
+    result = send_command(project_path, "findings", cmd_args, timeout=timeout)
+
+    if args.json:
+        print(json.dumps(result, indent=2))
+        sys.exit(0 if result.get("success") else 1)
+
+    data = result.get("data") or {}
+    missing = [k for k in _FINDINGS_REQUIRED_KEYS if k not in data]
+    if missing:
+        # No friendly summary line here on purpose. A reply we cannot read is
+        # reported as unreadable, never as a result.
+        print(
+            "findings: the reply is missing required data key(s): "
+            f"{', '.join(missing)}. Keys present: {sorted(data)}. "
+            "This game's harness is older than this client, or the verb changed "
+            "on one side only.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+    findings = data["findings"]
+    checks_run = data["checks_run"]
+    checks_skipped = data["checks_skipped"]
+    vp = data["viewport"]
+
+    # The denominator. Sub-conditions skipped inside a check that DID run carry
+    # a dotted id ("performance.orphan_growth") and are reported but not counted
+    # as whole checks, so run + dotless-skipped is the number of checks there are.
+    top_level_skipped = {
+        str(s.get("check", "?")) for s in checks_skipped if "." not in str(s.get("check", "?"))
+    }
+    total_checks = len(checks_run) + len(top_level_skipped)
+
+    print(f"{len(findings)} finding(s) across {len(checks_run)} of {total_checks} "
+          f"checks ({int(vp['w'])}x{int(vp['h'])})")
+
+    # Group by code, most severe group first, then by size.
+    groups = {}
+    for f in findings:
+        groups.setdefault(str(f.get("code", "?")), []).append(f)
+
+    def _rank(entry):
+        code, items = entry
+        worst = min(_SEVERITY_ORDER.get(str(i.get("severity", "")), 3) for i in items)
+        return (worst, -len(items), code)
+
+    for code, items in sorted(groups.items(), key=_rank):
+        items.sort(key=lambda i: _SEVERITY_ORDER.get(str(i.get("severity", "")), 3))
+        sources = sorted({str(i.get("source", "?")) for i in items})
+        worst = _SEVERITY_LABEL.get(str(items[0].get("severity", "")), "???")
+        print(f"  {code:<22} {len(items):>3}  [{worst}] {', '.join(sources)}")
+        for item in items:
+            where = str(item.get("path", "")) or "-"
+            print(f"      {where}: {_printable(str(item.get('message', '')))}")
+
+    # Per-source counts, including the sources that ran and found nothing: a 0
+    # and an absent source mean different things and must not print the same.
+    counts = data["counts"]
+    if counts:
+        print("\nBy check: " + ", ".join(
+            f"{src}={counts[src]}" for src in sorted(counts)))
+
+    if checks_skipped:
+        print(f"\n{len(checks_skipped)} check(s) did NOT run:")
+        for entry in checks_skipped:
+            print(f"  {entry.get('check', '?')}: {entry.get('reason', 'no reason given')}")
+    else:
+        print("\nAll checks ran.")
+
+    # The UI baseline, carried through from validate_ui. Pre-existing findings
+    # are excluded from the list above, so say how many were excluded rather
+    # than letting them vanish.
+    if "ui_layout" not in checks_run:
+        # The baseline numbers are carried through even when the UI check was
+        # skipped. Advertising "run --baseline-write" here would be advice about
+        # a check that did not happen.
+        print("UI baseline: not consulted (the ui_layout check did not run).")
+    elif data["baseline_in_use"]:
+        print(f"UI baseline: {data['new_count']} NEW, {data['pre_existing_count']} "
+              "pre-existing (excluded above). Only NEW ui_layout findings gate.")
+    elif cmd_args.get("use_baseline") is False:
+        # Distinct from "there isn't one": the file may well exist, we asked the
+        # game to ignore it. Reporting that as "none on disk" would send someone
+        # off to write a baseline that is already there.
+        print("UI baseline: ignored (--no-baseline) - every ui_layout finding gates.")
+    else:
+        print("UI baseline: none on disk - every ui_layout finding gates. "
+              "Run `findings --baseline-write` to accept the current UI set.")
+
+    if not result.get("success"):
         sys.exit(1)
 
 
@@ -3173,6 +3309,24 @@ def main():
     p.add_argument("--json", "-j", action="store_true",
                    help="Print the full raw reply (what tools/verify_ledger.py consumes)")
     p.set_defaults(func=cmd_scripts_seen)
+
+    # ==================== CONSOLIDATED FINDINGS ====================
+
+    # findings
+    p = subparsers.add_parser(
+        "findings",
+        help="Run every live check at once and print one consolidated findings list")
+    p.add_argument("--no-scenes", action="store_true",
+                   help="Skip scene_validation (it loads every scene under scan_root "
+                        "and is by far the slowest check)")
+    p.add_argument("--no-baseline", action="store_true",
+                   help="Ignore the saved UI findings baseline; every ui_layout finding gates")
+    p.add_argument("--baseline-write", action="store_true",
+                   help="Record the current ui_layout findings as pre-existing; "
+                        "later runs gate only on NEW ones")
+    p.add_argument("--json", "-j", action="store_true",
+                   help="Print the full raw reply envelope")
+    p.set_defaults(func=cmd_findings)
 
     # ==================== UI VALIDATION ====================
 

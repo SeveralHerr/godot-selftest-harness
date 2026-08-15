@@ -247,6 +247,161 @@ def stage_reach():
 # Stage 2: scratch project
 
 
+def _coverage_fixture(root, with_ui_check):
+    """A minimal scaffolded-looking project, with or without a UI-layout check.
+
+    The docstring in test_math.gd names the exact tokens that prove ui_layout
+    coverage, in a comment. A detector that greps raw source instead of blanking
+    comments reports COVERED on fixture A, which is the false-COVERED this whole
+    tool exists to make impossible.
+    """
+    (root / "test" / "unit").mkdir(parents=True, exist_ok=True)
+    (root / "addons" / "godot_selftest").mkdir(parents=True, exist_ok=True)
+    (root / "project.godot").write_text("[application]\n", encoding="utf-8")
+    (root / "addons" / "godot_selftest" / "devtools_config.json").write_text(
+        json.dumps({"test_dir": "res://test/unit", "scan_root": "res://"}),
+        encoding="utf-8")
+    (root / "test" / "unit" / "test_math.gd").write_text(
+        "extends RefCounted\n"
+        "## Trap: this comment names _T.instantiate_ui( and get_global_rect()\n"
+        "## and asserts ui.size, and none of it is ever called.\n"
+        "var _T\n"
+        "func test_a() -> String:\n"
+        "\treturn _T.assert_eq(2 + 2, 4, \"math\")\n",
+        encoding="utf-8")
+    if with_ui_check:
+        (root / "test" / "unit" / "test_hud.gd").write_text(
+            "extends RefCounted\n"
+            "var _T\n"
+            "func test_hud() -> String:\n"
+            "\tvar ui: Control = await _T.instantiate_ui(_hud(), Vector2i(640, 360))\n"
+            "\tvar e: String = _T.assert_eq(ui.size, Vector2(640, 360), \"fills\")\n"
+            "\t_T.free_ui(ui)\n"
+            "\treturn e\n"
+            "func _hud() -> PackedScene:\n"
+            "\treturn PackedScene.new()\n",
+            encoding="utf-8")
+
+
+def stage_coverage():
+    """coverage_check.py must go quiet only when the project really covers a class.
+
+    Both directions, because only the positive one is what a broken detector
+    passes: a tool that reports every class UNCHECKED looks exactly like a
+    correct one on fixture A, and a tool that reports every class COVERED looks
+    exactly like a correct one on fixture B. Running only one of them proves
+    nothing at all ([H-035]).
+
+    Needs no Godot and never opens a project - the tool's own premise - so it
+    runs under --static-only.
+    """
+    tool = TEMPLATES / "tools" / "coverage_check.py"
+    if not tool.exists():
+        return fail("stage 1.6 coverage: %s is missing" % tool)
+
+    ok = True
+    with tempfile.TemporaryDirectory() as tmp:
+        for with_ui, want in ((False, "UNCHECKED"), (True, "COVERED")):
+            root = Path(tmp) / ("B" if with_ui else "A")
+            _coverage_fixture(root, with_ui)
+            proc = subprocess.run(
+                [sys.executable, str(tool), "--project", str(root),
+                 "--only", "ui_layout", "--json"],
+                capture_output=True, text=True, timeout=120)
+            if proc.returncode != 0:
+                ok = fail("stage 1.6 coverage: fixture %s exited %d (advisory runs "
+                          "must exit 0)\n%s\n%s"
+                          % ("B" if with_ui else "A", proc.returncode,
+                             proc.stdout[-2000:], proc.stderr[-2000:]))
+                continue
+            try:
+                report = json.loads(proc.stdout)
+            except ValueError as exc:
+                return fail("stage 1.6 coverage: --json not parseable: %s" % exc)
+
+            cls = [c for c in report.get("classes", []) if c.get("id") == "ui_layout"]
+            if len(cls) != 1:
+                ok = fail("stage 1.6 coverage: --only ui_layout returned %d class(es)"
+                          % len(cls))
+                continue
+            status = cls[0].get("status", "")
+            covered = status.startswith("covered")
+            if covered != with_ui:
+                ok = fail("stage 1.6 coverage: fixture %s reported ui_layout %r. "
+                          "%s" % ("B" if with_ui else "A", status,
+                                  "The docstring naming instantiate_ui/get_global_rect "
+                                  "flipped it - comments are not coverage."
+                                  if not with_ui else
+                                  "A real _T.instantiate_ui() call was not detected."))
+                continue
+
+            if with_ui:
+                # The evidence line is the whole design: a COVERED with no
+                # file:line is a verdict nobody can check.
+                ev = cls[0].get("evidence") or []
+                if not ev or not ev[0].get("location"):
+                    ok = fail("stage 1.6 coverage: fixture B reported COVERED with no "
+                              "evidence location - a verdict with no file:line is "
+                              "exactly the unfalsifiable output this tool exists to "
+                              "replace")
+                    continue
+                print("stage 1.6 coverage: fixture B -> %s, evidence %s (%s)"
+                      % (status, ev[0]["location"], ev[0].get("token", "")))
+            else:
+                print("stage 1.6 coverage: fixture A -> %s, and the docstring trap "
+                      "did not flip it" % status)
+
+        # Fixture C: the shipped seed test, alone and unmodified. It really does
+        # call _T.instantiate_ui() and assert ui.size - on a two-node HUD it
+        # builds in code - so a detector that only greps for the token marks
+        # EVERY freshly scaffolded project ui_layout-covered on day one. Two real
+        # projects were credited to `test_example.gd:42` before this was fixed.
+        seed = TEMPLATES / "test" / "unit" / "test_selftest.gd"
+        if not seed.exists():
+            ok = fail("stage 1.6 coverage: %s is missing - the seeded-test fixture "
+                      "cannot be built" % seed)
+        else:
+            root = Path(tmp) / "C"
+            _coverage_fixture(root, False)
+            (root / "test" / "unit" / "test_math.gd").unlink()
+            shutil.copy2(seed, root / "test" / "unit" / "test_selftest.gd")
+            proc = subprocess.run(
+                [sys.executable, str(tool), "--project", str(root),
+                 "--only", "ui_layout", "--json"],
+                capture_output=True, text=True, timeout=120)
+            try:
+                report = json.loads(proc.stdout)
+            except ValueError as exc:
+                return fail("stage 1.6 coverage: fixture C --json not parseable: %s" % exc)
+            cls = [c for c in report.get("classes", []) if c.get("id") == "ui_layout"]
+            status = cls[0].get("status", "") if cls else "?"
+            if status != "unchecked":
+                ok = fail("stage 1.6 coverage: the shipped seed test ALONE reported "
+                          "ui_layout %r. The harness's own example is not the "
+                          "project's coverage - every scaffolded project would read "
+                          "as covered on day one." % status)
+            elif not (cls[0].get("weak_evidence") or []):
+                ok = fail("stage 1.6 coverage: seed-only fixture reported UNCHECKED "
+                          "but printed no weak signal, so a reader cannot tell it "
+                          "from a project with no UI test at all")
+            else:
+                print("stage 1.6 coverage: the shipped seed alone -> unchecked, with "
+                      "the seeded call named as a weak signal")
+
+        # --strict is the opt-in gate; it must actually gate.
+        root = Path(tmp) / "A"
+        proc = subprocess.run(
+            [sys.executable, str(tool), "--project", str(root),
+             "--only", "ui_layout", "--strict"],
+            capture_output=True, text=True, timeout=120)
+        if proc.returncode != 1:
+            ok = fail("stage 1.6 coverage: --strict on an UNCHECKED class exited %d, "
+                      "expected 1" % proc.returncode)
+        else:
+            print("stage 1.6 coverage: --strict on an UNCHECKED class -> exit 1")
+    return ok
+
+
 def stage_assemble(scratch, user_dir_name):
     for src in TEMPLATES.rglob("*"):
         if not src.is_file():
@@ -658,7 +813,7 @@ def stage_runners(godot, scratch):
             tail = [l for l in proc.stdout.strip().splitlines() if l.strip()]
             print("stage 4 %s: exit 0 (%s)" % (name, tail[-1] if tail else "no output"))
             if name == "tests":
-                ok = check_test_denominators(proc.stdout) and ok
+                ok = check_test_denominators(proc.stdout, scratch) and ok
             if name == "lint":
                 ok = check_shader_denominator(proc.stdout) and ok
     if ok:
@@ -736,12 +891,13 @@ def stage_shader_control(godot, scratch):
         (planted.parent / (planted.name + ".uid")).unlink(missing_ok=True)
 
 
-def check_test_denominators(out):
+def check_test_denominators(out, scratch):
     """The runner must state what it looked at, not just that it passed.
 
-    Three numbers, each of which has at some point been the difference between a
+    Four numbers, each of which has at some point been the difference between a
     real pass and a green-looking nothing: how many tests were selected, how many
-    autoloads were actually ready, and how many assertions executed.
+    autoloads were actually ready, how many assertions executed, and how many test
+    scripts the project has accumulated.
     """
     ok = True
     m = re.search(r"Autoloads: (\d+) of (\d+) ready", out)
@@ -762,6 +918,24 @@ def check_test_denominators(out):
                   "is not wired to the _T.assert_* helpers")
     else:
         print("stage 4 tests: %s assertion(s) executed" % m.group(1))
+
+    # `Suite: N test script(s)` is the inherited-coverage reading a fresh session
+    # is told to act on, so it has to be the real file count and not a constant.
+    # Checked against an independently computed truth (the files on disk) rather
+    # than against itself: a `Suite: 1` hardcoded, or wired to _selected instead
+    # of the discovery list, passes any assertion that only looks for the line.
+    on_disk = len(list((scratch / "test" / "unit").glob("test_*.gd")))
+    m = re.search(r"Suite: (\d+) test script\(s\) in (\S+)", out)
+    if not m:
+        ok = fail("run_tests printed no `Suite:` line - a session cannot see how much "
+                  "checking previous sessions left it")
+    elif int(m.group(1)) != on_disk:
+        ok = fail("run_tests reports `Suite: %s` but %d test_*.gd file(s) are on disk "
+                  "in the scratch project - the count is not the discovery list"
+                  % (m.group(1), on_disk))
+    else:
+        print("stage 4 tests: Suite: %s test script(s) in %s (matches %d on disk)"
+              % (m.group(1), m.group(2), on_disk))
     return ok
 
 
@@ -1093,6 +1267,86 @@ def check_envelope(action, reply):
     if reply.get("action") not in (None, action):
         problems.append("action echoed as %r" % reply.get("action"))
     return problems
+
+
+_FINDINGS_KEYS = ("findings", "counts", "checks_run", "checks_skipped", "viewport",
+                  "baseline_in_use", "new_count", "pre_existing_count")
+_FINDINGS_CHECKS = ("ui_layout", "ui_reachable", "signal_unconnected",
+                    "performance", "scene_validation")
+
+
+def check_findings_aggregate(client, scratch):
+    """`findings` must carry its own denominator and actually find the plants.
+
+    A consolidated report is the easiest place in the system for a check to go
+    quiet: five checks collapse to one exit code, and a check that silently
+    stopped running looks exactly like a check that passed. So this asserts three
+    separate things, none of which a do-nothing implementation can fake.
+
+    stage_assemble already plants the UI defects (a Label at alpha 0, an 8x8
+    Button), so `ui_layout` having findings is the positive control - and it is
+    checked BEFORE check_ui_baseline writes those findings off as pre-existing.
+    """
+    reply = client.send_command(scratch, "findings", {}, timeout=60.0)
+    data = reply.get("data") or {}
+
+    missing = [k for k in _FINDINGS_KEYS if k not in data]
+    if missing:
+        return fail("findings reply is missing data key(s) %s - the GDScript and "
+                    "Python halves have drifted, which is the seam this whole stage "
+                    "exists for" % ", ".join(missing))
+
+    ran = list(data["checks_run"])
+    skipped = [s.get("check") for s in data["checks_skipped"]]
+    if sorted(ran) != sorted(_FINDINGS_CHECKS):
+        return fail("findings ran %r, expected all of %r on a healthy scratch "
+                    "project (skipped: %r). A check missing from checks_run did not "
+                    "run, and its findings cannot be in the report."
+                    % (sorted(ran), sorted(_FINDINGS_CHECKS), skipped))
+
+    # A check that ran and found nothing must be 0, never absent: absent is the
+    # encoding for "did not run", and collapsing the two is how a consolidated
+    # report starts lying.
+    absent = [c for c in ran if c not in data["counts"]]
+    if absent:
+        return fail("findings ran %r but counts has no entry for them - a check that "
+                    "found nothing must report 0, or 'clean' and 'never ran' become "
+                    "the same output" % absent)
+
+    ui = data["counts"].get("ui_layout", 0)
+    if ui == 0:
+        return fail("findings reports 0 ui_layout findings on a project with planted "
+                    "UI defects (a Label at alpha 0 and an 8x8 Button). Either the "
+                    "plants stopped being planted or the aggregate stopped calling "
+                    "validate_ui; either way this stage would otherwise pass on an "
+                    "implementation that returns an empty list")
+
+    sources = {f.get("source") for f in data["findings"]}
+    if not sources <= set(_FINDINGS_CHECKS):
+        return fail("findings carry unknown source(s) %r - every finding must be "
+                    "attributable to a declared check"
+                    % sorted(sources - set(_FINDINGS_CHECKS)))
+
+    # The skip path. --no-scenes must remove scene_validation from the denominator
+    # and say so by name, not just quietly shrink the number.
+    # The bus key is `scenes: false` - the client's --no-scenes flag inverts it.
+    reply2 = client.send_command(scratch, "findings", {"scenes": False}, timeout=60.0)
+    d2 = reply2.get("data") or {}
+    ran2 = list(d2.get("checks_run", []))
+    skipped2 = [s.get("check") for s in d2.get("checks_skipped", [])]
+    if "scene_validation" in ran2:
+        return fail("findings --no-scenes still ran scene_validation")
+    if "scene_validation" not in skipped2:
+        return fail("findings --no-scenes dropped scene_validation from checks_run "
+                    "without naming it in checks_skipped - a check that vanishes "
+                    "silently is the failure this key exists to prevent (skipped: %r)"
+                    % skipped2)
+
+    print("stage 5 bridge: findings ran %d of %d checks, %d finding(s) incl. %d "
+          "ui_layout on the planted defects; --no-scenes -> %d checks with "
+          "scene_validation named as skipped"
+          % (len(ran), len(_FINDINGS_CHECKS), len(data["findings"]), ui, len(ran2)))
+    return True
 
 
 def check_ui_baseline(client, scratch):
@@ -1619,6 +1873,10 @@ def stage_bridge(godot, scratch, full):
         ok = check_aabb_excludes_lights(client, scratch) and ok
         ok = check_find_nodes_denominator(client, scratch) and ok
         ok = check_set_state_dotted(client, scratch) and ok
+        # Before check_ui_baseline for the same reason: it writes a baseline that
+        # moves the planted UI findings to pre-existing, and this check needs them
+        # gating so a zero here means "the check did not run".
+        ok = check_findings_aggregate(client, scratch) and ok
         ok = check_ui_baseline(client, scratch) and ok
         ok = check_paused_bridge(client, scratch) and ok
         ok = check_dispatch_reentrancy(client, scratch) and ok
@@ -1707,6 +1965,8 @@ def main():
         return 1
     # Needs no Godot and no project, so it runs under --static-only too.
     if not stage_reach():
+        return 1
+    if not stage_coverage():
         return 1
     if args.static_only:
         return 0
