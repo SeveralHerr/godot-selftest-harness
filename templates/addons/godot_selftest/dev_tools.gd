@@ -14,14 +14,14 @@ extends Node
 ## extension loads AFTER the generic handlers, a project may override a generic
 ## verb by registering the same action string (last-writer-wins).
 
-# harness-version: 0.17.0
+# harness-version: 0.18.0
 # --- Constants ---
 
 ## Version of the godot-selftest-harness these files were copied from. Reported by the
 ## `harness_version` verb and stamped into every copied tool script, so a gap logged
 ## against a project can name the version it was seen on, and a refresh can tell a
 ## stale file from a customized one. Bump with .claude-plugin/plugin.json.
-const HARNESS_VERSION: String = "0.17.0"
+const HARNESS_VERSION: String = "0.18.0"
 
 ## Default bus filenames. With a session id (see _resolve_session) the id is spliced in
 ## before the extension, so two instances can each own a bus in the same user:// dir.
@@ -479,6 +479,7 @@ func _register_generic_handlers() -> void:
 	register_command("get_ui_snapshot", _cmd_get_ui_snapshot)
 	register_command("get_node_bounds", _cmd_get_node_bounds)
 	register_command("canvas_scale", _cmd_canvas_scale)
+	register_command("aabb", _cmd_aabb)
 	register_command("set_resolution", _cmd_set_resolution)
 	register_command("save_ui_baseline", _cmd_save_ui_baseline)
 	register_command("ui_snapshot_diff", _cmd_ui_snapshot_diff)
@@ -3174,6 +3175,9 @@ func _snapshot_ui_recursive(node: Node, vp: Vector2, elements: Array) -> void:
 ## degenerate (w=h=0) when it can report nothing -- an origin point is still a
 ## useful answer to "where on screen is this", and a zero size says plainly that
 ## the extent is unknown rather than inventing one.
+##
+## CanvasItem-only by construction -- there is no screen rect for a
+## MeshInstance3D. `aabb` is the 3D counterpart, in world units.
 ## data keys: name, type, path, global_rect{x,y,w,h}, visible, modulate_a, text,
 ## in_viewport, size_source.
 func _cmd_get_node_bounds(args: Dictionary) -> Dictionary:
@@ -3187,10 +3191,14 @@ func _cmd_get_node_bounds(args: Dictionary) -> Dictionary:
 		return {"success": false, "message": "Node not found: %s" % node_path}
 
 	if not node is CanvasItem:
+		# Name the verb that DOES answer for this node. Being told only what the
+		# harness cannot do is what sent a 3D project off to hand-roll glTF
+		# arithmetic twice (moving-in:G-002).
+		var alternative: String = " Use `aabb` for a 3D world-space box." if node is Node3D else ""
 		return {
 			"success": false,
-			"message": "Node is not a CanvasItem, so it has no screen rect: %s (%s)" % [
-				node_path, node.get_class()],
+			"message": "Node is not a CanvasItem, so it has no screen rect: %s (%s).%s" % [
+				node_path, node.get_class(), alternative],
 			"data": {"class": node.get_class()},
 		}
 
@@ -3201,12 +3209,19 @@ func _cmd_get_node_bounds(args: Dictionary) -> Dictionary:
 
 	if item is Control:
 		rect = _screen_rect_of(item as Control)
-		size_source = "canvas transform x Control.size"
+		size_source = "get_global_transform_with_canvas() x Control.size (screen space)"
 	else:
 		var xform: Transform2D = item.get_global_transform_with_canvas()
 		var local: Rect2 = _local_draw_rect(item)
 		rect = xform * local
-		size_source = "canvas transform x %s" % _local_draw_rect_source(item)
+		size_source = "get_global_transform_with_canvas() x %s (screen space)" % \
+			_local_draw_rect_source(item)
+	# The accumulated canvas scale, reported alongside the rect rather than only by
+	# the separate canvas-scale verb. A HUD on a CanvasLayer scaled 0.6 produced 55
+	# false ui_overflow findings in a real project, and diagnosing it took a second
+	# call to a verb the reader had no reason to suspect they needed
+	# (moving-in:G-008/G-015). One call should be enough to see it.
+	var canvas_scale: Vector2 = item.get_global_transform_with_canvas().get_scale()
 
 	return {
 		"success": true,
@@ -3228,6 +3243,7 @@ func _cmd_get_node_bounds(args: Dictionary) -> Dictionary:
 				and rect.position.x + rect.size.x <= vp.x
 				and rect.position.y + rect.size.y <= vp.y,
 			"size_source": size_source,
+			"canvas_scale": {"x": canvas_scale.x, "y": canvas_scale.y},
 		},
 	}
 
@@ -3361,6 +3377,199 @@ func _cmd_canvas_scale(args: Dictionary) -> Dictionary:
 			"canvas_layer_path": str(layer_node.get_path()) if layer_node != null else "",
 		},
 	}
+
+
+## Merged WORLD-SPACE AABB of everything a node draws -- the 3D half of node-bounds.
+##
+## node-bounds is CanvasItem-only, so a 3D project could not ask the harness where
+## anything IS: `node-bounds /root/House/Living/tableCoffeeGlass` answered "Node is
+## not a CanvasItem, so it has no screen rect". The gap was logged three times
+## across two logs before it was closed (moving-in:G-002, moving-in:G-006), and in
+## between it produced a real shipped defect -- a book placed 4cm past the edge of
+## the table it was supposed to rest on, caught only by a screenshot -- plus about
+## 25 lines of hand-rolled glTF arithmetic written twice in one session. `top_y` is
+## here because the recurring question is not "how big is it" but "what do I rest
+## something on".
+##
+## Light3D is EXCLUDED, and that exclusion is the whole reason this is a walk and
+## not a one-liner. Light3D extends VisualInstance3D, so "merge every
+## VisualInstance3D" quietly includes it, and an OmniLight3D's AABB is a cube of
+## TWICE ITS RANGE: a 0.2-unit lamp with a light child measured 7.2 x 7.2 x 7.2 and
+## corrupted every top_of() / center_of() derived from it. Only GeometryInstance3D
+## descendants are merged (MeshInstance3D, MultiMeshInstance3D, CSG shapes, Label3D,
+## Sprite3D, GPUParticles3D) -- the set that actually draws geometry. Everything
+## skipped is named in data.excluded with the reason, so a surprising number can be
+## traced without a second call.
+##
+## A node with NO geometry FAILS rather than returning a zero AABB at its origin: a
+## zero AABB reads exactly like an honest measurement of a tiny object sitting right
+## there, and this verb exists to be trusted for placement arithmetic.
+##
+## The AABB is axis-aligned in WORLD space, so a rotated object reports its enclosing
+## box, not its footprint. data.node_transform carries the node's own rotation and
+## scale (and `axis_aligned`) so a caller can tell those two cases apart.
+##
+## args: { "node_path": String }
+## data keys: path, name, type, min{x,y,z}, max{x,y,z}, size{x,y,z}, center{x,y,z},
+## top_y, bottom_y, merged_count, merged[{path,class,visible}],
+## excluded[{path,class,reason}], node_transform{origin,rotation_deg,scale,axis_aligned}.
+func _cmd_aabb(args: Dictionary) -> Dictionary:
+	var node_path: String = args.get("node_path", "")
+	if node_path.is_empty():
+		return {"success": false, "message": "No node_path provided", "data": {}}
+
+	var resolved: Dictionary = _resolve_node(node_path)
+	var node: Node = resolved["node"]
+	if node == null:
+		return {"success": false, "message": "Node not found: %s (also tried under /root)" % node_path,
+			"data": {}}
+	var used_path: String = resolved["path"]
+
+	var geometry: Array = []
+	var excluded: Array = []
+	_collect_geometry_instances(node, geometry, excluded)
+
+	if geometry.is_empty():
+		var hint: String = ""
+		if node is CanvasItem:
+			hint = " It is a CanvasItem -- use node-bounds for a screen rect."
+		elif not excluded.is_empty():
+			hint = " %d visual node(s) were skipped; see data.excluded." % excluded.size()
+		return {
+			"success": false,
+			"message": "No 3D geometry under %s (%s): nothing to measure.%s" % [
+				used_path, node.get_class(), hint],
+			"data": {"path": used_path, "type": node.get_class(), "merged_count": 0,
+				"merged": [], "excluded": excluded},
+		}
+
+	var merged_nodes: Array = []
+	var box: AABB = AABB()
+	var have: bool = false
+	for entry: GeometryInstance3D in geometry:
+		var world_box: AABB = _world_aabb_of(entry)
+		box = world_box if not have else box.merge(world_box)
+		have = true
+		merged_nodes.append({
+			"path": str(entry.get_path()),
+			"class": entry.get_class(),
+			"visible": entry.is_visible_in_tree(),
+		})
+
+	var center: Vector3 = box.position + box.size * 0.5
+	var node_transform: Dictionary = {}
+	if node is Node3D:
+		var xform: Transform3D = (node as Node3D).global_transform
+		var euler: Vector3 = xform.basis.get_euler()
+		var basis_scale: Vector3 = xform.basis.get_scale()
+		node_transform = {
+			"origin": _serialize_variant(xform.origin),
+			"rotation_deg": _serialize_variant(Vector3(
+				rad_to_deg(euler.x), rad_to_deg(euler.y), rad_to_deg(euler.z))),
+			"scale": _serialize_variant(basis_scale),
+			"axis_aligned": _basis_is_axis_aligned(xform.basis),
+		}
+
+	return {
+		"success": true,
+		"message": "%s spans %.3f x %.3f x %.3f, (%.3f, %.3f, %.3f)..(%.3f, %.3f, %.3f), top_y %.3f (%d geometry node(s) merged, %d excluded)" % [
+			node.name, box.size.x, box.size.y, box.size.z,
+			box.position.x, box.position.y, box.position.z,
+			box.end.x, box.end.y, box.end.z,
+			box.end.y, merged_nodes.size(), excluded.size()],
+		"data": {
+			"path": used_path,
+			"name": str(node.name),
+			"type": node.get_class(),
+			"min": _serialize_variant(box.position),
+			"max": _serialize_variant(box.end),
+			"size": _serialize_variant(box.size),
+			"center": _serialize_variant(center),
+			# The y of the top and bottom faces. "What do I rest this on" and "is it
+			# sunk into the floor" are the two questions this verb keeps being asked.
+			"top_y": box.end.y,
+			"bottom_y": box.position.y,
+			"merged_count": merged_nodes.size(),
+			"merged": merged_nodes,
+			"excluded": excluded,
+			"node_transform": node_transform,
+		},
+	}
+
+
+## Where a GeometryInstance3D's geometry actually sits in the world.
+##
+## The 3D sibling of _screen_rect_of(), and deliberately the same shape: take the
+## node's own LOCAL extent and push it through the transform the renderer uses.
+## get_aabb() is local space; global_transform carries every ancestor's rotation,
+## scale and offset, and Transform3D * AABB yields the enclosing axis-aligned box
+## of the transformed result. A rotated mesh therefore yields its enclosing box,
+## which is the right answer for "does this overlap that" and an OVERESTIMATE for
+## "what is its footprint" -- see _cmd_aabb's node_transform.axis_aligned.
+func _world_aabb_of(item: GeometryInstance3D) -> AABB:
+	return item.global_transform * item.get_aabb()
+
+
+## Splits a subtree into the GeometryInstance3D nodes worth merging and everything
+## visual that was deliberately left out, with the reason. See _cmd_aabb for why
+## Light3D is the exclusion that matters; the rest are recorded so a caller can see
+## that the walk considered them rather than missed them.
+##
+## Children are walked even under an excluded node -- a MeshInstance3D parented to a
+## lamp's Light3D is still geometry.
+func _collect_geometry_instances(node: Node, geometry: Array, excluded: Array) -> void:
+	if node is Light3D:
+		excluded.append({
+			"path": str(node.get_path()),
+			"class": node.get_class(),
+			"reason": "Light3D: its AABB is the light's range volume, not geometry",
+		})
+	elif node is GeometryInstance3D:
+		var gi: GeometryInstance3D = node as GeometryInstance3D
+		var local: AABB = gi.get_aabb()
+		if local.size == Vector3.ZERO:
+			# A MeshInstance3D with no mesh, an unbuilt CSG shape, an empty
+			# MultiMesh. Merging its origin would drag the box to that point and
+			# read as a real measurement.
+			excluded.append({
+				"path": str(gi.get_path()),
+				"class": gi.get_class(),
+				"reason": "reports a zero-size AABB (no mesh/geometry assigned?)",
+			})
+		else:
+			geometry.append(gi)
+	elif node is VisualInstance3D:
+		excluded.append({
+			"path": str(node.get_path()),
+			"class": node.get_class(),
+			"reason": "VisualInstance3D that draws no geometry (not a GeometryInstance3D)",
+		})
+
+	for child: Node in node.get_children():
+		_collect_geometry_instances(child, geometry, excluded)
+
+
+## True when each basis column points down a single world axis, i.e. the node is
+## rotated by some multiple of 90 degrees (or not at all). When it is false, the
+## world AABB is an enclosing box and is LARGER than the object's real footprint --
+## which is exactly the thing a caller doing placement arithmetic must not miss.
+## Basis.x/y/z ARE the columns, and are the only spelling that works: Godot 4.7's
+## Basis exposes no get_column() (verified against the engine API index -- its
+## members are x, y, z plus the transforms), and reaching for it is a parse error
+## that no static gate here caught (H-045).
+func _basis_is_axis_aligned(node_basis: Basis) -> bool:
+	var columns: Array[Vector3] = [node_basis.x, node_basis.y, node_basis.z]
+	for axis: Vector3 in columns:
+		if axis.length() < 0.0001:
+			return false
+		axis = axis.normalized()
+		# Exactly one non-zero component means this column IS a world axis.
+		var significant: int = int(absf(axis.x) > 0.001) \
+			+ int(absf(axis.y) > 0.001) \
+			+ int(absf(axis.z) > 0.001)
+		if significant != 1:
+			return false
+	return true
 
 
 ## Resizes the game window so anchors and size_changed handlers can be exercised
@@ -3778,8 +3987,9 @@ func _cmd_find_nodes(args: Dictionary) -> Dictionary:
 
 	var hits: Array = []
 	var truncated: bool = false
+	var where_seen: Dictionary = {}
 	for node: Node in candidates:
-		if not _matches_where(node, where):
+		if not _matches_where(node, where, where_seen):
 			continue
 		if hits.size() >= limit:
 			truncated = true
@@ -3796,27 +4006,87 @@ func _cmd_find_nodes(args: Dictionary) -> Dictionary:
 			"properties": props,
 		})
 
+	# An empty result is the one answer that must never be silent: "no node has
+	# mouse_filter=0" and "nothing here has a property by that name" are opposite
+	# facts and used to print identically, which is how a UI got cleared of exactly
+	# the fault it had (moving-in:G-011). Same failure the test runner's
+	# `Selected: N of M` line exists to prevent.
+	var message: String = "%d node(s) matched" % hits.size()
+	if hits.is_empty() and not where.is_empty():
+		var parts: PackedStringArray = PackedStringArray()
+		for key: Variant in where:
+			var exposed: int = int(where_seen.get(str(key), 0))
+			if exposed == 0:
+				var reason: String = str(where_seen.get("reason_" + str(key), ""))
+				parts.append("no candidate exposes '%s'%s" % [
+					str(key), (" (%s)" % reason) if not reason.is_empty() else ""])
+			else:
+				parts.append("0 of %d matched on %s (%d of %d expose it)" % [
+					candidates.size(), str(key), exposed, candidates.size()])
+		message += " -- " + " ; ".join(parts)
+
 	return {
 		"success": true,
-		"message": "%d node(s) matched" % hits.size(),
-		"data": {"nodes": hits, "count": hits.size(), "truncated": truncated},
+		"message": message,
+		"data": {
+			"nodes": hits,
+			"count": hits.size(),
+			"truncated": truncated,
+			"candidates": candidates.size(),
+			"where_seen": where_seen,
+		},
 	}
 
 
 ## Every key in `where` must equal the node's value at that (possibly dotted)
 ## property path. A property the node does not have is a NON-match, never an
 ## error: the predicate is applied across a heterogeneous subtree by design.
-func _matches_where(node: Node, where: Dictionary) -> bool:
+## `seen` is an out-parameter tallying, per predicate key, how many candidates
+## actually EXPOSED that property, plus the resolver's reason when none did. It
+## exists because a `--where` that matches nothing and a `--where` whose property
+## name never resolved printed the identical empty result (moving-in:G-011): a
+## reporter read one as the other and concluded the numeric comparison was broken.
+## It is not -- the widening branch in _values_match has carried every numeric
+## predicate since 0.8.0, and removing it reproduces that report exactly. What was
+## actually missing is the denominator, and only this side can count it.
+##
+## Note the loop no longer returns early: a tally that stops at the first failing
+## key cannot say "89 of 89 expose it", which is the whole point.
+func _matches_where(node: Node, where: Dictionary, seen: Dictionary = {}) -> bool:
+	var matched: bool = true
 	for key: Variant in where:
 		var walk: Dictionary = _resolve_property_path(node, str(key))
 		if not walk["ok"]:
-			return false
-		if not _values_match(walk["value"], where[key]):
-			# Compare through the serialized form too, so a JSON string can match
-			# a StringName / enum-backed value without the caller knowing which.
-			if str(_serialize_variant(walk["value"])) != str(where[key]):
-				return false
-	return true
+			# _resolve_property_path already writes a precise reason ("position is a
+			# Vector3, not an object -- cannot read .x off it"). Keeping the first
+			# one turns an empty result into a self-diagnosing message instead of a
+			# second puzzle.
+			var reason_key: String = "reason_" + str(key)
+			if not seen.has(reason_key):
+				seen[reason_key] = walk.get("reason", "")
+			matched = false
+			continue
+		seen[str(key)] = int(seen.get(str(key), 0)) + 1
+		if _values_match(walk["value"], where[key]):
+			continue
+		# A JSON array is the only spelling the bus can carry for a Vector2/3/4,
+		# Color or Rect2, so coerce toward the property's own type before giving
+		# up -- `--where position=[12,1,0]` against a node standing exactly there
+		# returned nothing, because Vector3-vs-Array fails both _values_match and
+		# the string fallback below. _coerce_arg is the same converter set_state
+		# uses, so the two verbs now agree about what a value means.
+		if where[key] is Array:
+			var conversion: Dictionary = _coerce_arg(where[key], typeof(walk["value"]))
+			if conversion["ok"] and _values_match(walk["value"], conversion["value"]):
+				continue
+		# Compare through the serialized form too, so a JSON string can match
+		# a StringName / enum-backed value without the caller knowing which.
+		# This does NOT rescue numbers: str(7.0) is "7.0" and str(7) is "7", so an
+		# int/float pair never meets here. _values_match's widening branch is the
+		# only thing carrying numeric predicates -- do not add a second one.
+		if str(_serialize_variant(walk["value"])) != str(where[key]):
+			matched = false
+	return matched
 
 
 ## Emits `pressed` on the nearest BaseButton at or under a node path.

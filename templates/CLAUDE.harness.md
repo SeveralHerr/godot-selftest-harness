@@ -34,7 +34,18 @@ method names from source plus a cached engine API index — it opens no project 
 nothing to `.godot/`, so N agents can run it at once on one checkout. It is also the only
 Phase 1 gate that works in a **fresh worktree**: with no class cache, lint reports a
 thousand `Identifier "X" not declared` errors and still exits `0`, and the test runner
-prints `[PASS]` for tests whose first statement errored. Exit `0`/`1`/`2` as below. Flags:
+prints `[PASS]` for tests whose first statement errored.
+
+**A clean `name_check` is not a compile.** It resolves names; it does not type-check.
+`var kids := root.get_children()` where `root` is only typed `Node` is a hard parse error
+— `Cannot infer the type of "kids" variable because the value doesn't have a set type` —
+and `name_check` reports `errors: 0 | warnings: 0` on it, because every name in that line
+resolves. Only `import_check.py` and `lint_project.gd` see that class of error, and
+neither is safe to run in parallel. So if `name_check` was the only gate you were allowed
+to run, hand the work back saying that — not "verified". The tool prints this itself as a
+`NOT COVERED:` line on every clean run.
+
+Exit `0`/`1`/`2` as below. Flags:
 `--only PREFIX` (report just your files; the whole project is still scanned so cross-file
 names resolve), `--strict`, `--json`, `--baseline PATH` / `--baseline-write PATH`,
 `--no-strings`. If it prints `engine index: NONE` the engine-name half was **skipped, not
@@ -163,7 +174,8 @@ Launch first: `godot --path . --mute &` then `sleep 5 && python tools/devtools.p
 | `raycast --from X,Y --to X,Y [--mask N] [--areas]` | What a ray would hit, with collision-layer names resolved. A ray that **starts inside** a shape reports nothing |
 | `sample-pixels [--rect X,Y,W,H]` | Mean + dominant colour over a screen rect — "is it still on fire?" as numbers rather than a PNG to open |
 | `reachable-ui` | Every Control a finger/cursor could actually hit now; unreachable ones are listed `OFF-SCREEN` or `BLOCKED BY <path>`, not dropped. Diff it across `set-feature --touchscreen true\|false` to catch an affordance that exists on one device only — `validate-ui` reports 0 issues for that, correctly |
-| `node-bounds PATH` | Exact **screen-space** position/size (deterministic layout ground truth). Ancestor `CanvasLayer` transforms are applied, so a HUD on a scaled layer reports where it renders, not layer units |
+| `node-bounds PATH` | Exact **screen-space** position/size (deterministic layout ground truth). Ancestor `CanvasLayer` transforms are applied, so a HUD on a scaled layer reports where it renders, not layer units. `canvas_scale` comes back with it |
+| `aabb --node PATH` | The 3D counterpart: merged **world-space** AABB of a node's geometry — `min`/`max`/`size`/`center` plus `top_y` (rest something on this) and `bottom_y` (is it sunk into the floor). **Excludes `Light3D`** — an `OmniLight3D`'s AABB is a cube of twice its range and will silently inflate any measurement that includes it. Fails loudly on a node with no geometry rather than returning a zero box |
 | `canvas-scale --node PATH` | Accumulated canvas scale + effective texture filter — the crisp/blurry question as one read |
 | `set-resolution --size W,H` | Resize the window (honest read-back; headless may clamp) |
 | `ui-snapshot` / `ui-snapshot-diff` / `save-ui-baseline` | Structured UI state vs baseline |

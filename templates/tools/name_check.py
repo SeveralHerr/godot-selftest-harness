@@ -36,6 +36,18 @@ cannot decide it reports as advisory or not at all -- a static checker that gues
 worse than no checker, because a project that learns to ignore its output has lost the
 signal it was installed for.
 
+**A clean run means the names resolve. It does not mean the file compiles**
+(`moving-in:G-009`). The clearest example is inferred typing: `var x := node.get_thing()`
+is a hard parse error when `node` is only known as a `Node` -- `Cannot infer the type of
+"x" variable because the value doesn't have a set type` -- and every name in that line
+resolves, so this tool reports `errors: 0 | warnings: 0` on a file the engine refuses to
+load. Deciding it needs method resolution order and return types, i.e. opening the
+project, which is the one thing this tool exists not to do. It is deliberately left to
+`import_check.py` and `lint_project.gd`, and this matters most where it is least visible:
+this is the only gate safe to run concurrently, so it is the only gate a fan-out agent on
+a shared checkout gets, and two such agents have already shipped code that did not compile
+behind a clean name_check. Treat clean here as "cleared to integrate", never as "builds".
+
 Exit codes follow the harness convention (`lint_project.gd`, `run_tests.gd`,
 `import_check.py`):
     0  scanned clean (no errors; no warnings either, under --strict)
@@ -74,8 +86,8 @@ from bisect import bisect_right
 from datetime import datetime, timezone
 from pathlib import Path
 
-# harness-version: 0.17.0
-HARNESS_VERSION = "0.17.0"
+# harness-version: 0.18.0
+HARNESS_VERSION = "0.18.0"
 
 EXIT_OK = 0
 EXIT_FINDINGS = 1
@@ -1009,6 +1021,13 @@ def finding_key(f):
 
 REFRESH_HINT = "run `python tools/name_check.py --refresh-api` (opens no project)"
 
+# The scope of a clean verdict, in one sentence, printed where the verdict is
+# (moving-in:G-009). A checker that reports clean has to be honest about what
+# "clean" claims, or the next reader upgrades it to "compiles" for free.
+NOT_COVERED = ("a clean name_check resolves names, it does not compile the file. "
+               "Type-inference errors (`:=` on an untyped call) are invisible to it; "
+               "only lint / --import will catch them.")
+
 # Members every type answers to but that no member list carries. `new` is ClassDB's
 # static constructor, not a bound method, so it appears in no class's method list; the
 # rest are Object methods that a builtin Variant type still accepts.
@@ -1320,12 +1339,26 @@ def report(findings, index, project, counts, args, skipped, baseline_info,
           % (counts["error"], counts["warning"], counts["advisory"]))
     for note in skipped:
         print("SKIPPED: %s" % note)
+    if not counts["error"]:
+        # Said on exactly the run where it is dangerous. A clean verdict here is
+        # the only gate a parallel agent is allowed to run, and twice now that has
+        # been read as "it builds" (moving-in:G-009).
+        print("NOT COVERED: %s" % NOT_COVERED)
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Resolve every name a GDScript project mentions, without launching Godot.",
-        epilog="Exit codes: 0 clean, 1 findings that count, 2 could not run.")
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description="Resolve every name a GDScript project mentions, without launching Godot.\n"
+                    "\n"
+                    "NOT COVERED: a clean name_check resolves names, it does not compile the\n"
+                    "file. Type-inference errors (`:=` on an untyped call) are invisible to\n"
+                    "it; only lint / --import will catch them.",
+        epilog="Exit codes: 0 clean, 1 findings that count, 2 could not run.\n"
+               "\n"
+               "This is the only gate that never opens the project, so it is the only one\n"
+               "safe to run in parallel - and the only one a fan-out agent gets. Clean here\n"
+               "means cleared to integrate, not that it builds (moving-in:G-009).")
     parser.add_argument("--project", "-p", default=".", help="Path to the Godot project")
     parser.add_argument("--api", help="Path to an engine API index (.json.gz) to use")
     parser.add_argument("--refresh-api", action="store_true",
@@ -1493,6 +1526,9 @@ def main():
                         "vendored_skipped": project.vendored_dirs},
             "counts": counts,
             "skipped": skipped,
+            # A machine reader of an all-zero `counts` needs the same caveat the
+            # human report prints, or it draws the stronger conclusion silently.
+            "not_covered": NOT_COVERED,
             "baseline": args.baseline,
             "findings": findings,
             "exit": exit_code,

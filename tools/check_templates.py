@@ -202,8 +202,39 @@ def stage_reach():
         if (legacy.get("headless_tools") or []) != []:
             return fail("stage 1.5 reach: legacy-row simulation is not actually missing "
                         "the key - the backward-compat check proves nothing")
+        # moving-in:G-003: "cannot tell" must not look like "nothing to check".
+        # `tmp` is a plain directory with no .git, which is the real condition (a
+        # project can legitimately have no VCS). Planted from both sides, because a
+        # split that returned the unavailable shape for EVERY input would satisfy
+        # the first assertion alone.
+        unavailable = VL.split_reach(None, set(), set(), tmp, {})
+        if not unavailable.get("changed_unavailable"):
+            return fail("stage 1.5 reach: split_reach(None) did not set "
+                        "changed_unavailable - a checkout with no git repository "
+                        "still scores as a real 0/0")
+        if unavailable.get("reached") is not None:
+            return fail("stage 1.5 reach: split_reach(None) returned reached=%r, "
+                        "expected None. An empty list reads as a clean sweep."
+                        % (unavailable.get("reached"),))
+        if s.get("changed_unavailable"):
+            return fail("stage 1.5 reach: a REAL changed set was flagged "
+                        "changed_unavailable - the flag is stuck on and the "
+                        "unavailable assertion above proves nothing")
+        empty = VL.split_reach(set(), set(), set(), tmp, {})
+        if empty.get("changed_unavailable"):
+            return fail("stage 1.5 reach: a genuine empty changed set (git present, "
+                        "nothing changed) was reported as unavailable - the two "
+                        "zeros must stay distinguishable")
+        line_unavailable = VL._reach_line(VL._sub_reach(unavailable))
+        line_empty = VL._reach_line(VL._sub_reach(empty))
+        if line_unavailable == line_empty:
+            return fail("stage 1.5 reach: the no-VCS line and the real-zero line "
+                        "read identically (%r) - a reader cannot tell them apart"
+                        % (line_unavailable,))
+
         print("stage 1.5 reach: buckets correct (%d headless, %d test, %d deleted, "
-              "%d unreached), toolsy/ not excused, opt-out works, legacy rows parse"
+              "%d unreached), toolsy/ not excused, opt-out works, legacy rows parse, "
+              "no-VCS distinct from a real zero"
               % (len(s["headless_tools"]), len(s["test_scripts"]),
                  len(s["deleted"]), len(s["unreached"])))
         return True
@@ -315,6 +346,26 @@ def stage_assemble(scratch, user_dir_name):
         "\toutside.position = Vector2(3000, 40)",
         "\toutside.size = Vector2(300, 60)",
         "\thud_layer.add_child(outside)",
+        "\t# moving-in:G-002/G-006: a 3D prop for `aabb`, planted with the exact trap",
+        "\t# the verb exists to avoid. The box is 0.2 on a side; the OmniLight3D",
+        "\t# beside it has range 5.0, so ITS aabb is a 10-unit cube. A walk that",
+        "\t# includes Light3D -- and a naive one does, because Light3D IS a",
+        "\t# VisualInstance3D -- measures this prop at 10 units instead of 0.2.",
+        "\t# Asserting only that the box is found would pass against a verb that",
+        "\t# merges everything, so the light is the planted defect (H-035).",
+        "\tvar prop := Node3D.new()",
+        '\tprop.name = "Prop3D"',
+        "\tadd_child(prop)",
+        "\tvar box := MeshInstance3D.new()",
+        '\tbox.name = "PropBox"',
+        "\tvar box_mesh := BoxMesh.new()",
+        "\tbox_mesh.size = Vector3(0.2, 0.2, 0.2)",
+        "\tbox.mesh = box_mesh",
+        "\tprop.add_child(box)",
+        "\tvar lamp := OmniLight3D.new()",
+        '\tlamp.name = "PropLamp"',
+        "\tlamp.omni_range = 5.0",
+        "\tprop.add_child(lamp)",
         "",
         "",
         "## Lets check_paused_bridge() pause the tree over the bus, so the",
@@ -961,7 +1012,19 @@ def contract_rows():
         ("raycast", {"from": [0, 0]}, False, "missing `to`: envelope only"),
         ("get_node_bounds", {"node_path": "/root/Main/Blip"}, True,
          "gather:G-120: a screen rect for a Sprite2D, not just a Control",
-         ["global_rect", "size_source"]),
+         ["global_rect", "size_source", "canvas_scale"]),
+        ("aabb", {"node_path": "/root/Main/Prop3D"}, True,
+         "moving-in:G-002/G-006: merged world-space AABB. merged_count==1 is the "
+         "assertion that matters -- the prop carries an OmniLight3D whose own AABB "
+         "is a 10-unit cube, so a walk that fails to exclude Light3D reports 2 here "
+         "and a box 50x too large",
+         ["min", "max", "size", "center", "top_y", "bottom_y",
+          "merged_count", "merged", "excluded", "node_transform"],
+         {"merged_count": 1}),
+        ("aabb", {"node_path": "/root/Main"}, False,
+         "a Node2D has no 3D geometry: must fail loudly, never report a zero box "
+         "(a zero AABB at the origin is indistinguishable from a real measurement "
+         "of a small object at the origin)"),
         ("get_state", {"node_path": "/root/Main/Blip",
                        "properties": ["texture.resource_local_to_scene"]}, True,
          "gather:G-110/G-117: --property walks one hop into a Resource"),
@@ -1154,6 +1217,108 @@ def check_canvas_layer_space(client, scratch):
     print("stage 5 bridge: canvas-layer space OK (scaled HUD: inside 720..900 clean, "
           "outside 1800 still flagged, viewport %sx%s not 64x64)"
           % (int(vp["w"]), int(vp["h"])))
+    return True
+
+
+def check_find_nodes_denominator(client, scratch):
+    """An empty `--where` must say WHY it is empty (moving-in:G-011).
+
+    That gap was reported as "--where compares only by string equality, so
+    mouse_filter=0 matches nothing". It does not reproduce: the widening branch in
+    _values_match has carried numeric predicates since 0.8.0, and deleting it
+    reproduces the report exactly. What is real is that the two opposite empty
+    results printed identically -- "no node has this value" and "nothing here has a
+    property by that name" -- so a reader took one for the other and cleared a UI of
+    exactly the fault it had.
+
+    So this plants BOTH empty kinds and asserts they read differently, plus the
+    positive control the report claimed was broken. Asserting only that a good query
+    matches would pass against a verb that says nothing on failure, which is the
+    thing being fixed.
+    """
+    numeric = client.send_command(
+        scratch, "find_nodes",
+        {"class": "Button", "where": {"mouse_filter": 0}}, timeout=15.0)
+    if not numeric.get("success"):
+        return fail("find_nodes numeric --where: %s" % numeric.get("message"))
+    if int(((numeric.get("data") or {}).get("count") or 0)) < 1:
+        return fail(
+            "find_nodes --where mouse_filter=0 matched nothing. Godot's JSON parser "
+            "makes every number a float, so this predicate arrives as float(0.0) "
+            "against an int(0) property -- _values_match's _is_number widening "
+            "branch is the only thing that carries it, and it is gone or broken.")
+
+    no_match = client.send_command(
+        scratch, "find_nodes",
+        {"class": "Button", "where": {"mouse_filter": 99}}, timeout=15.0)
+    msg_no_match = no_match.get("message") or ""
+    if "0 of" not in msg_no_match or "expose it" not in msg_no_match:
+        return fail(
+            "find_nodes with a value nothing matches said %r. It must name the "
+            "denominator ('0 of N matched on mouse_filter'), or a predicate that "
+            "silently matches nothing looks identical to a genuine absence."
+            % (msg_no_match,))
+
+    bad_name = client.send_command(
+        scratch, "find_nodes",
+        {"class": "Button", "where": {"harness_no_such_property": 1}}, timeout=15.0)
+    msg_bad_name = bad_name.get("message") or ""
+    if "no candidate exposes" not in msg_bad_name:
+        return fail(
+            "find_nodes with an unresolvable property name said %r. It must say the "
+            "name never resolved -- that is the case that catches a typo, a stray "
+            "space and a wrong case, which is what the original reporter actually hit."
+            % (msg_bad_name,))
+    if msg_no_match == msg_bad_name:
+        return fail(
+            "find_nodes: 'no node has this value' and 'no such property' produced the "
+            "identical message (%r). Telling them apart is the entire fix."
+            % (msg_no_match,))
+    print("stage 5 bridge: find_nodes --where int predicate matched %d (the numeric "
+          "widening works), and the two empty results read differently"
+          % (int((numeric.get("data") or {}).get("count") or 0),))
+    return True
+
+
+def check_aabb_excludes_lights(client, scratch):
+    """`aabb` must measure geometry, not light range (moving-in:G-002/G-006).
+
+    stage_assemble plants Prop3D holding a 0.2-unit BoxMesh and an OmniLight3D with
+    range 5.0. Light3D IS a VisualInstance3D, so the obvious subtree walk includes
+    it, and an OmniLight3D's AABB is a cube of TWICE its range -- 10 units against a
+    0.2-unit box. That is not a rounding error, it is a 50x measurement, and it is
+    the bug that made a real project's first furniture audit unreadable: a ceiling
+    lamp reported as 7.2 x 7.2 units dragged every top_of()/center_of() computed
+    from it.
+
+    Asserting only "the box was found" would pass against a verb that merges
+    everything, so this asserts the SIZE (H-035: plant the defect you detect). The
+    contract row asserts merged_count == 1 for the same reason from the other side.
+    """
+    reply = client.send_command(
+        scratch, "aabb", {"node_path": "/root/Main/Prop3D"}, timeout=15.0)
+    if not reply.get("success"):
+        return fail("aabb on the planted 3D prop: %s" % reply.get("message"))
+    data = reply.get("data") or {}
+    size = data.get("size") or {}
+    for axis in ("x", "y", "z"):
+        got = size.get(axis)
+        if not isinstance(got, (int, float)):
+            return fail("aabb data.size.%s is %r, not a number" % (axis, got))
+        if abs(got - 0.2) > 0.01:
+            return fail(
+                "aabb measured the prop at %s=%.3f, expected 0.2. A value near 10 "
+                "means the OmniLight3D (range 5.0) was merged as geometry -- "
+                "Light3D must be excluded." % (axis, got))
+    excluded = data.get("excluded") or []
+    if not any("Light" in (e.get("class") or "") for e in excluded):
+        return fail(
+            "aabb did not report the OmniLight3D in data.excluded (%r). The "
+            "exclusion has to be visible, or a suspiciously small merged_count is "
+            "mysterious instead of traceable." % (excluded,))
+    print("stage 5 bridge: aabb measured the prop at %.3f (the box), not ~10 (the "
+          "OmniLight3D's range volume); %d node(s) excluded by name"
+          % (size.get("x"), len(excluded)))
     return True
 
 
@@ -1451,6 +1616,8 @@ def stage_bridge(godot, scratch, full):
         # Ahead of check_ui_baseline: this one asserts which findings exist, and
         # reads cleaner before a baseline has been written over them.
         ok = check_canvas_layer_space(client, scratch) and ok
+        ok = check_aabb_excludes_lights(client, scratch) and ok
+        ok = check_find_nodes_denominator(client, scratch) and ok
         ok = check_set_state_dotted(client, scratch) and ok
         ok = check_ui_baseline(client, scratch) and ok
         ok = check_paused_bridge(client, scratch) and ok

@@ -161,8 +161,28 @@ so a CRLF checkout is not mistaken for an edit.
 Report every `.bak` it does create: those are real local edits about to be replaced,
 and they usually belong in `devtools_ext/commands.gd` or upstream in the plugin.
 
+**`.uid` sidecars are minted here, and only this summary will mention them**
+(`moving-in:G-004`). Every `.gd` the installer writes gets a `<file>.gd.uid` beside it
+if it has none — a real `uid://…`, minted offline with the same ResourceUID encoding
+`devtools.py new-uid` uses. This used to be skipped on the grounds that ids are engine
+assigned, which left `tools/capture.gd` landing on a 0.16.0 refresh with no sidecar next
+to three siblings that had one; it reads as drift on the next refresh and the project's
+own lint cannot report it, because `uid_check_ignore` defaults to `res://addons/` and
+`res://tools/` — precisely where scaffold writes. Lint prints `UIDs: OK` either way. Do
+not "fix" that by widening `uid_check_ignore`: the same list gates the class-cache,
+compile, shader and string-ref passes, and opening it drags all four across the addon.
+
+An **existing** `.uid` is never rewritten and never backed up. A uid is an identity —
+regenerating one per refresh would break every scene and `preload` pointing at the
+script — so this is a no-op on the second run, and the sidecars are deliberately absent
+from `.harness_manifest.json` (a recorded hash would make a later refresh treat the
+project's own id as a stale harness file and overwrite it). Projects declaring Godot
+older than 4.4 get none, and the installer says so.
+
 Without Python: `cp` each file, backing up on any difference (the old behavior), and
-say in the summary that pristine-file detection was skipped.
+say in the summary that pristine-file detection **and** `.uid` minting were skipped.
+Mint them afterwards with `python tools/devtools.py new-uid --write <file>.gd` — it
+refuses to overwrite an existing one, so it is safe to run over the whole set.
 
 ## Step 5 — Create the registry extension (never overwrite)
 
@@ -601,6 +621,12 @@ Summarize what that shows, in plain terms:
 - any `.bak` files created — **name them individually**. Each is a local edit about to
   be replaced, and it belongs either in `devtools_ext/commands.gd` or upstream in the
   plugin. Nothing else in this command produces a `.bak`, so if there are none, say so;
+- any `.uid` sidecars minted (step 4), **named individually with their ids**, and the
+  fact that they need committing alongside the `.gd`. This is the only place they get
+  reported: `uid_check_ignore` covers `res://addons/` and `res://tools/`, so the
+  project's own lint prints `UIDs: OK` whether or not they exist (`moving-in:G-004`).
+  Say "none needed — every installed .gd already had one" when nothing was minted, so
+  an unreported mint and a silent installer do not look alike;
 - which `devtools_config.json` keys were updated versus kept as project-owned (step 7);
 - whether `project.godot`, `CLAUDE.md` or `.claude/settings.json` were touched.
 
@@ -703,6 +729,7 @@ sequence → performance → quit).
   while still exiting 0), and `name_check.py` (resolves every name the scripts
   mention against the project's own declarations and a cached engine API index —
   the one gate that never opens the project, so N agents can run it at once).
+  Each installed `.gd` also gets a `.uid` sidecar if it arrived without one.
 - `res://devtools_ext/commands.gd` — your project's command registry extension
   (plus `commands.example.gd` for reference).
 - `res://test/unit/` and `res://test/sequences/` — a seed unit test and a smoke

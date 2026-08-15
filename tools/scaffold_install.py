@@ -12,6 +12,11 @@ those steps used to guess, and both guessed wrong in the same direction:
   file on disk is something the *project* wrote.
 * **Config.** Step 7 merged by "is this value the default?", which cannot tell a
   key the project deliberately set back to the default from one nobody touched.
+* **UIDs.** Step 4 installed `.gd` files with no `.uid` sidecar beside them, and
+  lint could not say so: `uid_check_ignore` defaults to exactly the two paths
+  scaffold writes into (`moving-in:G-004`). `files` mode now mints a sidecar for
+  any `.gd` that lacks one, never rewrites an existing one, and names every id it
+  minted so the summary can carry what lint will not.
 
 Both are answered by recording what scaffold last wrote:
 
@@ -36,9 +41,12 @@ project's entries; a marker-less (pre-0.8.0) log is left alone.
 
 import argparse
 import hashlib
+import importlib.util
 import json
+import re
 import shutil
 import sys
+import uuid
 from pathlib import Path
 
 MANIFEST_REL = "addons/godot_selftest/.harness_manifest.json"
@@ -84,6 +92,113 @@ def known_hashes(plugin_root, rel):
     return out
 
 
+def _uid_encoder(plugin_root):
+    """Godot's ResourceUID text encoding, taken from the shipped client.
+
+    Imported rather than reimplemented. `templates/tools/devtools.py` already holds
+    that encoding, verified against `ResourceUID.id_to_text()` on a real engine, and
+    a second copy of it here is exactly the two-halves-drift this repo keeps getting
+    bitten by - a wrong id would be silent until an import much later. devtools.py
+    guards its entry point, so importing it runs no CLI.
+    """
+    path = plugin_root / "templates" / "tools" / "devtools.py"
+    spec = importlib.util.spec_from_file_location("_harness_devtools_uid", path)
+    if spec is None or spec.loader is None:
+        raise ImportError("no loadable spec for %s" % path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.uid_to_text
+
+
+_FEATURES_RE = re.compile(r"config/features\s*=\s*PackedStringArray\(([^)]*)\)")
+_XY_RE = re.compile(r'"(\d+)\.(\d+)')
+
+
+def project_engine_xy(project):
+    """(major, minor) from project.godot's config/features, or None if unreadable."""
+    try:
+        text = (project / "project.godot").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    features = _FEATURES_RE.search(text)
+    if not features:
+        return None
+    xy = _XY_RE.search(features.group(1))
+    return (int(xy.group(1)), int(xy.group(2))) if xy else None
+
+
+def ensure_uid_sidecars(plugin_root, project, gd_paths):
+    """Give every installed `.gd` a `.uid` sidecar, minting one where there is none.
+
+    `moving-in:G-004`. Scaffold installed `.gd` files with no sidecar and nothing
+    caught it: `uid_check_ignore` defaults to `res://addons/` and `res://tools/`,
+    which is precisely where scaffold writes, so lint printed `UIDs: OK` straight
+    over the hole and the missing file read as drift on the next refresh. The
+    comment that set that default said the scaffolder "cannot generate a valid .uid
+    (the ids are engine assigned)" - true when it was written, no longer true since
+    `devtools.py new-uid` reimplemented ResourceUID's encoding and started minting
+    ids with no engine at all. So mint them here rather than widening lint's ignore
+    list, which is shared by the class-cache, compile, shader and string-ref passes
+    and would drag all four across the addon on install day.
+
+    **An existing sidecar is never rewritten.** A uid is an identity; regenerating
+    one per refresh would break every scene and `preload` that references the
+    script - a far worse bug than the missing file. That is also what makes this
+    idempotent: on the second run every sidecar already exists and nothing is
+    written.
+
+    Returns [(project-relative path, uid)] for the ones actually created, so the
+    caller can name them in a summary the project's own lint will never print.
+    """
+    wanted = [p for p in gd_paths if not Path(str(p) + ".uid").exists()]
+    if not wanted:
+        return []
+
+    # .uid sidecars arrived in Godot 4.4; older projects have no importer for them
+    # and would just collect six unreferenced files. Only skip on a version we can
+    # actually read - an unparseable project.godot means assume current, not skip.
+    xy = project_engine_xy(project)
+    if xy is not None and xy < (4, 4):
+        print("  = .uid sidecars skipped: project declares Godot %d.%d (uids arrive in 4.4)"
+              % xy)
+        return []
+
+    try:
+        uid_to_text = _uid_encoder(plugin_root)
+    except Exception as exc:  # noqa: BLE001 - report it, never install silently short
+        print("  ! could not load the uid encoder from templates/tools/devtools.py (%s);"
+              % exc)
+        print("    installed .gd files have no .uid sidecar. Mint them with:")
+        print("      python tools/devtools.py new-uid --write <file>.gd")
+        return []
+
+    existing = set()
+    for sidecar in project.rglob("*.uid"):
+        try:
+            existing.add(sidecar.read_text(encoding="utf-8").strip())
+        except OSError:
+            continue
+
+    made = []
+    for target in wanted:
+        for _attempt in range(1000):
+            # 63-bit, matching ResourceUID::create_id()'s 0x7FFF... mask.
+            text = uid_to_text(uuid.uuid4().int & 0x7FFFFFFFFFFFFFFF)
+            if text not in existing:
+                break
+        else:
+            print("  ! could not mint an unused uid for %s in 1000 attempts - skipped"
+                  % target.name)
+            continue
+        existing.add(text)
+        sidecar = Path(str(target) + ".uid")
+        sidecar.write_text(text, encoding="utf-8")
+        rel = target.relative_to(project).as_posix()
+        made.append((rel + ".uid", text))
+        print("  + %s.uid minted %s (no sidecar shipped with it)" % (rel, text))
+    return made
+
+
 def install_files(plugin_root, project, rels):
     version = plugin_version(plugin_root)
     manifest_path = project / MANIFEST_REL
@@ -91,6 +206,7 @@ def install_files(plugin_root, project, rels):
     recorded = manifest.get("files", {})
 
     backed_up = []
+    installed_gd = []
     for rel in rels:
         src = plugin_root / "templates" / rel
         dst = project / rel
@@ -124,6 +240,13 @@ def install_files(plugin_root, project, rels):
                           % (rel, rel))
 
         recorded[rel] = {"version": version, "sha256": sha256(dst)}
+        if dst.suffix == ".gd":
+            installed_gd.append(dst)
+
+    # Deliberately NOT recorded in the manifest: a .uid holds a value this project
+    # owns, not one the harness shipped, and a recorded hash would let a later
+    # refresh judge it "pristine" and overwrite the identity (moving-in:G-004).
+    minted = ensure_uid_sidecars(plugin_root, project, installed_gd)
 
     manifest["harness_version"] = version
     manifest["files"] = recorded
@@ -136,6 +259,15 @@ def install_files(plugin_root, project, rels):
               % (len(backed_up), ", ".join(backed_up)))
         print("  Diff each .bak against the new file, port anything worth keeping into")
         print("  devtools_ext/commands.gd (or upstream it), then delete the .bak.")
+    if minted:
+        # Say this out loud. The project's own lint cannot: uid_check_ignore covers
+        # res://addons/ and res://tools/, so it reports `UIDs: OK` whether or not
+        # these exist. Silence here is what made moving-in:G-004 cost a session.
+        print("\n  %d .uid sidecar(s) minted (lint's uid_check_ignore covers these paths,"
+              % len(minted))
+        print("  so it would have reported UIDs: OK either way). Commit them:")
+        for rel, text in minted:
+            print("    %s  %s" % (rel, text))
     return 0
 
 
