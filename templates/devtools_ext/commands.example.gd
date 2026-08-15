@@ -25,10 +25,10 @@ extends RefCounted
 ##   var actors: Array = tree.get_nodes_in_group("actor") # nodes by group
 ##   var mgr: Node = _dev.get_node_or_null("/root/GameManager")  # an autoload
 ##
-## Verb naming: the file bus uses underscores ("spawn_entity"); the Python client
-## addresses the same verb with hyphens ("cmd spawn-entity"). The core normalizes
-## hyphens to underscores when dispatching sequence "command" steps, so register
-## with underscores.
+## Verb naming: register with underscores ("spawn_entity"). The Python client and
+## every generic verb spell them with hyphens ("cmd spawn-entity"), and the core
+## normalizes hyphens to underscores on every dispatch path -- the bus, and
+## sequence "command" steps -- so either spelling reaches the same handler.
 
 var _dev: Node
 

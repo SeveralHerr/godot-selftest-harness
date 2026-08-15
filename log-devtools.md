@@ -3179,3 +3179,94 @@ precheck reverted → `GameNotRunningError while the game was alive and busy`.
 `--check` — OK at `0.16.0`, 12 shipped files, 46 bus verbs + 48 CLI commands documented.
 
 No new gaps this turn beyond the two closed above.
+
+## 2026-08-14 — gh#1 and gh#2: four reported defects, three real (0.17.0)
+
+Two GitHub issues arrived from `moving-in` via `skill-feedback-issue`, carrying four
+claims and four proposed diffs. Working the [H-033] rule — reproduce the mechanism
+before implementing the `Improvement:` line — three reproduced and one did not, and the
+one that did not came with the most confident patch of the four.
+
+- **A scaled `CanvasLayer` made every right-anchored Control read as off-screen.**
+  `Control.get_global_rect()` stops at the `CanvasLayer`; `get_tree().root.size` is
+  window pixels. Nothing applied the transform between them, so a HUD on a layer with
+  `scale = 0.6` reported rects in layer units against a viewport in pixels. The
+  reporter found it in `validate-ui` and `reachable-ui`; it was in **five** places
+  (`validate_ui`, `get_ui_snapshot`, `get_node_bounds`, the `ui-snapshot-diff` flat
+  snapshot, `reachable_ui`). `get_node_bounds` was the tell — its docstring promises
+  "the same transform the renderer uses, so it accounts for the camera, every
+  ancestor's scale, and the `CanvasLayer`", and then took a `Control` branch that used
+  none of it. Both halves are now `_screen_rect_of()` / `_screen_reference_rect()`.
+  - [gh#2] status: fixed | fixed-in: 0.17.0 | seen: 1 | harness: 0.16.0
+  - **Measured on the real project, because the scratch one cannot measure this**
+    ([H-030]): `moving-in` went from **53 findings (51 `ui_overflow`) to 2**, and the
+    2 survivors are `ui_zero_size`, which are real and unrelated. 51 of 51 overflow
+    findings were false. Run on a copy; its working tree and branch were not touched.
+
+- **The same probe found a second viewport bug nobody reported.** Headless has no
+  window, so `root.size` is **64x64** — against which every Control wider than 64px
+  "extends past viewport". `check_templates.py` drives the bridge headless, which is
+  exactly why its UI stages never caught any of this: the planted findings were
+  trivially true and the check was measuring nothing. The UI verbs now fall back to
+  the project's designed `display/window/size/viewport_*`, and the new stage asserts
+  the reported viewport is `1152x648` and not `64x64` — without that assertion every
+  other assertion in the stage is vacuous.
+  - [H-042] status: fixed | fixed-in: 0.17.0 | seen: 1 | harness: 0.16.0
+
+- **`set-state` could not write a dotted path that `get-state` reads fine.** Neither
+  `Object.set` nor `Object.get` walks dots, so `environment.ambient_light_energy` wrote
+  nothing and then reported "unknown property" — about a name that was correct, which
+  is the part that cost the reporter the most time. `_resolve_property_path()` was
+  already there and already used by `get_state`. The write now resolves through it and
+  the failure names the object it landed on (`Theme has no property 'x'`), not the
+  node. A component of a built-in struct (`size.x`) is refused naming the call that
+  works, rather than silently doing nothing.
+  - [gh#1.1] status: fixed | fixed-in: 0.17.0 | seen: 1 | harness: 0.16.0
+
+- **The bus rejected the hyphen spelling its own scaffolding documents.** `commands.gd`'s
+  header said verbs are addressed "via the Python client with hyphens", every generic
+  verb is hyphenated, and the sequence-step dispatcher already did
+  `cmd_name.replace("-", "_")` — but `_check_for_commands` matched verbatim, so
+  `cmd light-get` failed while the identical step inside a sequence worked. One
+  fallback. An action matching nothing now suggests the nearest registered verb, since
+  a bare `Unknown action` cannot tell a typo from a verb that was never registered and
+  those want opposite next steps.
+  - [gh#1.3] status: fixed | fixed-in: 0.17.0 | seen: 1 | harness: 0.16.0
+
+- **The one that did not reproduce: `set-state --property position` on a
+  `CharacterBody3D` "consumes the whole timeout and writes nothing".** The report was
+  honest that the cause was not isolated, and proposed deferring the write to
+  `call_deferred` on a physics-re-entrancy theory. A scratch probe — a `CharacterBody3D`
+  running `move_and_slide()` every physics frame — answered in **0.1s, `success=True`,
+  reading back exactly `1.5,0,-5.5`**. `_cmd_set_state` is synchronous and contains
+  nothing that can block, so `call_deferred` would have moved an abort one frame later
+  while breaking the read-back guarantee that is the verb's entire point: a pass that
+  fixed nothing, which is the [H-033] failure mode precisely.
+
+  What is real, and separate: a GDScript runtime error raised by *project* code
+  reacting to a verb (a setter, a signal, an `Area` `body_entered`) kills the handler
+  before it can reply, and there is no exception to catch. The game survives, so every
+  later verb answers and the verb looks selectively broken — which matches the report
+  exactly. `DISPATCH_WATCHDOG_MSEC` is 300000 against a 30s client default, and the
+  watchdog only wrote to the **log**, so the explanation landed 4.5 minutes after the
+  caller gave up. It now writes a failure **result** carrying the wedged request's id,
+  and the client's timeout message names the mechanism and points at `[SCRIPT ERROR]`
+  on stderr.
+  - [H-043] status: open | seen: 1 | harness: 0.17.0
+  - Still open because the watchdog cannot fire inside a normal client timeout without
+    force-releasing legitimate long verbs (`step_time`, a sequence with waits) that
+    hold the guard on purpose. A per-verb expected duration would let the guard be
+    tight for `set_state` and loose for `step_time`; nothing carries that today.
+
+**Validation run this turn:** `python tools/check_templates.py --full` — **OK**,
+72/72 contract rows, with two new stage 5 lines: `canvas-layer space OK (scaled HUD:
+inside 720..900 clean, outside 1800 still flagged, viewport 1152x648 not 64x64)` and
+`set_state dotted write OK (theme.default_font_size -> 21; bad leaf, struct component
+and absent verb all still refused; 'scene-tree' accepted)`. Both plant the defect they
+detect ([H-035]) — the fixture carries a Control that is genuinely off screen and three
+writes that must still be refused, so a check that reports nothing fails rather than
+passes. Confirmed to fail first: the contract table's `reachable_ui` row caught the
+fixture change on its own (`count is 4, expected 2`), and an early fixture typo failed
+stages 3, 4 and 5 in a row. Real-project false-positive count reported above.
+`python -m unittest discover -s tools` — 17 tests OK. `record_version.py --record` then
+`--check` — OK at `0.17.0`, 12 shipped files, 46 bus verbs + 48 CLI commands documented.

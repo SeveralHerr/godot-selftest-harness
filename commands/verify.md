@@ -348,6 +348,15 @@ each finding** and saying in the summary which ones you are accepting and why. A
 baseline written without that read is indistinguishable from deleting the check.
 `--no-baseline` re-reports everything for a one-off audit.
 
+**Upgrading to 0.17.0 with an existing baseline: re-audit it.** Before 0.17.0 the
+overflow and off-screen checks measured Controls in `CanvasLayer` space against a
+viewport measured in pixels, so any project with a scaled UI layer accumulated
+false `ui_overflow` findings — on one real project, 51 of 51 were false, and it
+had baselined 53 of them to get a usable gate. Those entries no longer match
+anything and are harmless, but they are also hiding how few real findings there
+were. Run `validate-ui --no-baseline`, read what is left, and re-write the
+baseline from that instead of carrying the old one forward.
+
 **Capture a scene-tree snapshot before moving on.** Phase 5 uses it to compute which changed files this run actually reached; it costs one command and cannot be reconstructed after the game exits.
 
 ```bash
@@ -411,7 +420,7 @@ This prints all currently registered action strings. Any verb beyond the generic
 | `step-time --seconds N` | Advance ~N game-seconds with `time_scale` pinned to 1.0 — for sampling a tween at a chosen moment instead of guessing with `set-game-speed` + sleeps. Physics time is exact; process-driven tweens (the `Tween` default) land within ~1 frame, so compare the returned `process_seconds` rather than assuming |
 | `touch <press\|release\|drag\|clear\|list> --index N --pos X,Y` | Real `InputEventScreenTouch`/`Drag` — the only way to exercise multi-touch |
 | `set-feature --touchscreen true` | Make touch UI visible on desktop (it hides itself when no touchscreen is reported). Set it **before** the scene loads: a Control that read availability in its own `_ready()` won't re-evaluate |
-| `set-state --node PATH --property NAME --value V` | Set a raw property (see pitfall about signals below) |
+| `set-state --node PATH --property NAME --value V` | Set a raw property (see pitfall about signals below). Dotted paths write through the same walk `get-state` reads through, so a knob one level in (`environment.ambient_light_energy`, `mesh.material.albedo_color`) is reachable — that mutates the **Resource**, so a shared material changes for every node using it. A component of a built-in struct (`size.x`) is refused, naming the call that works |
 | `run-method --node PATH --method NAME --args "[...]"` | Call any method on a node — **preferred** for anything that should emit a signal / run side effects |
 | `curve --node PATH --method NAME --from N --to M` | Sweep a pure method over an integer range and get the whole series back (`points`, plus `min`/`max`/`sum`) — a difficulty or cost ramp asserted as data instead of hand-evaluated in prose arithmetic, which is where the slips happen. `--step`, `--args` for the method's other parameters, `--arg-index` for which one the sweep fills. Capped at 500 points; the bus serves one command at a time and a typo'd range would wedge it |
 | `input tap ACTION --hold N` / `input press` / `input release` | Simulate input actions defined in the project |
@@ -420,7 +429,7 @@ This prints all currently registered action strings. Any verb beyond the generic
 | `sample-pixels --rect X,Y,W,H` | Mean / dominant / brightest / darkest colour over a screen rect, so a colour regression is assertable rather than eyeballed. Same capture path as `screenshot`, summarised instead of saved; `dominant_share` says how much of the rect that colour owns |
 | `set-game-speed N` | Speed up time-dependent behavior (timers, tweens, physics) |
 | `wait-frames N` | Advance N physics frames deterministically |
-| `node-bounds PATH` | Exact position/size of a node (ground truth for layout/movement) |
+| `node-bounds PATH` | Exact **screen-space** position/size of a node (ground truth for layout/movement). Ancestor `CanvasLayer` transforms are applied, so a HUD built on a scaled layer reports where it actually renders |
 | `scene-tree --depth N` | The live hierarchy as JSON. Every node carries `script` (its `res://` script path, `""` if none) and `scene_file` (set on instanced scene roots) — which is how Phase 5 computes reach, and also the fastest way to map a changed `.gd` to the node path that runs it |
 | `ui-snapshot` / `ui-snapshot-diff` | Structured UI state; diff against a saved baseline |
 | `clear-nodes --group N` / `--class C` / `--method M` | Free matching nodes. Prefer `--via-method NAME` (with `--via-args JSON`), which calls the game's own removal path on each match: bare `queue_free()` skips death handling entirely, so a cleared enemy drops nothing, pays no xp, and the teardown you thought you tested never ran |

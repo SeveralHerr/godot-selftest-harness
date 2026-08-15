@@ -287,6 +287,34 @@ def stage_assemble(scratch, user_dir_name):
         '\ttiny.name = "Tiny"',
         "\ttiny.size = Vector2(8, 8)",
         "\tadd_child(tiny)",
+        "\t# A Theme on the button, so check_set_state_dotted() has a real Resource",
+        "\t# sub-property to write through (gh#1).",
+        "\tvar theme := Theme.new()",
+        "\ttheme.default_font_size = 16",
+        "\tbutton.theme = theme",
+        "\t# gh#2: a HUD on a CanvasLayer with scale 0.6, which is an ordinary way",
+        "\t# to build a resolution-independent UI. 'Inside' sits at x=1200 in LAYER",
+        "\t# units -- 720 on a 1152-wide screen, comfortably on it. 'Outside' sits",
+        "\t# at x=3000 -- 1800 on screen, genuinely past the right edge. Measured",
+        "\t# with get_global_rect() BOTH read as overflowing; measured through the",
+        "\t# canvas transform only the second does, and having the second is what",
+        "\t# stops a check that reports nothing from looking correct.",
+        "\tvar hud_layer := CanvasLayer.new()",
+        '\thud_layer.name = "ScaledHud"',
+        "\thud_layer.scale = Vector2(0.6, 0.6)",
+        "\tadd_child(hud_layer)",
+        "\tvar inside := Button.new()",
+        '\tinside.name = "ScaledInside"',
+        '\tinside.text = "Inside"',
+        "\tinside.position = Vector2(1200, 40)",
+        "\tinside.size = Vector2(300, 60)",
+        "\thud_layer.add_child(inside)",
+        "\tvar outside := Button.new()",
+        '\toutside.name = "ScaledOutside"',
+        '\toutside.text = "Outside"',
+        "\toutside.position = Vector2(3000, 40)",
+        "\toutside.size = Vector2(300, 60)",
+        "\thud_layer.add_child(outside)",
         "",
         "",
         "## Lets check_paused_bridge() pause the tree over the bus, so the",
@@ -378,6 +406,15 @@ def stage_assemble(scratch, user_dir_name):
             'config/features=PackedStringArray("4.3")',
             "config/use_custom_user_dir=true",
             'config/custom_user_dir_name="%s"' % user_dir_name,
+            "",
+            "[display]",
+            "",
+            # Stated rather than left to default, because check_canvas_layer_space()
+            # asserts these exact numbers. Headless has no window, so the UI verbs
+            # fall back to this designed size -- without the fallback the root
+            # viewport is 64x64 and every Control wider than 64px "overflows".
+            "window/size/viewport_width=1152",
+            "window/size/viewport_height=648",
             "",
             "[autoload]",
             "",
@@ -941,9 +978,13 @@ def contract_rows():
         ("scene_tree", {"root": "/root/Main/Go", "depth": 2, "properties": ["text"]}, True,
          "gather:G-119/G-109: a subtree, with a property reported per node"),
         ("reachable_ui", {}, True,
-         "gather:G-129: the fixture's two Buttons ('Go' and the planted 8x8 'Tiny') "
-         "must both be found and reachable",
-         ["controls", "count", "reachable", "viewport"], {"count": 2, "reachable": 2}),
+         "gather:G-129: the fixture's four Buttons ('Go', the planted 8x8 'Tiny', "
+         "and the scaled-HUD pair) must all be found; three are reachable and "
+         "'ScaledOutside' is not, because it renders at x=1800 of 1152. That the "
+         "reachable count is 3 and not 4 is the gh#2 assertion in this table: a "
+         "count of 4 means the off-screen test stopped firing, and 2 means the "
+         "CanvasLayer scale is being ignored again",
+         ["controls", "count", "reachable", "viewport"], {"count": 4, "reachable": 3}),
         ("input_press", {"action": "ui_accept"}, True, ""),
         ("input_release", {"action": "ui_accept"}, True, ""),
         ("input_tap", {"action": "ui_accept"}, True, ""),
@@ -1042,6 +1083,144 @@ def check_ui_baseline(client, scratch):
     codes = sorted({i["code"] for i in issues})
     print("stage 5 bridge: validate_ui baseline %d finding(s) %s -> NEW, written, "
           "-> PRE, run passes" % (n, codes))
+    return True
+
+
+def check_canvas_layer_space(client, scratch):
+    """Screen-space rects for Controls on a scaled CanvasLayer (gh#2).
+
+    Control.get_global_rect() stops at the CanvasLayer, so a HUD on a scaled
+    layer reports rects in layer units while the viewport is measured in pixels.
+    One project got 55 false ui_overflow findings that way and had to baseline 53
+    of them, which is the outcome the baseline feature exists to prevent.
+
+    stage_assemble plants ScaledInside (x=1200 in layer units = 720 on screen)
+    and ScaledOutside (x=3000 = 1800, genuinely off it). Asserting only that the
+    first is clean would pass against a check that reports nothing at all, so the
+    second is asserted to still fire.
+
+    Also asserts the viewport these are measured against. Stage 5 runs headless,
+    where root.size is 64x64 -- against which EVERY Control here overflows, and
+    every assertion below would be meaningless.
+    """
+    hud = "/root/Main/ScaledHud"
+    bounds = client.send_command(
+        scratch, "get_node_bounds", {"node_path": hud + "/ScaledInside"}, timeout=15.0)
+    if not bounds.get("success"):
+        return fail("get_node_bounds on the scaled HUD: %s" % bounds.get("message"))
+    rect = (bounds.get("data") or {}).get("global_rect") or {}
+    # 1200 * 0.6 = 720, 300 * 0.6 = 180. Layer units would read 1200 / 300.
+    if abs(rect.get("x", -1) - 720.0) > 1.0 or abs(rect.get("w", -1) - 180.0) > 1.0:
+        return fail("node_bounds ignored the CanvasLayer scale: got x=%r w=%r, "
+                    "expected 720/180 (1200/300 means the canvas transform is "
+                    "not applied)" % (rect.get("x"), rect.get("w")))
+
+    # use_baseline False so this does not depend on whether check_ui_baseline has
+    # already written one.
+    ui = client.send_command(scratch, "validate_ui", {"use_baseline": False}, timeout=20.0)
+    issues = (ui.get("data") or {}).get("issues", [])
+    overflow = [i for i in issues if i.get("code") == "ui_overflow"]
+    flagged = {i.get("path", "") for i in overflow}
+    if any("ScaledInside" in p for p in flagged):
+        return fail("validate_ui flagged ScaledInside as overflowing; it renders at "
+                    "720..900 of 1152. Rects are being read in CanvasLayer units.\n"
+                    "  %s" % next(i["message"] for i in overflow if "ScaledInside" in i["path"]))
+    if not any("ScaledOutside" in p for p in flagged):
+        return fail("validate_ui did NOT flag ScaledOutside, which renders at "
+                    "1800 of 1152 - the overflow check is not firing at all, so "
+                    "ScaledInside coming back clean proves nothing")
+
+    reach = client.send_command(scratch, "reachable_ui", {}, timeout=20.0)
+    controls = {c["path"]: c for c in (reach.get("data") or {}).get("controls", [])}
+    inside = next((c for p, c in controls.items() if "ScaledInside" in p), None)
+    outside = next((c for p, c in controls.items() if "ScaledOutside" in p), None)
+    if inside is None or outside is None:
+        return fail("reachable_ui did not report the planted HUD buttons (saw %s)"
+                    % sorted(controls))
+    if not inside["on_screen"]:
+        return fail("reachable_ui called ScaledInside OFF-SCREEN at rect %r - a "
+                    "visible, clickable button reported unreachable" % (inside["rect"],))
+    if outside["on_screen"]:
+        return fail("reachable_ui called ScaledOutside on-screen; it is at x=1800 "
+                    "of 1152, so the off-screen test is not firing")
+
+    vp = (reach.get("data") or {}).get("viewport") or {}
+    if int(vp.get("w", 0)) != 1152 or int(vp.get("h", 0)) != 648:
+        return fail("UI verbs measured against a %sx%s viewport, expected the "
+                    "project's designed 1152x648. Headless has no window, so "
+                    "root.size is 64x64 and every check above is vacuous."
+                    % (vp.get("w"), vp.get("h")))
+
+    print("stage 5 bridge: canvas-layer space OK (scaled HUD: inside 720..900 clean, "
+          "outside 1800 still flagged, viewport %sx%s not 64x64)"
+          % (int(vp["w"]), int(vp["h"])))
+    return True
+
+
+def check_set_state_dotted(client, scratch):
+    """Dotted property writes, and the hyphen spelling the docs use (gh#1).
+
+    Object.set/get do not walk dots, so set_state used to write nothing through
+    `environment.ambient_light_energy` and then report "unknown property" against
+    a name that was correct - while get_state read the same path fine. Every
+    negative here is asserted too: a resolver that accepts everything is as broken
+    as one that accepts nothing.
+    """
+    go = "/root/Main/Go"
+
+    def call(action, args, timeout=15.0):
+        return client.send_command(scratch, action, args, timeout=timeout)
+
+    wrote = call("set_state", {"node_path": go, "property": "theme.default_font_size",
+                              "value": 21})
+    if not wrote.get("success"):
+        return fail("dotted set_state through a Resource failed: %s" % wrote.get("message"))
+    read = call("get_state", {"node_path": go, "properties": ["theme.default_font_size"]})
+    if (read.get("data") or {}).get("theme.default_font_size") != 21:
+        return fail("set_state reported success but get_state reads %r, not 21 - the "
+                    "write landed somewhere else"
+                    % (read.get("data") or {}).get("theme.default_font_size"))
+
+    # Negative 1: a leaf that does not exist must still fail, and must blame the
+    # Resource rather than the node.
+    bogus = call("set_state", {"node_path": go, "property": "theme.no_such_knob",
+                               "value": 3})
+    if bogus.get("success"):
+        return fail("set_state accepted theme.no_such_knob - the read-back check is "
+                    "not running on the dotted path")
+    if "Theme" not in bogus.get("message", ""):
+        return fail("the failure must name the object the write landed on (Theme), "
+                    "or it sends the reader hunting for a typo in the node: %s"
+                    % bogus.get("message"))
+
+    # Negative 2: a struct component is refused, naming the call that works.
+    struct = call("set_state", {"node_path": go, "property": "size.x", "value": 250})
+    if struct.get("success"):
+        return fail("set_state claimed to write size.x; components of a built-in "
+                    "struct cannot be written through a Resource walk")
+    if "Set it whole" not in struct.get("message", ""):
+        return fail("refusing size.x must name the call that would have worked: %s"
+                    % struct.get("message"))
+
+    # The hyphen spelling. commands.gd's own header documents it, the sequence
+    # step dispatcher already normalizes it, and the bus used to reject it.
+    hyphen = call("scene-tree", {"depth": 1})
+    if not hyphen.get("success"):
+        return fail("the bus rejected the hyphenated spelling the docs use: %s"
+                    % hyphen.get("message"))
+
+    # ...but a verb that is genuinely absent must still fail, with a pointer.
+    absent = call("set_stat", {"node_path": go})
+    if absent.get("success"):
+        return fail("'set_stat' succeeded - hyphen normalization is matching verbs "
+                    "that were never registered")
+    if "did you mean 'set_state'" not in absent.get("message", ""):
+        return fail("an unknown verb close to a real one must suggest it: %s"
+                    % absent.get("message"))
+
+    print("stage 5 bridge: set_state dotted write OK (theme.default_font_size -> 21; "
+          "bad leaf, struct component and absent verb all still refused; "
+          "'scene-tree' accepted)")
     return True
 
 
@@ -1269,6 +1448,10 @@ def stage_bridge(godot, scratch, full):
         if not listing.get("success"):
             ok = fail("list_commands over the live bus: %s" % listing.get("message"))
 
+        # Ahead of check_ui_baseline: this one asserts which findings exist, and
+        # reads cleaner before a baseline has been written over them.
+        ok = check_canvas_layer_space(client, scratch) and ok
+        ok = check_set_state_dotted(client, scratch) and ok
         ok = check_ui_baseline(client, scratch) and ok
         ok = check_paused_bridge(client, scratch) and ok
         ok = check_dispatch_reentrancy(client, scratch) and ok

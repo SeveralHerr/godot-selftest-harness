@@ -89,11 +89,11 @@ from pathlib import Path
 from typing import Optional  # noqa: F401
 
 
-# harness-version: 0.16.0
+# harness-version: 0.17.0
 # Version of the godot-selftest-harness this client was copied from. Compared against
 # the running game's own stamp by the `harness-version` verb, so a half-refreshed
 # install (new client, old autoload) is visible instead of mysterious.
-HARNESS_VERSION = "0.16.0"
+HARNESS_VERSION = "0.17.0"
 
 COMMANDS_FILE = "devtools_commands.json"
 RESULTS_FILE = "devtools_results.json"
@@ -786,7 +786,16 @@ def send_command(project_path: Path, action: str, args: dict = None, timeout: fl
         raise NoReplyError(
             "No response from Godot after {t}s. The command WAS picked up (the "
             "game is alive) but '{action}' never answered - it is hung, still "
-            "running, or it crashed mid-handler.".format(t=timeout, action=action)
+            "running, or it aborted mid-handler.\n"
+            "Most often it aborted: a GDScript runtime error raised by YOUR code "
+            "reacting to what the verb did (a setter, a signal, a "
+            "NOTIFICATION_TRANSFORM_CHANGED handler, an Area body_entered) kills "
+            "the handler before it can reply, and GDScript has no exception to "
+            "catch. The game survives, so every later verb answers normally and "
+            "the verb looks selectively broken.\n"
+            "Check the game's stderr for [SCRIPT ERROR] / [ERR] stamped around "
+            "now - that names the line. The bus itself recovers on its own after "
+            "the dispatch watchdog fires.".format(t=timeout, action=action)
         )
     raise NoReplyError(
         "No response from Godot after {t}s running '{action}'. The liveness "
