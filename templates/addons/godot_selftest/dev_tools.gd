@@ -14,14 +14,14 @@ extends Node
 ## extension loads AFTER the generic handlers, a project may override a generic
 ## verb by registering the same action string (last-writer-wins).
 
-# harness-version: 0.28.0
+# harness-version: 0.29.0
 # --- Constants ---
 
 ## Version of the godot-selftest-harness these files were copied from. Reported by the
 ## `harness_version` verb and stamped into every copied tool script, so a gap logged
 ## against a project can name the version it was seen on, and a refresh can tell a
 ## stale file from a customized one. Bump with .claude-plugin/plugin.json.
-const HARNESS_VERSION: String = "0.28.0"
+const HARNESS_VERSION: String = "0.29.0"
 
 ## Default bus filenames. With a session id (see _resolve_session) the id is spliced in
 ## before the extension, so two instances can each own a bus in the same user:// dir.
@@ -384,6 +384,28 @@ func register_command(action: String, handler: Callable) -> void:
 ## payload tiny: it rides on every single reply.
 func register_status_provider(provider: Callable) -> void:
 	_status_provider = provider
+
+
+## Lets a script self-report that it ran (gh#30 / plant-tower-defense:G-014).
+##
+## `scripts-seen` (and `reach`, which reads it) can only ever learn a script's path
+## from a NODE's `script` property, via node_added. A static-utility class
+## (`class_name Music extends RefCounted` with static entry points, or one that
+## builds a host Node with no script of its own attached) is never itself a node's
+## script, no matter how much of it actually ran — the identical shape as a base
+## class only a subclass instantiates (reached_base), one level further out, where
+## no descendant carries the base's own script either. Call this once from each real
+## entry point of a script that has this shape:
+##   DevTools.mark_script_reached(<its own res:// path>)
+## and it lands in the same `_scripts_seen` dictionary `scripts-seen` already
+## reports and `reach` already reads — a second way to populate the existing
+## signal, not a second signal a caller has to know to ask for separately. Get the
+## path from `get_script().resource_path` in an instance method, or hardcode the
+## literal in a purely static one (there is no `self` to ask). A no-op on an empty
+## path rather than an error, so a defensive call site costs nothing.
+func mark_script_reached(path: String) -> void:
+	if not path.is_empty():
+		_scripts_seen[path] = true
 
 
 # --- Setup ---
@@ -4037,8 +4059,8 @@ func _cmd_aabb(args: Dictionary) -> Dictionary:
 	}
 
 
-## Orients a Node3D to face another node's world-space centre (gh#28 /
-## moving-in:G-044, seen twice the same day). `aabb` gives a node's exact world
+## Orients a Node3D to face another node's world-space centre (moving-in:G-044,
+## seen twice the same day). `aabb` gives a node's exact world
 ## centre and a project's own extension can teleport a node TO a position, but
 ## nothing pointed a camera or the player AT one - framing a fixture for a
 ## screenshot was four blind attempts at a heading in degrees. args:
@@ -5697,7 +5719,15 @@ func _load_validator() -> GDScript:
 	var validator_path: String = _config.get("validator_script", "")
 	if validator_path.is_empty() or not ResourceLoader.exists(validator_path):
 		return null
-	return load(validator_path) as GDScript
+	var script: GDScript = load(validator_path) as GDScript
+	if script != null:
+		# gh#30: the validator is a static-utility class (GodotSelftestSceneValidator)
+		# never attached as any node's script, the exact shape mark_script_reached
+		# exists for. The core calls it directly here rather than the validator
+		# calling back into DevTools, since this call site already IS the core and
+		# already has the path - no autoload lookup, no extra hop.
+		_scripts_seen[validator_path] = true
+	return script
 
 
 func _serialize_variant(value: Variant) -> Variant:

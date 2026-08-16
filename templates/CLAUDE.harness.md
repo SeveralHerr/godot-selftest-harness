@@ -254,6 +254,11 @@ flag and state machine outlive it. And **a setter verb must leave the game in a 
 game itself can reach**: a `set_combo` that sets the count but not the combo window tests
 nothing the moment the readout starts fading on that timer.
 
+**A `class_name X extends RefCounted` static-utility script (no node ever carries its
+script) is invisible to `scripts-seen`/`reach` no matter how much of it ran** — call
+`DevTools.mark_script_reached("res://path/to/it.gd")` once from each real entry point
+(static context included; DevTools is an autoload, reachable by name from anywhere).
+
 ### DEVTOOLS LOG (REQUIRED)
 At the end of **every** response, append an entry to `log-devtools.md`. Two required
 halves: **was using the harness worth it**, and **what was missing from it**. If nothing

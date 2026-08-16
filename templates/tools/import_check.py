@@ -50,8 +50,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-# harness-version: 0.28.0
-HARNESS_VERSION = "0.28.0"
+# harness-version: 0.29.0
+HARNESS_VERSION = "0.29.0"
 
 # Substrings that mean the import did not leave a parseable project behind. Every one
 # of these is taken from real captured output, not from guesswork:
@@ -185,22 +185,44 @@ def main():
     devtools_dir.mkdir(exist_ok=True)
     log_path = devtools_dir / "import.log"
 
-    try:
-        godot_rc = run_import(godot_path, project_path, log_path, args.timeout)
-    except subprocess.TimeoutExpired:
-        print(f"Error: import did not finish within {args.timeout}s; partial output in "
-              f"{log_path}. Nothing was verified.", file=sys.stderr)
-        sys.exit(2)
-    except OSError as exc:
-        print(f"Error: could not run {godot_path}: {exc}", file=sys.stderr)
-        sys.exit(2)
+    # plant-tower-defense:G-044: --import segfaulted (exit 139) on its first call of a
+    # session and imported clean on an immediate retry with nothing else changed - same
+    # cause as the shared .godot/ class-cache contention this repo already knows about
+    # (findmyballs:G-004 territory), a harder failure mode of it. A crash produces an
+    # abnormal exit with NO recognizable parse-error text, which this scan can already
+    # tell apart from a genuine reported failure - so retry exactly that shape once,
+    # transparently, before surfacing it as "could not run". A real parse error (findings
+    # present) is never retried: retrying would not fix broken code and could reorder a
+    # cascade's line numbers between attempts.
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            godot_rc = run_import(godot_path, project_path, log_path, args.timeout)
+        except subprocess.TimeoutExpired:
+            print(f"Error: import did not finish within {args.timeout}s; partial output in "
+                  f"{log_path}. Nothing was verified.", file=sys.stderr)
+            sys.exit(2)
+        except OSError as exc:
+            print(f"Error: could not run {godot_path}: {exc}", file=sys.stderr)
+            sys.exit(2)
 
-    try:
-        captured = log_path.read_text(encoding="utf-8", errors="replace")
-    except OSError as exc:
-        print(f"Error: import ran but its log could not be read back ({exc}). "
-              "Nothing was verified.", file=sys.stderr)
-        sys.exit(2)
+        try:
+            captured = log_path.read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:
+            print(f"Error: import ran but its log could not be read back ({exc}). "
+                  "Nothing was verified.", file=sys.stderr)
+            sys.exit(2)
+
+        crashed_with_no_findings = (
+            godot_rc != 0 and captured.strip() and not scan_output(captured))
+        if crashed_with_no_findings and attempt == 1:
+            print(f"Note: godot --import exited {godot_rc} with no recognizable parse/load "
+                  f"error in its output - a crash signature (plant-tower-defense:G-044), not "
+                  f"a reported failure. Retrying once before treating this as unverified. "
+                  f"Crashed attempt's log: {log_path}", file=sys.stderr)
+            continue
+        break
 
     # No output at all is not a clean run -- it is an unverified one. This is the shape
     # the Windows non-console build takes when its output goes nowhere, and reporting it

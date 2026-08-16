@@ -304,6 +304,14 @@ func _status(_args: Dictionary) -> Dictionary:
     var p := dev.get_tree().get_first_node_in_group("player")
     return { "player": "absent" if p == null else ("dead" if p.is_dead else "alive") }
 
+# Elsewhere: a static-utility class with no node ever carrying its script self-reports
+# into `scripts-seen`/`reach` from its own real entry points, not from here. DevTools
+# is an autoload, so it is reachable by name from anywhere, static context included:
+#   class_name Music extends RefCounted
+#   static func crossfade(...) -> void:
+#       DevTools.mark_script_reached("res://game/music.gd")
+#       # ...the real crossfade logic...
+
 func _spawn_enemy(args: Dictionary) -> Dictionary:
     var count := int(args.get("count", 1))
     # ...operate on the running scene tree...
@@ -1295,12 +1303,25 @@ concurrent — so a fan-out agent can check its own changed file(s) alongside si
 still mid-task, `import_check.py`, or a running game, without contending for the same
 lock everything else in this project shares. Findings land as `compile_error` next to
 the static ones; a file that compiles clean is named in `compiled OK:` rather than
-silently passing. **One real cost:** `--check-only` reads the *existing* class cache to
-resolve a `class_name` from another file — it does not build one — so on a project that
-has never been imported at all, a file referencing a sibling's `class_name` false-
-positives `Could not find type`. Needs one prior `--import` or launch (this project's
-own, or any earlier one in the same checkout); after that, the cache is shared
-read-only and every agent's `--require-compile` sees it.
+silently passing. **Two real costs, both confirmed directly rather than assumed:**
+`--check-only` reads the *existing* class cache to resolve a `class_name` from another
+file — it does not build one — so on a project that has never been imported at all, a
+file referencing a sibling's `class_name` false-positives `Could not find type`. Needs
+one prior `--import` or launch (this project's own, or any earlier one in the same
+checkout); after that, the cache is shared read-only and every agent's
+`--require-compile` sees it. Second, unrelated to imports: **`--check-only` on an
+isolated file does not resolve an autoload SINGLETON by its global name at all**, even
+after a prior import, even with the autoload correctly declared in `project.godot`
+(0.29.0, discovered building gh#30's fix — a two-line repro: an autoload script plus a
+second script calling it by name, `--check-only` on the second reports
+`Identifier not found` regardless of import state). This project's own `DevTools`
+autoload is exactly this shape, so `--require-compile` on **any file that calls
+`DevTools.<verb>(...)` by the bare global name** false-positives a compile error on
+code that runs correctly. Not fixable from this side — it is `--check-only`'s own
+parse-time scope, narrower than a full project launch's. Workaround where it matters:
+`get_node("/root/DevTools").call("method_name", ...)` resolves fine under
+`--check-only` (a runtime string lookup, not a static identifier), at the cost of
+losing static argument/return checking on that call site.
 
 Exit codes follow the harness convention: `0` clean, `1` findings that count (errors,
 plus warnings under `--strict`), `2` could not run. Flags: `-p/--project`, `--json`,
@@ -1428,6 +1449,18 @@ contain no [...]` followed by a `NOT COVERED:` line naming what `--import` struc
 cannot see — rather than reading as a compile verdict it isn't. `/verify` still runs
 lint alongside import in every tier that reaches Phase 1, so nothing ships broken on
 this gap; the fix is honesty about which gate actually caught it.
+
+**A crash with no parse-error text is retried once, transparently** (0.29.0,
+plant-tower-defense:G-044). `godot --import` segfaulted on its first call of a real
+session (exit 139, mid-reimport of vendored audio) and imported clean on an immediate
+retry with nothing else changed — the harder-failure sibling of the shared `.godot/`
+class-cache contention this project already knows about under concurrent load. A crash
+is distinguishable from a genuine parse failure by exactly the thing this tool already
+scans for: a nonzero exit with **no** recognizable `SCRIPT ERROR`/`Parse Error`/etc. in
+the output. `import_check.py` retries that specific shape once, prints a `Note:` saying
+so, and only then treats a repeat as unverified. A run with real findings is never
+retried — retrying broken code fixes nothing, and could reorder a cascade's line
+numbers between attempts.
 
 ### `tools/run_tests.py`
 
@@ -1607,6 +1640,16 @@ readers to discount the number:
   `.godot/global_script_class_cache.cfg` — or a scan for `class_name` when the project
   was never imported) and credits every ancestor in the changed set. A static fact about
   the files, needing no config; still a distinct bucket so it stays auditable.
+- **A static-utility script can self-report into `reached` directly** (0.29.0, gh#30 /
+  plant-tower-defense:G-014). `class_name Music extends RefCounted` with only static
+  entry points is never itself a node's `script` — the identical shape as
+  `reached_base`'s problem, one level further out, where no live node carries the
+  script at all, so no amount of walking the tree or the `extends` graph can find it.
+  Call `DevTools.mark_script_reached(<its own res:// path>)` once from each real entry
+  point; it writes straight into the same `_scripts_seen` dictionary `scripts-seen`
+  already reports and `reach` already reads as `reached` — an observation, not a
+  declaration, unlike `reach_aliases` — so it needs no config and chains through
+  nothing. See "The registry-extension pattern" above for where to call it from.
 
 Each row also carries the run's `value` verdict, its `expected` prediction, and its
 `cheaper_alternative` — the countable form of the log's `Value:` block, so "how often was
@@ -1846,7 +1889,7 @@ Run it after any script/scene/gameplay change, before committing.
   is axis-aligned by definition; `data.node_transform.axis_aligned` is `false` when
   the node is rotated off-axis, and the CLI says so on the rotation line. Comparing
   two enclosing boxes overstates overlap for anything turned off the grid.
-- **`look-at` orients, it never moves anything** (0.26.0, gh#28 / moving-in:G-044,
+- **`look-at` orients, it never moves anything** (0.26.0, moving-in:G-044,
   seen twice the same day). Framing a fixture for a screenshot used to mean guessing
   a heading in degrees — four blind attempts (a wall, a hallway, the kitchen) on one
   real run. `look-at --node PATH [--from-node PATH] [--up X,Y,Z]` calls

@@ -6145,3 +6145,203 @@ see mistake 1 above — the corrected version does). `gh#27`'s abort-detection
 and `gh#28`'s launch fix were both additionally verified live against
 `plant-tower-defense` before being considered done, per this repo's own
 "reproduce before implementing" discipline (H-033).
+
+## 2026-08-16 - Upstreamed 4 open gap(s) from plant-tower-defense (harness 0.18.0, 0.19.0, 0.21.0, 0.23.0, 0.24.0, 0.25.0)
+
+Pooled by `tools/upstream_gaps.py` from `C:\Users\gotmi\Documents\GitHub\plant-tower-defense\log-devtools.md`. Gap text is the project's,
+verbatim; only the id line is rewritten (qualified with the project name so
+ids from two projects cannot collide, plus a `source:` back-pointer).
+
+- Gap: **the orchestrator-suggested `launch -- --devtools-session X` form
+  silently does not wire the session to the game.** Ran exactly
+  `python tools/devtools.py launch -- --devtools-session hudwork`; the
+  process launched, `ping --session hudwork` never got picked up (`game not
+  running` after the 2s grace). Root cause, read from `cmd_launch` in
+  `tools/devtools.py`: passthrough args after a bare `--` are appended
+  directly to the engine command line (`cmd += passthrough`) with **no**
+  Godot-side `--` inserted first, so `--devtools-session hudwork` never
+  reaches `OS.get_cmdline_user_args()` (which the addon reads at
+  `dev_tools.gd:405`) -- only `--isolated` or the top-level `--session`
+  flag correctly append `["--"] + user_args`. This project's own
+  AGENTS.md/CLAUDE.md never actually recommends the broken form (it only
+  shows `launch` and `launch --isolated`), so the instruction came from
+  outside this repo -- but the failure mode (a launch that "succeeds" and a
+  ping that then reads as a dead game, indistinguishable from a crash) is
+  exactly the kind of silent-wrong-mode this project's other G-entries keep
+  naming. Recovered by using `launch --isolated`, which the tool already
+  builds correctly.
+  - [plant-tower-defense:G-042] status: fixed | fixed-in: 0.28.0 | seen: 1 | harness: 0.25.0 | source: plant-tower-defense 2026-08-16 | dup-of: gh#28 (identical root cause, fixed before this project-log copy was pooled)
+  - Improvement: either have `cmd_launch` insert Godot's own `--` before ANY
+    passthrough token that starts with `--devtools-` (so the natural-looking
+    form works), or have `launch` print a one-line warning when passthrough
+    args contain `--devtools-session`/`--devtools-busdir` without a
+    preceding bare `--` reaching the engine, naming `--isolated`/`--session`
+    as the forms that actually wire it.
+
+- Gap: **CLAUDE.md/AGENTS.md's own words for `--isolated` promise something
+  `GODOT_USERDATA` cannot deliver.** The line read this session: "`user://`
+  ... stays shared unless you also set `GODOT_USERDATA`" -- phrased as if
+  setting it isolates `user://`. `addons/godot_selftest/dev_tools.gd:41`
+  says the opposite in its own comment: "Godot has no command line switch
+  for `user://` and honours no `GODOT_USERDATA`". Checked directly this
+  session: `godot --help` on this project's 4.7.1 build has no
+  `--user-data-dir`/`--userdata` engine flag at all, so there is no
+  mechanism by which setting the env var could change where the actual
+  Godot process's `user://` resolves -- confirmed by the sequence in this
+  session (`GODOT_USERDATA=/tmp/... launch` still wrote its owner file etc.
+  to the default `%APPDATA%/Godot/app_userdata/plant-tower-defense/`, not
+  the temp dir). The sentence in CLAUDE.md is the one a reader acts on; the
+  comment naming the true limit is three files away in the addon.
+  - [plant-tower-defense:G-043] status: fixed | fixed-in: 0.28.0 | seen: 1 | harness: 0.25.0 | source: plant-tower-defense 2026-08-16 | dup-of: gh#28 (identical GODOT_USERDATA claim bug, fixed before this project-log copy was pooled)
+  - Improvement: reword the harness-generated CLAUDE.md/AGENTS.md line to
+    stop implying `GODOT_USERDATA` isolates `user://` -- e.g. "`user://` ...
+    stays shared; there is no supported way to isolate it (Godot has no
+    `--user-data-dir` flag), so saves/screenshots/baselines from parallel
+    `--isolated` instances can still collide" -- so a multi-agent
+    orchestrator stops handing out an instruction that cannot work.
+
+- Gap: **`launch -- --devtools-session X` silently fails to wire the session** —
+  five consecutive launches this way (`python tools/devtools.py launch --
+  --devtools-session plantwork`) all reported `launched, but the bus never
+  answered a ping within 20s`, with the spawned process stuck at ~6MB RSS and
+  ~0.015s total CPU time indefinitely (confirmed via `Get-Process ... | Select
+  CPU,WorkingSet`) — a genuine hang, not slow startup, and it reproduced
+  identically under both `--rendering-driver opengl3` and the default D3D12,
+  ruling out a GPU-contention theory. A sibling agent in a concurrent worktree
+  had already diagnosed the same failure and reported that `launch --isolated`
+  (which sets `--devtools-session` AND `--devtools-busdir` together) works
+  where the bare `-- --devtools-session X` form does not; switching to
+  `launch --isolated --kill-survivors` fixed it on the very next attempt, and
+  every subsequent launch that session answered a ping within 1-2s. Lost
+  roughly 15 minutes and 5 launch/kill cycles chasing GPU-contention and
+  windowing-hang theories before the correct fix (a different flag) came from
+  outside this session.
+  - [plant-tower-defense:G-037] status: fixed | fixed-in: 0.28.0 | seen: 1 | harness: 0.25.0 | source: plant-tower-defense 2026-08-16 | dup-of: gh#28 (this project's own text already names it: "SeveralHerr/godot-selftest-harness#28, same root cause")
+  - Improvement: either make bare `--devtools-session NAME` (without
+    `--isolated`) actually wire a working bus the same way `--isolated` does,
+    or have `launch` refuse/warn on that combination instead of reporting a
+    generic 20s ping timeout that reads identically to a crashed engine — the
+    symptom gives no hint that the fix is a different flag.
+  - Root cause, found afterward by reading the installed `cmd_launch()`
+    (`tools/devtools.py`): `-- --devtools-session X` with no top-level
+    `--session` flag leaves `user_args` empty, so the `cmd += ["--"] + user_args`
+    line that would add Godot's OWN `--` separator never runs — `cmd +=
+    passthrough` alone appends `--devtools-session plantwork` straight onto the
+    engine's command line as two unrecognized top-level tokens, which never
+    reach `OS.get_cmdline_user_args()` at all. Confirmed against my own printed
+    launch line, which shows no `--` before `--devtools-session`. A sibling
+    agent had already filed this precisely
+    (SeveralHerr/godot-selftest-harness#28, same root cause plus a related
+    `GODOT_USERDATA` claim bug) before I got to filing; added a confirming
+    comment with the CPU/memory signature above rather than duplicating it.
+
+- Gap: `godot --headless --path . --import` segfaulted on its first run this
+  session (exit 139, mid-reimport of vendored audio) and produced a clean exit
+  0 on an immediate retry with no other change. Same signature as the
+  already-logged half-built-cache gap above (concurrent-agent load against a
+  shared `.godot/` import cache), but this time the crash was a hard segfault
+  rather than a truncated cache, and it happened on the FIRST import call of
+  the session rather than after `/verify` was already mid-run.
+  - [plant-tower-defense:G-044] status: fixed | fixed-in: 0.29.0 | seen: 1 | harness: 0.25.0 | source: plant-tower-defense 2026-08-16
+  - Improvement: `/verify`'s import step retrying once on a non-zero exit
+    before surfacing failure would turn "verified nothing, investigate a
+    crash" into "verified cleanly, noted a transient" — the same shape as the
+    existing G- entry about `--import` racing another worktree's concurrent
+    import, just caught one step earlier (segfault vs. truncated cache).
+
+## 2026-08-16 — 0.29.0: a self-report API, a real limitation found while building it, and a numbering mistake corrected
+
+`gh#30` arrived with a genuinely better design than the two options this repo's
+own H-040/G-028 investigation had already declined — not a re-report, a third
+path. Pooling also caught three more duplicates of `gh#28` (all fixed before
+this cycle) and one real new item (`G-044`).
+
+**[gh#30 / plant-tower-defense:G-014, closes H-040/G-028 for real] a
+static-utility script can now self-report into `reach`.** `class_name Music
+extends RefCounted` with only static entry points is never itself a node's
+`script` — structurally invisible to `scripts-seen`'s node_added hook no matter
+how much of it ran, the same shape as `reached_base`'s problem one level
+further out. Added `DevTools.mark_script_reached(path)`, modeled on the
+existing `register_status_provider` pattern: a script calls it once from each
+real entry point, and the path lands straight in the same `_scripts_seen`
+dict `scripts-seen` already reports and `reach` already reads. No engine-side
+load hook needed — the previous investigation's blocker — because the script
+reports itself; nothing has to detect it from outside.
+
+**Ate the harness's own dog food.** `GodotSelftestSceneValidator`
+(`scene_validator.gd`) is exactly this shape — a static-utility class the core
+loads by path and calls, never attached to any node — so every project running
+`findings`/`validate-ui`/`validate-all` was scoring its own validator
+permanently unreached. `_load_validator()` now credits the path directly
+(the core doing it inline, not the validator calling back into `DevTools` —
+simpler, and sidesteps the autoload-resolution finding below entirely).
+
+**A real limitation found empirically while building the test fixture, not
+guessed at:** the first draft of the planted test called
+`DevTools.mark_script_reached(...)` by the bare autoload name from the fixture
+script, and `check_templates.py` stage 3 failed to PARSE it —
+`Identifier not found: DevTools`. Reproduced as a minimal two-file repro (an
+autoload plus a caller) outside the fixture to confirm it wasn't specific to
+the scratch project: **`godot --check-only` on an isolated file does not
+resolve an autoload SINGLETON by its global name at all, even after a prior
+`--import`, even with the autoload correctly declared in `project.godot`.**
+This directly affects `--require-compile` (shipped 0.27.0): any file that
+calls `DevTools.<verb>(...)` the normal way — which is how this harness's own
+`REFERENCE.md` had been telling projects to call `register_status_provider`,
+and now `mark_script_reached` — will false-positive a compile error under
+`--require-compile`. Documented prominently everywhere `--require-compile` is
+mentioned, with the `get_node("/root/X").call(...)` workaround (a runtime
+lookup, not a static identifier, so `--check-only` has nothing to fail to
+resolve). Fixed the test fixture itself to use that form, since real project
+code correctly using the ergonomic form was never the bug — the false-positive
+gate was.
+
+**[gh#28 numbering correction.]** While investigating gh#30, noticed `look_at`
+(built in the 0.26.0 cycle) was mislabeled `gh#28` in four places — `gh#28`
+did not exist as a GitHub issue at the time; `look_at`'s real citation was
+always `moving-in:G-044` alone. The actual `gh#28` (the launch/`GODOT_USERDATA`
+fix, shipped 0.28.0) collided with the stale placeholder. Fixed all four
+occurrences (`dev_tools.gd`, `check_templates.py` ×2, `REFERENCE.md`); past
+commit messages are left as historical record, not rewritten.
+
+**[plant-tower-defense:G-044] `import_check.py` now retries once on a crash
+signature.** `--import` segfaulted (exit 139) on the first call of a real
+session and imported clean on an immediate retry with nothing else changed —
+the harder-failure sibling of the shared `.godot/` cache contention already
+known under concurrent load. A crash is distinguishable from a genuine parse
+failure by exactly what this tool already scans for: a nonzero exit with NO
+recognizable `SCRIPT ERROR`/`Parse Error` text. Retries that specific shape
+once, transparently, prints a `Note:` saying so; a run with real findings is
+never retried. Verified both directions with a stand-in "godot" binary: exits
+139-then-0 on two calls → one retry, exit 0, `Note:` printed; exits 1 with a
+real `SCRIPT ERROR` every call → zero retries, immediate exit 1, called
+exactly once (confirmed via a call-count file).
+
+**Three more `gh#28` duplicates surfaced by pooling** (`plant-tower-defense:
+G-037`, `G-042`, `G-043`) — all the identical launch/`GODOT_USERDATA` root
+cause, filed independently before `gh#28`'s fix had propagated back. Marked
+fixed with `dup-of:` cross-references; H-044 (two intake paths, no dedupe)
+keeps finding fresh examples every pooling pass.
+
+**Not done this turn: gh#29 (`entry_hook`/`entry_points` documented, accepted,
+read by nothing).** A real feature gap, not a bug fix — actually consuming
+`entry_hook` needs a design decision (does `launch` call it automatically, is
+it opt-in, how does `entry_points`' diff-matching integrate with `/verify`
+Phase 1) that deserves its own turn rather than being rushed alongside four
+other fixes. Left open, queued.
+
+**Validation run this turn:** `python tools/record_version.py --record` then
+`--check` — OK at 0.29.0, 14 shipped files (unchanged — `mark_script_reached`
+is a direct GDScript API, not a bus verb, so it needs no `devtools.py`
+counterpart and does not move the verb/CLI counts). `python -m unittest
+discover -s tools` — 35 tests OK. `python tools/check_templates.py` — OK, all
+stages including two new controls (`check_mark_script_reached`,
+`check_validator_reach`), each mutation-tested (forcing the write to no-op
+correctly failed both). One transient flake mid-session (`run_method` timeout
+on the main scratch instance, unrelated to any of this turn's changes —
+confirmed by two clean reruns back to back) — noted rather than chased, since
+it reproduced on neither retry. `import_check.py`'s retry logic was verified
+outside `check_templates.py` (no existing coverage of that tool there at all,
+a gap this turn didn't have room to close) via a stand-in Godot binary in both
+directions, matching the standard this repo already applies to claims that
+need a real process to prove, not a scratch fixture.

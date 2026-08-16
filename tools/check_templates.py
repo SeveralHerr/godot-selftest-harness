@@ -582,7 +582,7 @@ def stage_assemble(scratch, user_dir_name):
         '\tlamp.name = "PropLamp"',
         "\tlamp.omni_range = 5.0",
         "\tprop.add_child(lamp)",
-        "\t# gh#28: an active Camera3D, off-axis from Prop3D, so look_at has both a",
+        "\t# moving-in:G-044: an active Camera3D, off-axis from Prop3D, so look_at has both a",
         "\t# real default ('the' active camera, no --from-node) and a real direction",
         "\t# to prove was actually applied (not already facing the target).",
         "\tvar cam := Camera3D.new()",
@@ -713,6 +713,20 @@ def stage_assemble(scratch, user_dir_name):
         "## property back.",
         "func harness_set_paused(on: bool) -> void:",
         "\tget_tree().paused = on",
+        "",
+        "",
+        "## gh#30: stands in for a static-utility script's own real entry point",
+        "## calling DevTools.mark_script_reached(path) on itself - proves the API",
+        "## actually writes into the same _scripts_seen dict scripts-seen reports.",
+        "## get_node(), not the bare autoload name: `godot --check-only` on an",
+        "## isolated file does not resolve an autoload SINGLETON NAME even after",
+        "## --import (confirmed directly, gh#30 investigation) - stage 3's",
+        "## per-file parse-check would flag this fixture as a false compile",
+        "## error otherwise. Real project code can and should use the bare",
+        "## `DevTools.mark_script_reached(...)` form; see REFERENCE.md for why",
+        "## this fixture specifically avoids it.",
+        "func harness_mark_reached(path: String) -> void:",
+        "\tget_node(\"/root/DevTools\").call(\"mark_script_reached\", path)",
         "",
         "",
         "func _on_go() -> void:",
@@ -2045,6 +2059,28 @@ def check_ui_baseline(client, scratch):
     return True
 
 
+def check_validator_reach(client, scratch):
+    """The core credits its OWN validator into scripts-seen when it actually loads
+    it (gh#30), eating its own dog food: `GodotSelftestSceneValidator` is a
+    static-utility class exactly like the ones mark_script_reached exists for -
+    never any node's script - so before this fix a project running `findings`/
+    `validate-ui`/`validate-all` every verify cycle still scored `scene_validator.gd`
+    permanently unreached. By this point in stage 5, check_findings_aggregate and
+    check_ui_baseline have both already driven validate_scene/validate_all for real.
+    """
+    r = client.send_command(scratch, "scripts_seen", {}, timeout=15.0)
+    if not r.get("success"):
+        return fail("scripts_seen failed: %s" % r.get("message"))
+    scripts = (r.get("data") or {}).get("scripts", [])
+    validator = "res://addons/godot_selftest/scene_validator.gd"
+    if validator not in scripts:
+        return fail("the validator ran (via earlier findings/validate_ui checks) but "
+                    "is not in scripts-seen: %r" % scripts)
+    print("stage 5 bridge: the core credits its own scene_validator.gd into "
+          "scripts-seen when it actually loads it, eating its own dog food")
+    return True
+
+
 def check_canvas_layer_space(client, scratch):
     """Screen-space rects for Controls on a scaled CanvasLayer (gh#2).
 
@@ -2718,7 +2754,7 @@ def check_pause_verb(client, scratch):
 
 
 def check_look_at(client, scratch):
-    """`look_at` actually reorients a Node3D, and only a Node3D (gh#28).
+    """`look_at` actually reorients a Node3D, and only a Node3D (moving-in:G-044).
 
     Reads Cam3D's rotation_degrees before and after so a verb that returned a
     plausible success without calling Node3D.look_at() at all cannot pass (H-035):
@@ -2776,6 +2812,48 @@ def check_look_at(client, scratch):
     print("stage 5 bridge: look_at defaults to the active Camera3D and reorients it "
           "(rotation_degrees.y moved), target_center matches the AABB centre, refuses "
           "a Node2D target, and an explicit from_node overrides the default")
+    return True
+
+
+def check_mark_script_reached(client, scratch):
+    """`DevTools.mark_script_reached(path)` writes into the same `_scripts_seen`
+    dict `scripts-seen` reports (gh#30 / plant-tower-defense:G-014).
+
+    A static-utility script is never itself a node's `script` property, so
+    `scripts-seen`'s existing node_added hook can structurally never see it however
+    much of it ran. Asserts the path is ABSENT before the call (so the fixture
+    proves something, not just "the key already happened to be there") and PRESENT
+    after, called through an autoload reference the way a real static class would
+    reach DevTools, not by poking bridge internals directly.
+    """
+    def call(action, args=None):
+        return client.send_command(scratch, action, args or {}, timeout=15.0)
+
+    fake_path = "res://game/harness_check_static_utility_probe.gd"
+    before = call("scripts_seen")
+    if not before.get("success"):
+        return fail("scripts_seen failed before the probe: %s" % before.get("message"))
+    if fake_path in (before.get("data") or {}).get("scripts", []):
+        return fail("fixture is broken: %r must not already be in scripts-seen before "
+                    "mark_script_reached is called" % fake_path)
+
+    r = call("run_method", {"node_path": "/root/Main", "method": "harness_mark_reached",
+                            "args": [fake_path]})
+    if not r.get("success"):
+        return fail("harness_mark_reached (wraps DevTools.mark_script_reached): %s"
+                    % r.get("message"))
+
+    after = call("scripts_seen")
+    if not after.get("success"):
+        return fail("scripts_seen failed after the probe: %s" % after.get("message"))
+    scripts = (after.get("data") or {}).get("scripts", [])
+    if fake_path not in scripts:
+        return fail("mark_script_reached(%r) did not make it appear in scripts-seen: %r"
+                    % (fake_path, scripts))
+
+    print("stage 5 bridge: DevTools.mark_script_reached() writes into the same "
+          "scripts-seen scripts-seen already reports - the self-report path a "
+          "static-utility class needs, since no node ever carries its script")
     return True
 
 
@@ -3015,6 +3093,7 @@ def stage_bridge(godot, scratch, full):
         ok = check_canvas_layer_space(client, scratch) and ok
         ok = check_aabb_excludes_lights(client, scratch) and ok
         ok = check_look_at(client, scratch) and ok
+        ok = check_mark_script_reached(client, scratch) and ok
         ok = check_find_nodes_denominator(client, scratch) and ok
         ok = check_find_nodes_script_class(client, scratch) and ok
         ok = check_label_lines_and_scroll(client, scratch) and ok
@@ -3025,6 +3104,7 @@ def stage_bridge(godot, scratch, full):
         ok = check_findings_aggregate(client, scratch) and ok
         ok = check_geometry_caveat_and_hide(client, scratch) and ok
         ok = check_ui_baseline(client, scratch) and ok
+        ok = check_validator_reach(client, scratch) and ok
         ok = check_ping_project_path(client, scratch) and ok
         ok = check_performance_window_and_growth(client, scratch) and ok
         ok = check_game_speed_floor(client, scratch) and ok
