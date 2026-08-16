@@ -89,11 +89,11 @@ from pathlib import Path
 from typing import Optional  # noqa: F401
 
 
-# harness-version: 0.33.0
+# harness-version: 0.34.0
 # Version of the godot-selftest-harness this client was copied from. Compared against
 # the running game's own stamp by the `harness-version` verb, so a half-refreshed
 # install (new client, old autoload) is visible instead of mysterious.
-HARNESS_VERSION = "0.33.0"
+HARNESS_VERSION = "0.34.0"
 
 COMMANDS_FILE = "devtools_commands.json"
 RESULTS_FILE = "devtools_results.json"
@@ -2122,7 +2122,7 @@ def _harness_version_offline(project_path: Path, as_json: bool, why: str) -> int
             "client": HARNESS_VERSION,
             "installed": installed,
             "harness_version": None,
-            "bridge": "cold",
+            "bridge": "not asked" if why is None else "cold",
             "reason": why,
             "machine": _plugin_versions_on_this_machine(),
         }, indent=2))
@@ -2130,9 +2130,12 @@ def _harness_version_offline(project_path: Path, as_json: bool, why: str) -> int
         print(f"Client:    {HARNESS_VERSION}  (tools/devtools.py)")
         print(f"Installed: {installed or 'unreadable'}  "
               "(addons/godot_selftest/dev_tools.gd, read from disk)")
-        print("Game:      unknown - the bridge is cold, so the RUNNING build was "
-              "not asked.")
-        print(f"  ({why})", file=sys.stderr)
+        if why is None:
+            print("Game:      not asked (--client).")
+        else:
+            print("Game:      unknown - the bridge is cold, so the RUNNING build was "
+                  "not asked.")
+            print(f"  ({why})", file=sys.stderr)
         _print_plugin_staleness(installed or HARNESS_VERSION)
     if installed is not None and installed != HARNESS_VERSION:
         print(f"\nWARNING: half-refreshed install - the addon on disk is {installed} "
@@ -2151,6 +2154,12 @@ def cmd_harness_version(args, project_path: Path):
     With no game running this falls back to the two revisions disk can prove
     (this client's, and the installed addon's constant) rather than failing.
     """
+    if getattr(args, "client", False):
+        # moving-in:G-055: the log-entry format wants the installed version on
+        # every turn, most of which have no game running; the bus-first path
+        # printed a "game not running" warning before the answer every time,
+        # which trains a reader to skip it. This never opens the bus.
+        sys.exit(_harness_version_offline(project_path, getattr(args, "json", False), None))
     try:
         result = send_command(project_path, "harness_version")
     except BridgeError as e:
@@ -4149,6 +4158,9 @@ def main():
     p = subparsers.add_parser("harness-version",
                               help="Report the installed harness version (game + client)")
     p.add_argument("--json", "-j", action="store_true", help="Output raw JSON")
+    p.add_argument("--client", action="store_true",
+                   help="Never open the bus: report this client's and the installed addon's "
+                        "versions from disk (what a log entry's `harness:` field wants)")
     p.set_defaults(func=cmd_harness_version)
 
     # input - nested subcommands

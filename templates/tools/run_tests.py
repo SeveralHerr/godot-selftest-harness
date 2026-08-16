@@ -51,8 +51,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-# harness-version: 0.33.0
-HARNESS_VERSION = "0.33.0"
+# harness-version: 0.34.0
+HARNESS_VERSION = "0.34.0"
 
 # The runtime-error prefixes Godot emits for a GDScript that raised mid-execution.
 # Deliberately narrower than import_check.py's FAILURE_SIGNALS: "Parse Error" /
@@ -133,6 +133,53 @@ def run_suite(godot_path: Path, project_path: Path, log_path: Path, passthrough,
         proc = subprocess.run(cmd, stdout=log_f, stderr=subprocess.STDOUT,
                               cwd=str(project_path), timeout=timeout)
     return proc.returncode
+
+
+_ASSERT_RE = re.compile(r"\b_T\s*\.\s*assert\w*\s*\(")
+_EXECUTED_RE = re.compile(r"^\s*Assertions:\s*(\d+)\s+executed", re.M)
+
+
+def declared_assertions(project_path):
+    """(count, files) of `_T.assert_*(` call sites written across the test dir.
+
+    moving-in:G-054 / gh#27: run_tests.gd counts assertions EXECUTED and cannot know
+    how many a method contains, so a method that aborts after its first assert reads
+    as a pass with one assertion. Measured on a real four-method file, written-vs-
+    executed came out 4/2, 2/1, 2/1, 2/2 - the three aborts separated cleanly from
+    the one genuine pass. Counted with the same word-bounded pattern coverage_check.py
+    uses, over comment/string-blanked source, so a doc-comment mentioning
+    `_T.assert_eq` is not a declaration. Advisory only: it is printed, never gated.
+    """
+    cfg = project_path / "addons" / "godot_selftest" / "devtools_config.json"
+    test_dir = "res://test/unit"
+    try:
+        test_dir = str(json.loads(cfg.read_text(encoding="utf-8")).get("test_dir") or test_dir)
+    except (OSError, ValueError):
+        pass
+    root = project_path / test_dir.replace("res://", "", 1)
+    if not root.is_dir():
+        return 0, 0
+    blank = None
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import coverage_check  # shipped beside this file
+        blank = coverage_check._blank_strings_and_comments
+    except Exception:  # noqa: BLE001 - counting is advisory; fall back to raw text
+        blank = None
+    count = files = 0
+    for path in sorted(root.rglob("*.gd")):
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if blank is not None:
+            try:
+                text = blank(text)[0]
+            except Exception:  # noqa: BLE001
+                pass
+        count += len(_ASSERT_RE.findall(text))
+        files += 1
+    return count, files
 
 
 def main():
@@ -243,6 +290,23 @@ def main():
         pass
     else:
         print(f"Errors: 0 emitted during the suite. Full log: {log_path}")
+
+    # moving-in:G-054: written-vs-executed assertion count, suite level, advisory.
+    # Skipped under --filter/--file, where the denominator is not the whole dir.
+    selected = any(tok in ("--filter", "--file") or tok.startswith(("--filter=", "--file="))
+                   for tok in passthrough)
+    m = _EXECUTED_RE.search(captured)
+    if not selected and m:
+        declared, nfiles = declared_assertions(project_path)
+        executed = int(m.group(1))
+        if declared:
+            line = f"Declared: {declared} assertion call site(s) across {nfiles} test file(s); {executed} executed"
+            if executed < declared:
+                line += (f" -- {declared - executed} written but not run this suite: a test that "
+                         "aborted before reaching them, or a branch nothing exercised (advisory)")
+            elif executed > declared:
+                line += " (loops or helpers run some sites more than once)"
+            print(line)
 
     sys.exit(exit_code)
 

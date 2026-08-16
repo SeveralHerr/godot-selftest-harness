@@ -393,6 +393,7 @@ Detect:
   "reach_aliases": {},
   "reach_headless_dirs": ["tools/"],
   "fps_min": 30,
+  "min_control_gap": 0,
   "orphan_max": 0,
   "orphan_growth_max": 20,
   "safe_area_inset": { "left": 0, "top": 0, "right": 0, "bottom": 0 },

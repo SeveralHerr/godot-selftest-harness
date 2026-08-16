@@ -199,8 +199,9 @@ holders see it, no relaunch);
 `touch press`/`release`/`drag`/`clear`/`list` (the only way to exercise multi-touch);
 `set-feature --touchscreen` (makes touch UI show itself on desktop — set it *before*
 the scene loads); `clear-nodes --via-method` (free nodes through the game's own removal
-path); `scripts-seen`, `new-uid`, `logs`, `harness-version` (also says when a newer
-harness is already on this machine than this project runs), `cmd <verb>`.
+path); `scripts-seen`, `new-uid`, `logs`, `harness-version [--client]` (also says when a newer
+harness is already on this machine than this project runs; `--client` never opens the
+bus — use it for a log entry's `harness:` field), `cmd <verb>`.
 
 #### Gotchas
 - **One command at a time, enforced.** One command file / one result file. Requests
@@ -299,7 +300,7 @@ six vanishes otherwise. "nothing" is the honest answer for a run that confirmed 
 already knew.
 
 The `[G-NNN]` line is required: ids are stable and never reused, `status:` is
-`open`/`fixed`/`wontfix`, `harness:` comes from `python tools/devtools.py harness-version`.
+`open`/`fixed`/`wontfix`, `harness:` comes from `python tools/devtools.py harness-version --client`.
 **Hitting a known gap again bumps its `seen:` count** — don't file a second entry. Quote
 real output; a gap without evidence can't be acted on. Entries here get upstreamed into
 `godot-selftest-harness` itself, so a gap logged here becomes a fixed feature for every

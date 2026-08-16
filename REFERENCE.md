@@ -205,7 +205,7 @@ Ids are stable and never reused. `status:` is `open`, `fixed` (plus `fixed-in: X
 `wontfix`; a gap whose fix shipped only in part stays **open**. `seen:` is bumped when a
 gap bites again — a `seen: 3` is the strongest signal this file can produce, and three
 separately-worded entries are the weakest. `harness:` records the installed version
-(`python tools/devtools.py harness-version`), so a gap logged before an upgrade is
+(`python tools/devtools.py harness-version --client`), so a gap logged before an upgrade is
 distinguishable from a regression after one.
 
 ### Getting gaps upstream
@@ -375,6 +375,7 @@ Lives at `res://addons/godot_selftest/devtools_config.json`.
 | `reach_aliases` | Object | `{}` | Credits a script reach can never observe to the observed script(s) that vouch for it: `{"world/tile_path_finder.gd": ["world/tile_scenes/bone_worker.gd"]}`. A `RefCounted` or `Resource` held as a plain field is never any node's script, so no amount of exercising it registers — and a permanently deflated reach number teaches readers to ignore the field. Credited files land in a **separate bucket** (`+N by alias`), never folded into `reached`: it is a claim your config makes, shown so a reader can disbelieve it. A voucher that was itself not reached credits nothing. |
 | `reach_headless_dirs` | Array | `["tools/"]` | Directories whose scripts only ever run under `godot --headless --script`. They cannot be any node's `script`, so reach scores them `headless_tools` (a sub-list of `not_applicable`) instead of counting them as misses — otherwise `lint_project.gd` and `run_tests.gd` are charged as unreached by the runs that just executed them. Matching is on whole path segments, so `tools/` never swallows `toolsy/`. Set to `[]` if your `tools/` genuinely holds game code. `addons/` is not covered here by design: `dev_tools.gd` is the autoload and resolves through `reached_implicit`. |
 | `fps_min` | int | `30` | Minimum acceptable FPS for `/verify` performance gate. |
+| `min_control_gap` | number | `0` | Minimum pixels between two **non-overlapping** interactive Controls before `validate_ui` / `findings` report `controls_touching` (0.34.0, plant-tower-defense:G-046). `0` keeps the old behaviour: `Rect2.intersects` is false for boxes sharing an edge, so "not overlapping" passed for "touching", and a Back button flush under a row read as broken while every gate said clean. Set to your design's gutter (e.g. `8`); overlapping pairs stay `interactive_overlap` and are never double-reported. |
 | `orphan_max` | int | `0` | Max tolerated **absolute** orphan nodes. Kept for compatibility only — `0` is unreachable in a real project (a fresh launch reports dozens). Gate on `orphan_growth_max` instead. |
 | `orphan_growth_max` | int | `20` | Max tolerated growth in orphan nodes vs. the startup baseline. This is the number that means "this change leaks". |
 | `safe_area_inset` | Object | `{left:0, top:0, right:0, bottom:0}` | Pixels trimmed off each viewport edge before `validate_ui` judges on-screen-ness. All-zero disables the check. |
@@ -440,6 +441,30 @@ Notable behaviors:
   scale of 0 stops the game while the bus keeps answering well-formed stale values;
   `0.04` used to echo as `1.0 -> 0.0` from a 1-dp print. The reply names the floor;
   the client prints three decimals.
+- **`harness-version --client` never opens the bus** (0.34.0, moving-in:G-055) — the
+  log-entry format wants the installed version on every turn, most of them with no
+  game running, and the bus-first path printed a `game not running` warning before
+  the answer every single time, training the reader to skip it. `--client` prints
+  the client's and the installed addon's versions from disk, `Game: not asked`, and
+  the machine-staleness line, exit 0 when they agree.
+- **`run_tests.py` prints `Declared: N assertion call site(s) …; M executed`**
+  (0.34.0, moving-in:G-054 / gh#27), advisory, suite level, skipped under
+  `--filter`/`--file`. Counted with `coverage_check.py`'s word-bounded `_T.assert*(`
+  pattern over comment/string-blanked source. It cannot know which sites a loop runs
+  twice, so it is a number to read, not a gate — but the reporter measured
+  written-vs-executed at 4/2, 2/1, 2/1 for three aborting methods against 2/2 for the
+  one genuine pass, and that separation is what the line is for. On a real 248-test
+  suite: `Declared: 2276 … 7962 executed (loops or helpers run some sites more than
+  once)`.
+- **`import_check.py` says what a crashed import left behind** (0.34.0,
+  plant-tower-defense:G-044, fourth sighting): on a non-zero exit with no findings it
+  reports how many finished artifacts `.godot/imported` gained across the run, how
+  many `.tmp` files it holds, and the last `[ N% ] reimport | file` line — the asset
+  the crash happened on. When it gained nothing, it names the legal way out: the
+  import cache is keyed on `res://` paths, identical across worktrees of one project,
+  so a sibling checkout's `.godot/imported`, `uid_cache.bin` and
+  `scene_groups_cache.cfg` seed this one. The single automatic retry (0.28.0) stays;
+  this covers the case it does not fix.
 - **`set_state` rebuilds a JSON array as the property's own typed Array** (0.32.0,
   plant-tower-defense:G-019). Assigning a plain `Array` to an `Array[StringName]`
   (or any typed array) property is a silent no-op in GDScript; the read-back already
@@ -1145,7 +1170,7 @@ Two subcommands make project verbs first-class without touching the CLI:
 
 - `list-commands` — sends `{action: "list_commands"}` and prints the discovered
   verbs (generic + project).
-- `harness-version` — prints the installed revision game-side and client-side. Exits 1
+- `harness-version [--client]` — prints the installed revision game-side and client-side; `--client` reads disk only and never opens the bus. Exits 1
   if they disagree, or if the running build predates the verb entirely (which names the
   fix: re-run `/scaffold-godot-harness`). Use it to fill the `harness:` field when
   logging a gap. **It answers with a cold bridge too**: with no game running it reports

@@ -50,8 +50,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-# harness-version: 0.33.0
-HARNESS_VERSION = "0.33.0"
+# harness-version: 0.34.0
+HARNESS_VERSION = "0.34.0"
 
 # Substrings that mean the import did not leave a parseable project behind. Every one
 # of these is taken from real captured output, not from guesswork:
@@ -160,6 +160,24 @@ def run_import(godot_path: Path, project_path: Path, log_path: Path, timeout: in
     return proc.returncode
 
 
+def _imported_artifacts(imported_dir):
+    """Finished (non-.tmp) files under .godot/imported, by name."""
+    if not imported_dir.is_dir():
+        return set()
+    return {f.name for f in imported_dir.iterdir() if f.is_file() and f.suffix != ".tmp"}
+
+
+_REIMPORT_RE = re.compile(r"\[\s*\d+%\s*\]\s*reimport\s*\|\s*(\S.*)")
+
+
+def _last_reimport_line(captured):
+    """The last `[ N% ] reimport | file` line, i.e. the asset the crash happened on."""
+    last = ""
+    for m in _REIMPORT_RE.finditer(captured):
+        last = m.group(1).strip()
+    return last
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Run Godot's --import and exit non-zero when the project no longer parses.",
@@ -195,6 +213,8 @@ def main():
     # present) is never retried: retrying would not fix broken code and could reorder a
     # cascade's line numbers between attempts.
     attempt = 0
+    imported_dir = project_path / ".godot" / "imported"
+    imported_before = _imported_artifacts(imported_dir)
     while True:
         attempt += 1
         try:
@@ -266,6 +286,26 @@ def main():
         print(f"Error: no parse/load errors in the output, but Godot exited {godot_rc} - "
               f"treat this as an import that did not complete. Full log: {log_path}",
               file=sys.stderr)
+        # plant-tower-defense:G-044 (4th sighting): the same importer crashed at the
+        # same .ogg on every attempt in a fresh worktree, and the retry above did
+        # nothing. Say what the crash left behind - a .godot/imported that gained no
+        # finished artifact is the signature - and name the legal way out: the
+        # import cache is keyed on res:// paths, identical across worktrees of one
+        # project, so a sibling checkout's .godot/imported (+ uid_cache.bin,
+        # scene_groups_cache.cfg) seeds this one.
+        after = _imported_artifacts(imported_dir)
+        gained = len(after - imported_before)
+        tmp_files = sum(1 for f in imported_dir.glob("*.tmp")) if imported_dir.is_dir() else 0
+        last = _last_reimport_line(captured)
+        print(f"  .godot/imported gained {gained} finished artifact(s) across this run"
+              f"{f' and holds {tmp_files} .tmp file(s)' if tmp_files else ''}"
+              f"{f'; the log ends at: {last}' if last else ''}.", file=sys.stderr)
+        if gained == 0:
+            print("  The import made no progress. If this is a worktree or fresh clone of a "
+                  "project that imports cleanly elsewhere, seed the cache from that checkout: "
+                  "copy its .godot/imported/, .godot/uid_cache.bin and "
+                  ".godot/scene_groups_cache.cfg here (the cache is keyed on res:// paths, "
+                  "so it is byte-identical across checkouts), then re-run.", file=sys.stderr)
         sys.exit(2)
 
     line_count = len(captured.splitlines())
