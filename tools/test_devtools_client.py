@@ -227,5 +227,56 @@ class ForeignProjectOwner(unittest.TestCase):
                 devtools._USERDATA_OVERRIDE = old
 
 
+class UserstateSnapshotCase(unittest.TestCase):
+    """plant-tower-defense:G-047: launch --snapshot-userstate / quit restore."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory(prefix="userstate-")
+        root = Path(self._tmp.name)
+        self.project = root / "project"
+        self.project.mkdir()
+        self.user_dir = root / "user"
+        self.user_dir.mkdir()
+        (self.user_dir / "highscore.save").write_text("orig", encoding="utf-8")
+        (self.user_dir / "keep.cfg").write_text("cfg", encoding="utf-8")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_round_trip_restores_and_removes_created(self):
+        m = devtools.userstate_snapshot(self.project, self.user_dir, ["*.save"])
+        self.assertEqual(m["files"], ["highscore.save"])
+        # the run mutates one and creates one
+        (self.user_dir / "highscore.save").write_text("mutated", encoding="utf-8")
+        (self.user_dir / "new.save").write_text("created", encoding="utf-8")
+        (self.user_dir / "keep.cfg").write_text("cfg2", encoding="utf-8")  # not snapshotted
+        r = devtools.userstate_restore(self.project, "test")
+        self.assertIsNotNone(r)
+        self.assertEqual((self.user_dir / "highscore.save").read_text(encoding="utf-8"), "orig")
+        self.assertFalse((self.user_dir / "new.save").exists(), "created file must be removed")
+        self.assertEqual((self.user_dir / "keep.cfg").read_text(encoding="utf-8"), "cfg2",
+                         "a file outside the patterns is never touched")
+        self.assertFalse(devtools._userstate_dir(self.project).exists(), "snapshot consumed")
+        self.assertIsNone(devtools.userstate_restore(self.project, "again"), "idempotent")
+
+    def test_no_snapshot_is_a_quiet_none(self):
+        self.assertIsNone(devtools.userstate_restore(self.project, "nothing"))
+
+
+class SceneTreeCountCase(unittest.TestCase):
+    """moving-in:G-056: the trailing N node(s) line counts nodes, not JSON lines."""
+
+    def test_counts_nodes_not_lines(self):
+        data = {"root": {"name": "Sfx", "path": "/root/Sfx", "type": "Node",
+                         "children": [
+                             {"name": "SfxAmbient_rain", "path": "/root/Sfx/SfxAmbient_rain",
+                              "type": "AudioStreamPlayer", "children": []},
+                             {"name": "Other", "path": "/root/Sfx/Other", "children": []}]}}
+        self.assertEqual(devtools._count_tree_nodes(data), 3)
+        # a grep -ci ambient over the JSON would say 2 for the single node above
+        text = json.dumps(data, indent=2)
+        self.assertEqual(sum(1 for l in text.splitlines() if "ambient" in l.lower()), 2)
+
+
 if __name__ == "__main__":
     unittest.main()

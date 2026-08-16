@@ -6242,7 +6242,7 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   shared `.godot/` import cache), but this time the crash was a hard segfault
   rather than a truncated cache, and it happened on the FIRST import call of
   the session rather than after `/verify` was already mid-run.
-  - [plant-tower-defense:G-044] status: fixed | fixed-in: 0.29.0, 0.34.0 (4th sighting: crash-progress readout + sibling-cache hint) | seen: 4 | harness: 0.25.0 | source: plant-tower-defense 2026-08-16
+  - [plant-tower-defense:G-044] status: fixed | fixed-in: 0.29.0, 0.34.0, 0.35.0 (5th sighting: retry while progressing, up to 4) | seen: 5 | harness: 0.25.0 | source: plant-tower-defense 2026-08-16
   - Improvement: `/verify`'s import step retrying once on a non-zero exit
     before surfacing failure would turn "verified nothing, investigate a
     crash" into "verified cleanly, noted a transient" — the same shape as the
@@ -6481,7 +6481,7 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   pass, the number it would need to say "this method contains 6 assert calls and
   executed 3". That comparison is the abort detector #27 asks for, available without
   attributing stderr to a method at all.
-  - [moving-in:G-054] status: fixed | fixed-in: 0.28.0 | seen: 2 | harness: 0.21.0 | source: moving-in 2026-08-16 | also: the advisory Declared: line it proposed shipped in 0.34.0 once the reporter measured 4/2, 2/1, 2/1 vs 2/2 | dup-of: gh#27 / moving-in:G-050 (same abort-detection ask; shipped as run_tests.py's stderr-scan wrapper rather than the per-method assertion-count heuristic proposed here - the wrapper is exact where the count is advisory, and it was already in 0.28.0 before this copy was pooled)
+  - [moving-in:G-054] status: fixed | fixed-in: 0.28.0 | seen: 3 | harness: 0.21.0 | source: moving-in 2026-08-16 | also: the advisory Declared: line it proposed shipped in 0.34.0 once the reporter measured 4/2, 2/1, 2/1 vs 2/2 | dup-of: gh#27 / moving-in:G-050 (same abort-detection ask; shipped as run_tests.py's stderr-scan wrapper rather than the per-method assertion-count heuristic proposed here - the wrapper is exact where the count is advisory, and it was already in 0.28.0 before this copy was pooled)
   - Improvement: reuse the `[VACUOUS]` source scan to count `_T.assert_*` occurrences per
     method, and report `[PARTIAL] method (3 of 6 assertions executed)` when a passing
     method runs fewer than it contains. Imperfect — loops and early returns legitimately
@@ -6939,3 +6939,74 @@ bridge: min_control_gap=4 names the planted flush pair as controls_touching (0px
 apart); 0 reports none; pair removed`; a default run afterwards for the stage-4
 Declared control — OK, `7 … 6 executed -- 1 written but not run`. `harness-version
 --client` and `run_tests.py` exercised against `plant-tower-defense` live.
+
+## 2026-08-16 - Upstreamed 1 open gap(s) from plant-tower-defense (harness 0.18.0, 0.19.0, 0.21.0, 0.23.0, 0.24.0, 0.25.0, 0.32.0)
+
+Pooled by `tools/upstream_gaps.py` from `C:\Users\gotmi\Documents\GitHub\plant-tower-defense\log-devtools.md`. Gap text is the project's,
+verbatim; only the id line is rewritten (qualified with the project name so
+ids from two projects cannot collide, plus a `source:` back-pointer).
+
+- Gap: **`--isolated` isolates the bus, so a live check that exercises a persisted
+  setting has to write through the developer's real save and put it back by hand.**
+  Reading staged milestones back was safe (`set-state /root/RunConfig
+  earned_milestones` calls no `_save()`), but exercising the colourblind toggle at
+  all goes through `set_colorblind_safe()`, which writes `user://highscore.save` on
+  every press. The workaround was to read the original values first
+  (`colorblind_safe: false`, `earned_milestones: {}`), stage, screenshot, then press
+  the key an even number of times and re-read to confirm — a discipline nothing in
+  the harness enforces and which a crash mid-check would have skipped, leaving the
+  developer's own save altered by a verification run. (The 2026-08-16 entry above
+  files the *merge* half of this as "not a harness gap"; this is the other half —
+  not two checkouts disagreeing, one checkout mutating state it only meant to read.)
+  - [plant-tower-defense:G-047] status: fixed | fixed-in: 0.35.0 | seen: 1 | harness: 0.32.0 | source: plant-tower-defense 2026-08-16
+  - Improvement: a `--snapshot-userstate` flag on `launch` that copies `user://*.save`
+    aside and restores it on `quit` (or on the next launch, if the game died) would
+    make a live check that touches persisted settings safe by default rather than by
+    convention. It needs no `user://` isolation to work.
+
+## 2026-08-16 - Upstreamed 1 open gap(s) from moving-in (harness 0.11.0, 0.16.0, 0.19.0, 0.21.0, 0.31.0, 0.33.0 (cache) / 0.31.0 (vendored))
+
+Pooled by `tools/upstream_gaps.py` from `C:\Users\gotmi\Documents\GitHub\moving-in\log-devtools.md`. Gap text is the project's,
+verbatim; only the id line is rewritten (qualified with the project name so
+ids from two projects cannot collide, plus a `source:` back-pointer).
+
+- Gap: **[G-056] — `scene-tree` output cannot be counted, and the obvious way to count
+  it is wrong.** `scene-tree --root /root/Sfx --depth 1 | grep -ci ambient` returns 2
+  for a single node, because each node prints both a `"name"` and a `"path"` line. The
+  authoritative answer needs `find-nodes --class AudioStreamPlayer --where
+  name=SfxAmbient_rain`, which prints `1 node(s) matched`. That is a fine workaround
+  once known, but the failure is silent and reads as a real duplicate — the exact thing
+  I was testing for, since a stacked audio loop is what `play_ambient()` guards against.
+  - [moving-in:G-056] status: fixed | fixed-in: 0.35.0 | seen: 1 | harness: 0.33.0 (cache) / 0.31.0 (vendored) | source: moving-in 2026-08-16
+  - Improvement: have `scene-tree` print a trailing `N node(s)` denominator the way
+    `find-nodes` already does. Every other verb in this harness ends with a count and
+    that is the house style; this one leaves the reader to derive it from JSON, and the
+    derivation has a trap in it.
+
+## 2026-08-16 — 0.35.0: loop tick three — three new sightings, three fixes
+
+Same discipline as the last tick: no new issues, two logs moved, act on what is new.
+
+- **[plant-tower-defense:G-047 — fixed] `launch --snapshot-userstate [GLOB ...]`**
+  copies matching `user://` files (default `*.save`) aside; `quit` restores them and
+  removes files the run created under those globs; a stale snapshot from a game that
+  died is restored by the next `launch`. Round-trip unit-tested (mutated, created and
+  untouched-outside-pattern files all behave). `--isolated` never isolated `user://`
+  and this is the half of that limit a check can actually be made safe against.
+- **[moving-in:G-056 — fixed] `scene-tree` prints `N node(s) in this subtree`** on
+  stderr; unit test pins that the JSON line-count trap (2 lines per node) is real.
+- **[plant-tower-defense:G-044 — 5th sighting] `import_check.py`** retries a crashing
+  `--import` while it still makes progress (artifacts grew or the last reimport line
+  moved), up to 4 attempts; the observed failure needed two retries and the cap was one.
+
+Not done: G-054 seen 3 (0.33.0 cache) — the `Declared:` line shipped in 0.34.0, one
+release after that sighting's cache; nothing further. G-028 3rd sighting — 0.29.0's
+self-report API is the answer and the project now runs 0.32.0.
+
+- Gap: no new gap this turn.
+
+**Validation run this turn:** `record_version.py --record` then `--check` OK at 0.35.0
+(14 files, 56 verbs + 58 CLI). `unittest discover -s tools` — 49 OK (3 new).
+`check_templates.py` — OK, all stages (client-side changes only; no bus verb touched,
+so the default run is the right gate and `--full` was run for 0.34.0 an hour ago on
+an identical `dev_tools.gd`).

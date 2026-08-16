@@ -50,8 +50,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-# harness-version: 0.34.0
-HARNESS_VERSION = "0.34.0"
+# harness-version: 0.35.0
+HARNESS_VERSION = "0.35.0"
 
 # Substrings that mean the import did not leave a parseable project behind. Every one
 # of these is taken from real captured output, not from guesswork:
@@ -160,6 +160,10 @@ def run_import(godot_path: Path, project_path: Path, log_path: Path, timeout: in
     return proc.returncode
 
 
+# Ceiling on --import attempts when each crash still made progress (G-044).
+IMPORT_MAX_ATTEMPTS = 4
+
+
 def _imported_artifacts(imported_dir):
     """Finished (non-.tmp) files under .godot/imported, by name."""
     if not imported_dir.is_dir():
@@ -215,6 +219,7 @@ def main():
     attempt = 0
     imported_dir = project_path / ".godot" / "imported"
     imported_before = _imported_artifacts(imported_dir)
+    progress_marker = (len(imported_before), "")
     while True:
         attempt += 1
         try:
@@ -236,12 +241,28 @@ def main():
 
         crashed_with_no_findings = (
             godot_rc != 0 and captured.strip() and not scan_output(captured))
-        if crashed_with_no_findings and attempt == 1:
-            print(f"Note: godot --import exited {godot_rc} with no recognizable parse/load "
-                  f"error in its output - a crash signature (plant-tower-defense:G-044), not "
-                  f"a reported failure. Retrying once before treating this as unverified. "
-                  f"Crashed attempt's log: {log_path}", file=sys.stderr)
-            continue
+        # plant-tower-defense:G-044, 5th sighting: one retry was not enough - the
+        # same importer crashed twice at the same .ogg and a THIRD --import wrote
+        # the cache. So: retry while a retry is still making progress (the count
+        # of finished artifacts under .godot/imported grew, or the last reimport
+        # line moved), up to IMPORT_MAX_ATTEMPTS; a crash that gained nothing
+        # twice running is reported, not retried forever.
+        if crashed_with_no_findings and attempt < IMPORT_MAX_ATTEMPTS:
+            gained_now = len(_imported_artifacts(imported_dir))
+            last_line = _last_reimport_line(captured)
+            progressed = attempt == 1 or gained_now > progress_marker[0] \
+                or (last_line and last_line != progress_marker[1])
+            progress_marker = (gained_now, last_line)
+            if progressed:
+                print(f"Note: godot --import exited {godot_rc} with no recognizable parse/load "
+                      f"error in its output - a crash signature (plant-tower-defense:G-044), not "
+                      f"a reported failure. Retrying (attempt {attempt + 1} of "
+                      f"{IMPORT_MAX_ATTEMPTS}; {gained_now} finished artifact(s) so far"
+                      f"{f', last at {last_line}' if last_line else ''}). "
+                      f"Crashed attempt's log: {log_path}", file=sys.stderr)
+                continue
+            print(f"Note: attempt {attempt} crashed again with no new artifact and the same "
+                  f"last file ({last_line or '?'}); not retrying further.", file=sys.stderr)
         break
 
     # No output at all is not a clean run -- it is an unverified one. This is the shape
