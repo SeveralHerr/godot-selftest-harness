@@ -5962,3 +5962,186 @@ correctly, once clean after a verified restore. The parallel-safety claim
 itself was proved outside `check_templates.py`, against a real project with
 an established import cache, before any of this turn's code existed —
 the empirical work, not the unit test, is what makes the claim trustworthy.
+
+## 2026-08-16 - Upstreamed 7 open gap(s) from moving-in (harness 0.11.0, 0.16.0, 0.19.0, 0.21.0)
+
+Pooled by `tools/upstream_gaps.py` from `C:\Users\gotmi\Documents\GitHub\moving-in\log-devtools.md`. Gap text is the project's,
+verbatim; only the id line is rewritten (qualified with the project name so
+ids from two projects cannot collide, plus a `source:` back-pointer).
+
+- Gap: **no verb reports what the placement ray actually HIT** — `unpack_aim` returns
+  the resolved placement (`gx`, `gz`, `y`, `reason`) but never the collider, the hit
+  point or the hit normal. Every wrong conclusion above came from inferring the hit
+  backwards out of the placement. Diagnosing "why is this refused" means knowing which
+  body answered, and `raycast` cannot help because it takes world coordinates and the
+  question is about the ray the game itself casts from its own camera.
+  - Workaround: reconstructed the ray by hand from camera `global_position`, pitch and
+    `reach = 3.5 * KIT_SCALE`, then compared against `aabb`. That is where the -15
+    misreading came from.
+  - [moving-in:G-047] status: open | seen: 1 | harness: 0.21.0 | source: moving-in 2026-08-16
+  - Improvement: add `collider_path`, `hit_position`, `hit_normal` and `surface_kind` to
+    `unpack_aim`'s `data`. Four lines in the handler; it already holds the hit dict.
+
+- Gap: **`--filter` silently takes no comma list.** `--filter test_a,test_b` matched
+  nothing and exited 2 (`Selected: 0 of 245 discovered`). The exit code is honest and
+  the denominator made it obvious, so this cost one run rather than a wrong conclusion —
+  but a selector naming two real tests reads as though it should work.
+  - [moving-in:G-048] status: open | seen: 1 | harness: 0.21.0 | source: moving-in 2026-08-16
+  - Improvement: split the filter on `,` and match any; or reject a filter containing a
+    comma with "one pattern per run" rather than matching nothing.
+
+- Gap: **`cmd mouse_look` cannot move the camera while a menu is up**, and the game
+  boots to its title screen, so the first three verbs of any session act on a house
+  nobody is standing in. The verb itself was exemplary — it reported "Camera did NOT
+  move — the motion event was delivered and ignored" instead of returning success — but
+  `devtools_config.json` has an `entry_hook` for exactly this and it is not set.
+  - [moving-in:G-049] status: open | seen: 1 | harness: 0.21.0 | source: moving-in 2026-08-16
+  - Improvement: set `entry_hook` to the title screen's start button so `launch` lands
+    in the playable scene. Project-side fix, but the symptom is generic enough that
+    `ping` reporting "a modal/menu layer is up" alongside `tree is PAUSED` would have
+    named it in one call.
+
+- Gap: **the runner reports `[PASS]` for a test that emitted a SCRIPT ERROR.** This is
+  the highest-value gap logged so far and it is not project-specific. `Total: 249 |
+  Passed: 249 | ALL TESTS PASSED` was true of a run in which two methods aborted
+  mid-way. `[VACUOUS]` does not catch it, because it only fires when a test executed
+  *no* assertions — an abort partway through has already executed some, which is
+  exactly the dangerous case.
+  - Workaround: `grep -c "SCRIPT ERROR"` on the redirected output, by hand, every run.
+    The full suite has had 2 for at least this whole cycle and nobody noticed
+    (`moving-in-mgr`).
+  - [moving-in:G-050] status: fixed | fixed-in: 0.27.0 | seen: 2 | harness: 0.21.0 | source: moving-in 2026-08-16 | dup-of: gh#27 (same defect, filed as a GitHub issue and fixed the same day this project-log copy was pooled)
+  - Improvement: count errors emitted between a test method's start and end, attribute
+    them to that method, and mark it `[ABORTED]` rather than `[PASS]`. Failing that,
+    a single summary line — `Errors: N emitted during the suite` — next to
+    `Assertions: N executed`, gating the exit code on it. The denominator philosophy
+    this harness already has, applied to the one number it does not print.
+
+- Gap: **no `--filter` for a whole test SCRIPT, only for method names.** Attributing the
+  two script errors meant bisecting by guessing distinctive method-name substrings,
+  because there is no `--file test_unpack_director.gd`. With one, the same attribution
+  is two runs instead of eight.
+  - Workaround: `--filter test_operable_placed_fires_once`, chosen by reading the file
+    first to find a substring unique to it.
+  - [moving-in:G-051] status: open | seen: 1 | harness: 0.21.0 | source: moving-in 2026-08-16
+  - Improvement: accept a path or basename as a selector and report it in the
+    `Selected: N of M` line the same way, so a selector matching one file is still
+    visibly a subset.
+
+- Gap: **no verb prints a collision shape's actual geometry.** `aabb` gives the merged
+  visual bounds and `node-bounds` the screen rect, but nothing answers "what horizontal
+  surfaces does this collider actually have, and at what heights" — which is the only
+  question that matters for placement. Getting the five planes above required
+  instrumenting a test with a deliberately-failing assertion to smuggle the numbers out
+  in a failure message.
+  - Workaround: `_T.assert_true(false, "DBG %s" % dbg)` inside a temporary copy of a
+    test, then `grep -o "DBG.*"`.
+  - [moving-in:G-052] status: open | seen: 2 | harness: 0.21.0 | source: moving-in 2026-08-16
+  - Improvement: a `collider-planes --node PATH` verb reporting each shape's type and,
+    for a mesh shape, its up-facing planes as `{y, rect}` — the placement question in
+    one call. Generic: every 3D game that rests things on things needs it, and the
+    existing `aabb` verb already has the traversal.
+
+- Gap: **no gap on the aim verb — [G-047] is closed and the fix was exactly the four
+  - [moving-in:auto-de695e] status: open | seen: 1 | source: moving-in 2026-08-16
+  lines predicted.** Recording that explicitly: a gap filed one turn, fixed the next,
+  at the estimated size, is the loop working, and it is worth one line saying so rather
+  than only ever logging what hurt.
+
+## 2026-08-16 — 0.28.0: a false pass and a silent no-op, both from the same day's reports
+
+Two fresh GitHub issues (#27, #28) arrived within 20 minutes of each other, both
+independently reproduced by `moving-in` in its own log the same day (`G-050` for
+#27, no separate report for #28's two findings). No new master drift to land
+first this cycle.
+
+**[gh#27 / moving-in:G-050] `run_tests.gd` reports `[PASS]` for a test that
+aborts mid-method after already running a real assertion.** The third member of
+a family this repo already knows: `[VACUOUS]` catches zero assertions, this
+catches SOME-then-abort, and neither the return value nor the exit code can
+carry the signal — Godot coerces an aborted coroutine's return to the declared
+type's default (`""` for `-> String`), byte-identical to a genuine pass.
+Reproduced exactly before fixing anything (H-033): a planted test with one real
+`_T.assert_true` before a `float + null` runtime error, run directly against
+`run_tests.gd`, printed `[PASS]` and `ALL TESTS PASSED`, exit 0 — confirmed the
+bug is real and not a misreading of the report.
+
+Shipped `tools/run_tests.py`, a new wrapper (`import_check.py`'s pattern:
+GDScript cannot observe its own stderr after the fact, so the fix has to be an
+external process capture). Runs the suite as a subprocess, prints
+`run_tests.gd`'s own output unchanged, counts `SCRIPT ERROR`/`USER SCRIPT
+ERROR` lines, and overrides a reported-clean exit when that count is nonzero.
+Added to `SHIPPED_FILES` so the scaffolder installs it.
+
+**Two mistakes caught by the harness's own gates while building this, worth
+recording:**
+1. The first draft had a duplicate, independently-computed exit-code decision
+   in the text-output branch (`sys.exit(1 if exit_code != 2 else 2)` inside
+   `if findings:`) that did not actually read the `exit_code` variable the
+   mutation targeted — so the FIRST mutation test (forcing `exit_code`'s
+   computation to never fail) passed clean, which would have shipped a
+   mutation-tested-but-not-actually-tested control. Caught by noticing the
+   mutation had no effect rather than trusting the green run; fixed by
+   consolidating to one `sys.exit(exit_code)` at the end of `main()`, so every
+   branch above it only decides what to print.
+2. `check_run_tests_py`'s planted-defect control initially failed for an
+   unrelated reason (`_T` referenced with no `var _T` declaration, then `:=`
+   on an untyped call) before it ever tested the real thing — both artifacts
+   of iterating the plant against a live Godot rather than assuming the
+   GDScript would just work, which is exactly why check_templates.py's own
+   rule is to run every planted defect, not just write it.
+
+**[gh#28] two defects in `launch`, worse first:**
+1. **`launch -- --devtools-session X` silently never wired the session.**
+   `cmd_launch` appended bare passthrough straight onto the engine command
+   line with no Godot `--` separator ahead of it — two top-level tokens Godot
+   does not recognize, silently ignored, and every later `ping --session X`
+   timed out reading exactly like a crashed game. Fixed by partitioning
+   passthrough into godot-native and `--devtools-`-prefixed tokens and routing
+   the latter after Godot's own `--`, matching what `--isolated`/top-level
+   `--session` already built correctly.
+
+   **This fix alone was not enough, and the reason is worth recording.** The
+   pre-launch "a live pid already owns this bus" refusal reads the *global*
+   `_SESSION` variable to pick which owner file to check, and a bare
+   passthrough session left that variable empty for the whole function — so
+   with the command-line fix alone, `launch -- --devtools-session X` while a
+   *different*, unrelated default-session instance was alive would still
+   refuse, reading the wrong owner file as a live conflict. Caught by
+   `check_launch_session_passthrough`'s own first run inside `check_templates.py`
+   (which launches its main scratch instance under the default session before
+   this control runs) — a scratch-project false-negative that a solo manual
+   test against a single quiet instance had not exposed. Fixed by parsing the
+   passthrough and adopting a bare `--devtools-session` value into the global
+   `_SESSION` *before* the owner pre-check runs, not after — one parse instead
+   of the three separate ones the first draft had, which is also what let the
+   two drift apart in the first place.
+
+   Verified end-to-end against `plant-tower-defense` (a real project, not the
+   scratch fixture): before the fix, `launch -- --devtools-session hudwork`
+   timed out; after, `bus answered: pid N` and `ping --session hudwork`
+   succeeded, including with another live default-session instance running
+   concurrently.
+
+2. **`CLAUDE.md`'s `GODOT_USERDATA` claim was false.** Godot has no
+   `--user-data-dir` flag and honours no `GODOT_USERDATA` env var — only
+   `devtools.py` reads it, to decide where *it* polls, and only after
+   something else (a per-worker `project.godot`'s `custom_user_dir_name`) has
+   actually moved where the game writes. `REFERENCE.md`'s own worked example
+   (`GODOT_USERDATA=/tmp/run-a godot --path . ...`) was the same bug at one
+   remove: setting it before launching Godot does nothing, so the client would
+   have polled an empty directory while the game wrote to the real one — the
+   exact silent-timeout shape this whole issue is about. Reworded
+   `templates/CLAUDE.harness.md` and `REFERENCE.md` to state the true
+   limitation and lead with the one mechanism that actually works.
+
+**Validation run this turn:** `python tools/record_version.py --record` then
+`--check` — OK at 0.28.0, 14 shipped files (up from 13 — `run_tests.py`).
+`python -m unittest discover -s tools` — 35 tests OK. `python
+tools/check_templates.py` — OK, all stages including two new controls
+(`check_run_tests_py`, `check_launch_session_passthrough`), each mutation-tested
+twice (the first mutation test for `run_tests.py` didn't fail as designed —
+see mistake 1 above — the corrected version does). `gh#27`'s abort-detection
+and `gh#28`'s launch fix were both additionally verified live against
+`plant-tower-defense` before being considered done, per this repo's own
+"reproduce before implementing" discipline (H-033).

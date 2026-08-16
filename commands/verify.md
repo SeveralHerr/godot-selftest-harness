@@ -66,7 +66,8 @@ The installed harness can silently diverge from the plugin's templates — a pro
 # `cmp` report every installed file as drifted when not one byte of content differs.
 DRIFTED=""
 for f in addons/godot_selftest/dev_tools.gd addons/godot_selftest/scene_validator.gd \
-         tools/devtools.py tools/lint_project.gd tools/run_tests.gd tools/eval.gd \
+         tools/devtools.py tools/lint_project.gd tools/run_tests.gd tools/run_tests.py \
+         tools/eval.gd tools/capture.gd \
          tools/import_check.py tools/name_check.py tools/check_devtools_log.py \
          tools/upstream_gaps.py tools/verify_ledger.py tools/coverage_check.py; do
   src="${CLAUDE_PLUGIN_ROOT}/templates/$f"
@@ -236,11 +237,19 @@ Finding keys are `file|rule|subject` with no line numbers, so a finding survives
 The orphan scan runs by default (0.21.0+, gh#11) and prints `Orphans: N of M public function(s) across S script(s) have no live reference` — a public function whose only callers outside its own file live under `test_dir`, or nowhere. It is a heuristic (advisory only, never fails the run) but it catches the case where both gates say "clean" and the system is simply never invoked. **Read its `WARN:` lines for any method the diff added**: a new public method with no live reference is a feature that cannot run. `-- --no-orphans` skips it.
 
 ```bash
-"$GODOT_BIN" --headless --path . --script res://tools/run_tests.gd > tests.log 2>&1; echo "exit=$?"
+"$PY" tools/run_tests.py --godot "$GODOT_BIN" > tests.log 2>&1; echo "exit=$?"
 cat tests.log
 ```
 
-`run_tests.gd` auto-discovers tests under the configured `test_dir`. Stop if any tests fail.
+`run_tests.gd` auto-discovers tests under the configured `test_dir`; `run_tests.py`
+wraps it and is the form to run, not `run_tests.gd` directly (0.27.0, gh#27). A test
+that hits a runtime error part-way through is reported `[PASS]` by `run_tests.gd`
+itself — Godot coerces the aborted coroutine's return to `""`, indistinguishable from a
+genuine pass, and `[VACUOUS]` only catches a test that ran *zero* assertions, not one
+that ran some and then aborted. `run_tests.py` captures the suite's real stdout+stderr,
+counts `SCRIPT ERROR`/`USER SCRIPT ERROR` lines, and fails the run when that count is
+nonzero even if `run_tests.gd` reported `ALL TESTS PASSED` — printed as
+`Errors: N emitted during the suite`. Stop if any tests fail, including on that line.
 
 **Read the `Suite:` line, and report it.** Every run prints `Suite: N test script(s) in res://test/unit` alongside `Assertions: M executed`. That pair is the checking previous sessions left behind for this one — say it out loud in your Phase 1 report (`inherited suite: 4 scripts, 61 assertions`), because it is what tells you whether to *extend* an existing selftest or start the project's first one. A project sitting at `Suite: 1` with only the seeded sanity checks has no accumulated coverage, and every session that writes a throwaway check instead of adding here keeps it at 1 forever.
 
@@ -261,7 +270,7 @@ It opens no project and writes nothing to `.godot/`, so it is safe alongside oth
 **Narrowing the run.** `--filter NAME` matches a test's method name **or its script filename**; `--file NAME` matches the script path (bare name, filename, or substring). They combine with AND:
 
 ```bash
-"$GODOT_BIN" --headless --path . --script res://tools/run_tests.gd -- --file test_player --filter damage
+"$PY" tools/run_tests.py --godot "$GODOT_BIN" -- --file test_player --filter damage
 ```
 
 A selector that matches nothing is **exit 2**, not a pass: `SELECTED NOTHING - filter 'spawner' selected 0 of 111 discovered test(s)`. Before this, a filter that hit nothing skipped the whole suite and printed `Total: 0 | Passed: 0 | Failed: 0` with exit 0 — indistinguishable from a clean run, and work shipped on the strength of it.

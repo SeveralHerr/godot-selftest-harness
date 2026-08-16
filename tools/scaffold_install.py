@@ -79,6 +79,7 @@ SHIPPED_FILES = [
     "addons/godot_selftest/scene_validator.gd",
     "tools/lint_project.gd",
     "tools/run_tests.gd",
+    "tools/run_tests.py",
     "tools/eval.gd",
     "tools/capture.gd",
     "tools/devtools.py",

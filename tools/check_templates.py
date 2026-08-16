@@ -1164,6 +1164,7 @@ def stage_runners(godot, scratch):
     if ok:
         ok = stage_vacuous_control(godot, scratch) and ok
         ok = stage_runner_controls(godot, scratch) and ok
+        ok = check_run_tests_py(godot, scratch) and ok
         ok = stage_shader_control(godot, scratch) and ok
         ok = stage_capture(godot, scratch) and ok
     return ok
@@ -1451,6 +1452,82 @@ def stage_runner_controls(godot, scratch):
     finally:
         hidden.rename(cache)
     return ok
+
+
+def check_run_tests_py(godot, scratch):
+    """run_tests.py must fail a suite run_tests.gd itself reports as a clean pass,
+    when a test aborted mid-method after already running an assertion (gh#27 /
+    moving-in:G-050, reported independently by two projects the same day).
+
+    The planted defect is the exact reported shape, not a simplified stand-in: one
+    real assertion runs first (so [VACUOUS] - which only fires on ZERO assertions -
+    cannot catch it either), THEN a runtime error aborts the method. Godot coerces
+    the aborted coroutine's return to "" for a `-> String` test, indistinguishable
+    from a genuine pass by the return value alone - confirmed against 0.25.0's
+    run_tests.gd, which reports this test [PASS] and the suite ALL TESTS PASSED,
+    exit 0. Only run_tests.py's independent stdout+stderr capture sees the
+    SCRIPT ERROR line neither the return value nor the exit code carries.
+    """
+    planted = scratch / "test" / "unit" / "test_abort_after_assertion_control.gd"
+    planted.write_text(
+        "extends RefCounted\n"
+        "var _T\n"
+        "\n"
+        "func test_aborts_after_one_real_assertion() -> String:\n"
+        "\tvar err: String = _T.assert_true(true, \"first assertion runs fine\")\n"
+        "\tif err != \"\":\n"
+        "\t\treturn err\n"
+        "\tvar x: float = 1.0\n"
+        "\tvar y = null\n"
+        "\tvar bad = x + y  # runtime error: aborts here, AFTER a real assertion ran\n"
+        "\treturn _T.assert_true(false, \"never reached\")\n",
+        encoding="utf-8")
+    try:
+        # Negative control, direct engine call: prove run_tests.gd itself is fooled
+        # (H-035) - without this, a run_tests.py that always exits 1 would look
+        # identical to one that actually caught something.
+        direct = run_godot(godot, scratch,
+                           ["--script", "res://tools/run_tests.gd",
+                            "--", "--filter", "test_aborts_after_one_real_assertion"])
+        if direct.returncode != 0 or "ALL TESTS PASSED" not in direct.stdout \
+                or "[PASS] test_aborts_after_one_real_assertion" not in direct.stdout:
+            return fail("negative control failed - run_tests.gd itself must report "
+                        "this planted abort as a clean [PASS]/ALL TESTS PASSED "
+                        "(exit 0) for the wrapper's catch to mean anything. Got exit "
+                        "%d:\n%s" % (direct.returncode, direct.stdout))
+
+        wrapped = subprocess.run(
+            [sys.executable, str(scratch / "tools" / "run_tests.py"),
+             "-p", str(scratch), "--godot", str(godot),
+             "--", "--filter", "test_aborts_after_one_real_assertion"],
+            capture_output=True, text=True, timeout=GODOT_TIMEOUT)
+        if wrapped.returncode != 1:
+            return fail("run_tests.py must exit 1 over a reported-clean abort, got %d:\n%s"
+                        % (wrapped.returncode, wrapped.stdout))
+        if "Errors: 1 emitted during the suite" not in wrapped.stdout:
+            return fail("run_tests.py must report exactly 1 error emitted:\n%s"
+                        % wrapped.stdout)
+        if "Invalid operands" not in wrapped.stdout:
+            return fail("run_tests.py must quote the actual SCRIPT ERROR line:\n%s"
+                        % wrapped.stdout)
+    finally:
+        planted.unlink(missing_ok=True)
+
+    # Clean-suite control: no planted defect -> the wrapper must not cry wolf.
+    clean = subprocess.run(
+        [sys.executable, str(scratch / "tools" / "run_tests.py"),
+         "-p", str(scratch), "--godot", str(godot),
+         "--", "--filter", "test_arithmetic_sanity"],
+        capture_output=True, text=True, timeout=GODOT_TIMEOUT)
+    if clean.returncode != 0 or "Errors: 0 emitted" not in clean.stdout:
+        return fail("run_tests.py on a genuinely clean, unfiltered-defect run must "
+                    "exit 0 and report 0 errors, got %d:\n%s"
+                    % (clean.returncode, clean.stdout))
+
+    print("stage 4 tests: run_tests.py catches a test that aborts AFTER a real "
+          "assertion already ran (invisible to both the return value and [VACUOUS]) "
+          "-- run_tests.gd itself reports it clean; the wrapper does not")
+    return True
 
 
 def stage_capture(godot, scratch):
@@ -2702,6 +2779,51 @@ def check_look_at(client, scratch):
     return True
 
 
+def check_launch_session_passthrough(godot, scratch):
+    """`devtools.py launch -- --devtools-session X` must actually wire the session
+    (gh#28), launching a genuinely separate instance from the one stage 5 already
+    has running under the default (no-session) bus.
+
+    Before the fix, a bare `--devtools-session X` passthrough token reached the
+    engine command line with no Godot `--` separator ahead of it - two unrecognized
+    top-level tokens, silently ignored, so `ping --session X` timed out and read
+    exactly like a crashed or misconfigured game. `launch` itself also has to learn
+    the session from the same passthrough (not just the game): its own post-launch
+    poll and the launch ledger otherwise keep looking at the default bus even once
+    the game side is wired correctly - a quieter version of the same bug, invisible
+    from the CLI's own reported "success".
+    """
+    py = str(scratch / "tools" / "devtools.py")
+    session = "checktest_gh28"
+    try:
+        launch = subprocess.run(
+            [sys.executable, py, "-p", str(scratch), "launch", "--godot", str(godot),
+             "--", "--devtools-session", session],
+            capture_output=True, text=True, timeout=GODOT_TIMEOUT)
+        if launch.returncode != 0 or "bus answered" not in launch.stdout:
+            return fail("launch -- --devtools-session %s must succeed and confirm the "
+                        "bus answered before printing a follow-up command, got exit %d:\n%s"
+                        % (session, launch.returncode, launch.stdout))
+        if session not in launch.stdout:
+            return fail("launch's own output must name the session it actually wired:\n%s"
+                        % launch.stdout)
+
+        ping = subprocess.run(
+            [sys.executable, py, "-p", str(scratch), "--session", session, "ping"],
+            capture_output=True, text=True, timeout=30)
+        if ping.returncode != 0 or session not in ping.stdout:
+            return fail("ping --session %s after launch must succeed and echo that "
+                        "session, got exit %d:\n%s" % (session, ping.returncode, ping.stdout))
+    finally:
+        subprocess.run([sys.executable, py, "-p", str(scratch), "--session", session,
+                        "quit", "--kill"], capture_output=True, text=True, timeout=30)
+
+    print("stage 5 bridge: launch -- --devtools-session wires the session correctly "
+          "(bare passthrough, no --isolated/--session) - the game answers, and launch's "
+          "own poll finds it")
+    return True
+
+
 def check_dispatch_reentrancy(client, scratch):
     """A command arriving mid-await must be DEFERRED, not run on top (H-038).
 
@@ -2911,6 +3033,7 @@ def stage_bridge(godot, scratch, full):
         ok = check_reload(client, scratch) and ok
         ok = check_paused_bridge(client, scratch) and ok
         ok = check_pause_verb(client, scratch) and ok
+        ok = check_launch_session_passthrough(godot, scratch) and ok
         ok = check_dispatch_reentrancy(client, scratch) and ok
 
         if full:
