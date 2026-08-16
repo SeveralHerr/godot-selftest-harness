@@ -165,6 +165,8 @@ Worth knowing exists, reach for `REFERENCE.md` when you need them — `validate-
 paused state, cursor mode — "what IS the screen showing", not "is anything wrong");
 `save-ui-baseline`, `ui-snapshot`, `ui-snapshot-diff` (structured UI state vs baseline);
 `aabb` (3D world-space bounds, `top_y`/`bottom_y`), `node-bounds`' 3D counterpart;
+`look-at --node PATH` (points the active Camera3D, or `--from-node`, at a target's
+AABB centre — orientation only, never repositions);
 `step-time`, `set-game-speed` (refuses a scale below 0.01 — that is a freeze, not a
 speed; use `pause`/`unpause` for a real freeze), `wait-frames` (advance time
 deterministically), `pause`/`unpause` (sets `SceneTree.paused` directly, bus keeps

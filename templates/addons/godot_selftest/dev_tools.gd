@@ -14,14 +14,14 @@ extends Node
 ## extension loads AFTER the generic handlers, a project may override a generic
 ## verb by registering the same action string (last-writer-wins).
 
-# harness-version: 0.25.0
+# harness-version: 0.26.0
 # --- Constants ---
 
 ## Version of the godot-selftest-harness these files were copied from. Reported by the
 ## `harness_version` verb and stamped into every copied tool script, so a gap logged
 ## against a project can name the version it was seen on, and a refresh can tell a
 ## stale file from a customized one. Bump with .claude-plugin/plugin.json.
-const HARNESS_VERSION: String = "0.25.0"
+const HARNESS_VERSION: String = "0.26.0"
 
 ## Default bus filenames. With a session id (see _resolve_session) the id is spliced in
 ## before the extension, so two instances can each own a bus in the same user:// dir.
@@ -539,6 +539,7 @@ func _register_generic_handlers() -> void:
 	register_command("get_node_bounds", _cmd_get_node_bounds)
 	register_command("canvas_scale", _cmd_canvas_scale)
 	register_command("aabb", _cmd_aabb)
+	register_command("look_at", _cmd_look_at)
 	register_command("set_resolution", _cmd_set_resolution)
 	register_command("save_ui_baseline", _cmd_save_ui_baseline)
 	register_command("ui_snapshot_diff", _cmd_ui_snapshot_diff)
@@ -4032,6 +4033,116 @@ func _cmd_aabb(args: Dictionary) -> Dictionary:
 			"merged": merged_nodes,
 			"excluded": excluded,
 			"node_transform": node_transform,
+		},
+	}
+
+
+## Orients a Node3D to face another node's world-space centre (gh#28 /
+## moving-in:G-044, seen twice the same day). `aabb` gives a node's exact world
+## centre and a project's own extension can teleport a node TO a position, but
+## nothing pointed a camera or the player AT one - framing a fixture for a
+## screenshot was four blind attempts at a heading in degrees. args:
+## {"node": PATH (required, the target to look at),
+##  "from_node": PATH (optional; default: get_viewport().get_camera_3d(), the
+##    active Camera3D - no project knowledge required to find "the camera"),
+##  "up": [x,y,z] (optional, default Vector3.UP)}.
+##
+## Orientation only - `from_node` is never moved, only rotated in place. A
+## "sensible standoff" is exactly the ambiguity that would have made this verb
+## a second source of guessing; positioning is what teleport/set-state already
+## do, and the reported blocker was heading, not position ("the player position
+## read back correctly... what is missing is any way to point the camera AT a
+## node").
+func _cmd_look_at(args: Dictionary) -> Dictionary:
+	var target_path: String = str(args.get("node", ""))
+	if target_path.is_empty():
+		return {"success": false, "message": "look_at requires 'node' (the target to look at)",
+			"data": {}}
+	var target_resolved: Dictionary = _resolve_node(target_path)
+	var target: Node = target_resolved["node"]
+	if target == null:
+		return {"success": false,
+			"message": ("look_at: target node not found: %s (also tried under /root)"
+				% target_path),
+			"data": {}}
+
+	var from_node: Node = null
+	var from_path: String = str(args.get("from_node", ""))
+	if not from_path.is_empty():
+		var from_resolved: Dictionary = _resolve_node(from_path)
+		from_node = from_resolved["node"]
+		if from_node == null:
+			return {"success": false,
+				"message": ("look_at: from_node not found: %s (also tried under /root)"
+					% from_path),
+				"data": {}}
+	else:
+		from_node = get_viewport().get_camera_3d()
+		if from_node == null:
+			return {"success": false,
+				"message": "look_at: no 'from_node' given and " +
+					"get_viewport().get_camera_3d() found no active Camera3D. Pass " +
+					"--from-node, or make a camera current first.",
+				"data": {}}
+	if not (from_node is Node3D):
+		return {"success": false,
+			"message": ("look_at: from_node %s is a %s, not a Node3D - there is no "
+				+ "heading to set. (2D has no look_at(); orient it via set_state "
+				+ "rotation instead.)") % [str(from_node.get_path()), from_node.get_class()],
+			"data": {}}
+
+	# The target's world-space AABB centre when it has geometry (same measurement
+	# `aabb` reports); its own global_position otherwise - a spawn marker, an empty
+	# Node3D, a Marker3D all have a position worth facing and no geometry to merge.
+	var target_center: Vector3
+	var center_source: String
+	if target is Node3D:
+		var geometry: Array = []
+		var excluded: Array = []
+		_collect_geometry_instances(target, geometry, excluded)
+		if not geometry.is_empty():
+			var box: AABB = AABB()
+			var have: bool = false
+			for entry: GeometryInstance3D in geometry:
+				var world_box: AABB = _world_aabb_of(entry)
+				box = world_box if not have else box.merge(world_box)
+				have = true
+			target_center = box.position + box.size * 0.5
+			center_source = "aabb centre (%d geometry node(s) merged)" % geometry.size()
+		else:
+			target_center = (target as Node3D).global_position
+			center_source = "global_position (no 3D geometry under it to merge an AABB from)"
+	else:
+		return {"success": false,
+			"message": ("look_at: target %s is a %s, not a Node3D - no world-space "
+				+ "position to face") % [target_resolved["path"], target.get_class()],
+			"data": {}}
+
+	var from3d: Node3D = from_node as Node3D
+	var from_pos: Vector3 = from3d.global_position
+	if from_pos.distance_to(target_center) < 0.0001:
+		return {"success": false,
+			"message": ("look_at: %s is already at the target's centre "
+				+ "(%.3f, %.3f, %.3f) - no direction to face") % [
+					str(from3d.get_path()), target_center.x, target_center.y, target_center.z],
+			"data": {}}
+	var up: Vector3 = Vector3.UP
+	if args.has("up"):
+		var up_v: Variant = _parse_vector3_or_null(args.get("up"))
+		if up_v is Vector3:
+			up = up_v
+	from3d.look_at(target_center, up)
+
+	return {
+		"success": true,
+		"message": "%s now faces %s at (%.3f, %.3f, %.3f) via %s" % [
+			str(from3d.get_path()), target_resolved["path"],
+			target_center.x, target_center.y, target_center.z, center_source],
+		"data": {
+			"from": str(from3d.get_path()),
+			"target": target_resolved["path"],
+			"target_center": _serialize_variant(target_center),
+			"center_source": center_source,
 		},
 	}
 

@@ -582,6 +582,14 @@ def stage_assemble(scratch, user_dir_name):
         '\tlamp.name = "PropLamp"',
         "\tlamp.omni_range = 5.0",
         "\tprop.add_child(lamp)",
+        "\t# gh#28: an active Camera3D, off-axis from Prop3D, so look_at has both a",
+        "\t# real default ('the' active camera, no --from-node) and a real direction",
+        "\t# to prove was actually applied (not already facing the target).",
+        "\tvar cam := Camera3D.new()",
+        '\tcam.name = "Cam3D"',
+        "\tcam.position = Vector3(5, 2, 5)",
+        "\tadd_child(cam)",
+        "\tcam.current = true",
         "\t# gh#15.2: nodes whose CLASS is a script class_name, not an engine class.",
         "\t# Both report type Node2D; only a matcher that walks the script chain",
         "\t# finds them, and --class HarnessCheckCritter must find the Elite too.",
@@ -1631,6 +1639,10 @@ def contract_rows():
         ("set_feature", {"touchscreen": False}, True, ""),
         ("set_game_speed", {"scale": 2.0}, True, ""),
         ("set_game_speed", {"scale": 1.0}, True, ""),
+        ("pause", {}, True, "behaviour and idempotency asserted by check_pause_verb()"),
+        ("unpause", {}, True, "behaviour and idempotency asserted by check_pause_verb()"),
+        ("look_at", {"node": "/root/Main/Prop3D"}, True,
+         "default-camera resolution and effect asserted by check_look_at()"),
         ("step_time", {"seconds": 0.2}, True, ""),
         ("wait_frames", {"count": 5}, True, ""),
         ("get_node_bounds", {"node_path": "/root/Main"}, False,
@@ -2558,6 +2570,68 @@ def check_pause_verb(client, scratch):
     return True
 
 
+def check_look_at(client, scratch):
+    """`look_at` actually reorients a Node3D, and only a Node3D (gh#28).
+
+    Reads Cam3D's rotation_degrees before and after so a verb that returned a
+    plausible success without calling Node3D.look_at() at all cannot pass (H-035):
+    the planted camera starts unrotated (position-only construction), so any
+    non-zero rotation after the call is real evidence, not a coincidence.
+    """
+    def call(action, args=None):
+        return client.send_command(scratch, action, args or {}, timeout=15.0)
+
+    before = call("get_state", {"node_path": "/root/Main/Cam3D",
+                                "properties": ["rotation_degrees"]})
+    r0 = _state_props(before).get("rotation_degrees")
+    if not isinstance(r0, dict) or abs(float(r0.get("y", 1))) > 0.001:
+        return fail("Cam3D must start unrotated (position-only construction), got %r" % r0)
+
+    # Default from_node: no --from-node given, must resolve the active Camera3D.
+    r = call("look_at", {"node": "/root/Main/Prop3D"})
+    if not r.get("success"):
+        return fail("look_at with no from_node (should default to the active Camera3D "
+                    "via get_viewport().get_camera_3d()): %s" % r.get("message"))
+    d = r.get("data") or {}
+    if d.get("from") != "/root/Main/Cam3D":
+        return fail("look_at with no from_node must resolve the active Camera3D "
+                    "(Cam3D), got data.from=%r" % d.get("from"))
+    center = d.get("target_center") or {}
+    for axis in ("x", "y", "z"):
+        got = center.get(axis)
+        if not isinstance(got, (int, float)) or abs(got) > 0.15:
+            return fail("look_at's target_center should be ~(0,0,0) (Prop3D's own "
+                        "aabb centre), got %r" % center)
+
+    after = call("get_state", {"node_path": "/root/Main/Cam3D",
+                               "properties": ["rotation_degrees"]})
+    r1 = _state_props(after).get("rotation_degrees") or {}
+    if abs(float(r1.get("y", 0)) - float(r0.get("y", 0))) < 1.0:
+        return fail("Cam3D.rotation_degrees.y did not change ("
+                    "%r -> %r) - look_at must have done nothing" % (r0, r1))
+
+    # Refuses a 2D target: no world-space centre to face.
+    r2d = call("look_at", {"node": "/root/Main/Critter"})
+    if r2d.get("success") is not False or "Node3D" not in str(r2d.get("message")):
+        return fail("look_at on a Node2D target must refuse naming Node3D, got %r" % r2d)
+
+    # Explicit --from-node overrides the active-camera default.
+    r_from = call("look_at", {"node": "/root/Main/Cam3D", "from_node": "/root/Main/Prop3D"})
+    if not r_from.get("success") or (r_from.get("data") or {}).get("from") != "/root/Main/Prop3D":
+        return fail("look_at with an explicit from_node must use it, not the active "
+                    "camera: %r" % r_from)
+
+    # Unknown from_node path is refused, not silently ignored.
+    r_missing = call("look_at", {"node": "/root/Main/Prop3D", "from_node": "/root/Main/NoSuchNode"})
+    if r_missing.get("success") is not False:
+        return fail("look_at with a nonexistent from_node must fail, got %r" % r_missing)
+
+    print("stage 5 bridge: look_at defaults to the active Camera3D and reorients it "
+          "(rotation_degrees.y moved), target_center matches the AABB centre, refuses "
+          "a Node2D target, and an explicit from_node overrides the default")
+    return True
+
+
 def check_dispatch_reentrancy(client, scratch):
     """A command arriving mid-await must be DEFERRED, not run on top (H-038).
 
@@ -2748,6 +2822,7 @@ def stage_bridge(godot, scratch, full):
         # reads cleaner before a baseline has been written over them.
         ok = check_canvas_layer_space(client, scratch) and ok
         ok = check_aabb_excludes_lights(client, scratch) and ok
+        ok = check_look_at(client, scratch) and ok
         ok = check_find_nodes_denominator(client, scratch) and ok
         ok = check_find_nodes_script_class(client, scratch) and ok
         ok = check_label_lines_and_scroll(client, scratch) and ok

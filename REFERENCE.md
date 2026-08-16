@@ -382,7 +382,7 @@ get_ui_snapshot, get_node_bounds, save_ui_baseline, ui_snapshot_diff,
 list_commands, touch_press, touch_release, touch_drag, touch_clear, touch_list,
 set_feature, tilemap_cells, tilemap_region, scripts_seen, canvas_scale,
 set_resolution, harness_version, find_nodes, press, raycast, sample_pixels,
-reachable_ui, findings, mouse_move, reload, first_frame, pause, unpause
+reachable_ui, findings, mouse_move, reload, first_frame, pause, unpause, look_at
 ```
 
 Notable behaviors:
@@ -851,7 +851,7 @@ touch <press|release|drag|clear|list>, set-feature, step-time,
 set-game-speed, pause, unpause, wait-frames, clear-nodes, validate-ui, ui-snapshot,
 node-bounds, save-ui-baseline, ui-snapshot-diff, tilemap-cells,
 tilemap-region, scripts-seen, canvas-scale, set-resolution,
-find-nodes, press, raycast, sample-pixels, reachable-ui, aabb, new-uid,
+find-nodes, press, raycast, sample-pixels, reachable-ui, aabb, look-at, new-uid,
 mouse-move, reload, first-frame
 ```
 
@@ -1761,6 +1761,18 @@ Run it after any script/scene/gameplay change, before committing.
   is axis-aligned by definition; `data.node_transform.axis_aligned` is `false` when
   the node is rotated off-axis, and the CLI says so on the rotation line. Comparing
   two enclosing boxes overstates overlap for anything turned off the grid.
+- **`look-at` orients, it never moves anything** (0.26.0, gh#28 / moving-in:G-044,
+  seen twice the same day). Framing a fixture for a screenshot used to mean guessing
+  a heading in degrees — four blind attempts (a wall, a hallway, the kitchen) on one
+  real run. `look-at --node PATH [--from-node PATH] [--up X,Y,Z]` calls
+  `Node3D.look_at()` on `--from-node` (default: `get_viewport().get_camera_3d()`, the
+  active camera — no project knowledge needed to find "the camera") toward the
+  target's world-space AABB centre (the same measurement `aabb` reports), falling
+  back to the target's own `global_position` when it has no geometry to merge (a
+  spawn marker, an empty `Node3D`). Deliberately does not reposition `--from-node` —
+  "a sensible standoff" is exactly the kind of guess this verb exists to remove, and
+  the reported blocker was always heading, never position. Refuses a 2D target or a
+  2D `--from-node` outright: `look_at()` has no 2D equivalent.
 - **A wedged handler still costs the caller its timeout.** GDScript has no catchable
   exception: a runtime error raised by *project* code reacting to a verb (a setter, a
   signal, an `Area` `body_entered`) kills the handler before it can reply, and the

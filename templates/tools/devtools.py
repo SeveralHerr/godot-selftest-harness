@@ -89,11 +89,11 @@ from pathlib import Path
 from typing import Optional  # noqa: F401
 
 
-# harness-version: 0.25.0
+# harness-version: 0.26.0
 # Version of the godot-selftest-harness this client was copied from. Compared against
 # the running game's own stamp by the `harness-version` verb, so a half-refreshed
 # install (new client, old autoload) is visible instead of mysterious.
-HARNESS_VERSION = "0.25.0"
+HARNESS_VERSION = "0.26.0"
 
 COMMANDS_FILE = "devtools_commands.json"
 RESULTS_FILE = "devtools_results.json"
@@ -2376,6 +2376,24 @@ def cmd_set_game_speed(args, project_path: Path):
         sys.exit(1)
 
 
+def cmd_look_at(args, project_path: Path):
+    """Orient a Node3D (default: the active Camera3D) to face another node (gh#28)."""
+    cmd_args = {"node": normalize_node_path(args.node)}
+    if args.from_node:
+        cmd_args["from_node"] = normalize_node_path(args.from_node)
+    if args.up is not None:
+        if len(args.up) != 3:
+            print("Error: --up takes exactly X,Y,Z", file=sys.stderr)
+            sys.exit(1)
+        cmd_args["up"] = args.up
+    result = send_command(project_path, "look_at", cmd_args)
+    if result["success"]:
+        print(result["message"])
+    else:
+        print(f"Failed: {result['message']}", file=sys.stderr)
+        sys.exit(1)
+
+
 def cmd_pause(args, project_path: Path):
     """Pause SceneTree.paused directly (gh#26)."""
     result = send_command(project_path, "pause", {})
@@ -4197,6 +4215,20 @@ def main():
     p.add_argument("--node", "-n", required=True,
                    help="Node path (e.g., /root/House/Living/tableCoffeeGlass)")
     p.set_defaults(func=cmd_aabb)
+
+    # look-at
+    p = subparsers.add_parser(
+        "look-at",
+        help="Orient a Node3D (default: the active Camera3D) to face another node")
+    p.add_argument("--node", "-n", required=True,
+                   help="Target to face (its AABB centre, or its position if it has no "
+                        "3D geometry)")
+    p.add_argument("--from-node", metavar="NODE",
+                   help="The Node3D to orient (default: get_viewport().get_camera_3d(), "
+                        "the active camera)")
+    p.add_argument("--up", type=coord_2_or_3, metavar="X,Y,Z",
+                   help="Up vector (default 0,1,0)")
+    p.set_defaults(func=cmd_look_at)
 
     args = parser.parse_args(_glue_leading_dash_values(sys.argv[1:]))
 
