@@ -850,7 +850,8 @@ Then report a summary that includes:
    That separates the buses only. Screenshots, UI baselines and saves still share
    the directory, and `--import` still races on one `.godot/` cache — for full
    isolation combine `--session` with a per-instance `GODOT_USERDATA` (or
-   `use_custom_user_dir` + `custom_user_dir_name` per worker).
+   `use_custom_user_dir=true` + `custom_user_dir_name` per worker — both keys; the name
+   alone is ignored).
 
 4. **Project CLAUDE.md.** The project's `CLAUDE.md` now documents the harness
    (between the `godot-selftest-harness` markers) so future sessions know it

@@ -7211,7 +7211,7 @@ this, and I did not reach for it. Recording it as the evidence gh#33 asked for.
   without saying "this is the same directory `../plant-tower-defense` uses". The
   owner file already carries the checkout path; a second checkout of the same
   `config/name` on one machine is the fan-out case, not an edge one.
-  - [H-067] status: open | seen: 1 | harness: 0.37.0
+  - [H-067] status: fixed | fixed-in: 0.38.0 | seen: 1 | harness: 0.37.0
   - Improvement: when `launch` resolves `user://` to a directory whose
     `devtools_owner.json` (or `.devtools/launched.jsonl` history) names a DIFFERENT
     checkout, say so on the launch line and suggest `--snapshot-userstate`; and
@@ -7229,3 +7229,26 @@ planted Legend, got []`; unknown-arg branch removed → `run_tests.gd must exit 
 an unknown argument (--select); got exit 0`; ERROR regex broken → `must count the
 planted push_error as exactly 1 engine error`. Restores proved by `cmp`. Real-project
 sweep as above.
+
+## 2026-08-16 — 0.38.0: loop tick six — one issue already answered, one promise kept
+
+gh#36 (`run_tests.py -- --select` silently runs the whole suite) is plant-tower-defense
+G-049, shipped in 0.37.0 forty minutes before it was filed by a session on a 0.33.0
+cache — closed with the pointer. One factual correction in the close: `--select` is
+not "understood by run_tests.gd" as the report says; the runner takes `--filter`,
+`--file`, `--json`, and since 0.37.0 exits 2 naming that list on anything else. The
+passthrough was always forwarded; the runner ignored it. moving-in G-058 seen 2 →
+already fixed 0.37.0. Nothing else moved.
+
+- **[H-067 — fixed] `launch` says when the resolved `user://` was last used by a game
+  from a DIFFERENT checkout** (owner file's `project_path`), and names the fix: both
+  `use_custom_user_dir=true` and `custom_user_dir_name`, because the name alone is
+  ignored — the exact mistake last tick's probe made. REFERENCE and the scaffold doc
+  now say "both keys". Unit-tested (other checkout named; same checkout silent).
+
+- Gap: no new gap this turn.
+
+**Validation run this turn:** `record_version.py --record` then `--check` OK at 0.38.0
+(14 files, 57 verbs + 59 CLI). `unittest discover -s tools` — 53 OK (2 new).
+`check_templates.py` — OK, all stages (client + docs only; `--full` ran clean for
+0.37.0 on the identical `dev_tools.gd`).

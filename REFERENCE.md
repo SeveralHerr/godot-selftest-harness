@@ -1285,9 +1285,12 @@ writes to the real one — the exact silent-timeout shape `launch -- --devtools-
 takes when it is not wired correctly (see below).
 
 The only way to actually move an instance's `user://` is
-`application/config/use_custom_user_dir` + `custom_user_dir_name` in a **per-worker
-copy of `project.godot`** — heavier than an env var, but it is the one mechanism Godot
-itself honours. Set `GODOT_USERDATA` / `--userdata` to match wherever that custom dir
+`application/config/use_custom_user_dir=true` **and** `custom_user_dir_name` in a
+**per-worker copy of `project.godot`** — both keys; the name alone is silently ignored
+and the copy keeps writing the shared directory (a 0.37.0 probe rewrote a developer's
+real save that way; H-067). Heavier than an env var, but it is the one mechanism Godot
+itself honours. `launch` now says when the resolved `user://` was last used by a game
+from a different checkout. Set `GODOT_USERDATA` / `--userdata` to match wherever that custom dir
 resolves to, so the client polls the same place the game actually writes:
 
 ```bash
