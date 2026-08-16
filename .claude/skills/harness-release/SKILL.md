@@ -222,8 +222,13 @@ commit was not clearly asked for, `git add -A` so the work has a recoverable obj
 and hand off with the exact commands. **Work on a `release/X.Y.Z` branch, never directly
 on `master`.** Every release in the log arrived that way — `Merge pull request #8 from
 SeveralHerr/release/0.18.0`, `#4 from SeveralHerr/fix/...` — and the standing rule in the
-user's global `CLAUDE.md` is *never commit to main*. Cut the branch before the first
-commit; if you are already on `master` with the work in the tree,
+user's global `CLAUDE.md` is *never commit to main*. **Cut it from `master`'s tip, not
+from the previous release branch:** `git fetch && git checkout -b release/X.Y.Z master`
+(a dirty tree carries over cleanly; `git stash` / `stash pop` around it if git refuses).
+Two consecutive ticks on 2026-08-16 branched from `release/<previous>` instead; master
+had gained a docs-only commit in between, so §6b's tree-hash assertion below failed
+correctly, the `&&` chain stopped before the push, and the landing had to be finished
+by hand each time. If you are already on `master` with the work in the tree,
 `git checkout -b release/X.Y.Z` carries it over cleanly.
 
 Landing it on `master` is a **separate, explicit ask.** When it comes, prefer a PR;
@@ -275,7 +280,13 @@ git update-index --refresh >/dev/null; git status --short   # your uncommitted w
 
 The tree-hash equality is the load-bearing assertion: a `--no-ff` merge of a descendant
 branch must produce exactly the release commit's tree, so any difference means
-working-tree content got in. Then close the GitHub issues the release named
+working-tree content got in. **It only holds when the branch was cut from master's tip
+(§6).** If master moved after the cut — the check fails but you know why — do not force
+it: instead assert that the merged tree differs from the release tree by exactly the
+commits master gained (`git -C "$WT" diff --stat release/X.Y.Z HEAD` names only those
+files) and run `record_version.py --check` in the worktree; that is the same guarantee
+by a different route. Do it in a *separate* command from the push, so a failed
+assertion never leaves a half-finished landing. Then close the GitHub issues the release named
 (`gh issue close N --comment "shipped in X.Y.Z"`) — they stay open until the merge, not
 until the branch commit.
 
