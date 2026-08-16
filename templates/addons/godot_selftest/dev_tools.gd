@@ -14,14 +14,14 @@ extends Node
 ## extension loads AFTER the generic handlers, a project may override a generic
 ## verb by registering the same action string (last-writer-wins).
 
-# harness-version: 0.24.0
+# harness-version: 0.25.0
 # --- Constants ---
 
 ## Version of the godot-selftest-harness these files were copied from. Reported by the
 ## `harness_version` verb and stamped into every copied tool script, so a gap logged
 ## against a project can name the version it was seen on, and a refresh can tell a
 ## stale file from a customized one. Bump with .claude-plugin/plugin.json.
-const HARNESS_VERSION: String = "0.24.0"
+const HARNESS_VERSION: String = "0.25.0"
 
 ## Default bus filenames. With a session id (see _resolve_session) the id is spliced in
 ## before the extension, so two instances can each own a bus in the same user:// dir.
@@ -529,6 +529,8 @@ func _register_generic_handlers() -> void:
 	register_command("touch_list", _cmd_touch_list)
 	register_command("set_feature", _cmd_set_feature)
 	register_command("set_game_speed", _cmd_set_game_speed)
+	register_command("pause", _cmd_pause)
+	register_command("unpause", _cmd_unpause)
 	register_command("step_time", _cmd_step_time)
 	register_command("wait_frames", _cmd_wait_frames)
 	register_command("clear_nodes", _cmd_clear_nodes)
@@ -2907,7 +2909,7 @@ func _cmd_set_game_speed(args: Dictionary) -> Dictionary:
 	if requested < MIN_GAME_SPEED:
 		return {
 			"success": false,
-			"message": "set_game_speed refuses %.4f: a scale below %.3f freezes the game while the bus keeps answering (use the tree's pause for that); smallest accepted is %.3f" % [
+			"message": "set_game_speed refuses %.4f: a scale below %.3f freezes the game while the bus keeps answering (use the 'pause' verb for that); smallest accepted is %.3f" % [
 				requested, MIN_GAME_SPEED, MIN_GAME_SPEED],
 			"data": {"previous_scale": prev, "current_scale": prev, "min_scale": MIN_GAME_SPEED},
 		}
@@ -2920,6 +2922,37 @@ func _cmd_set_game_speed(args: Dictionary) -> Dictionary:
 		"success": true,
 		"message": "Game speed: %.3f -> %.3f" % [prev, scale],
 		"data": {"previous_scale": prev, "current_scale": scale},
+	}
+
+
+## Pauses SceneTree.paused directly (gh#26) - the thing `set_game_speed`'s own
+## refusal message names ("use the tree's pause for that") but that nothing in
+## the generic verb set implemented until now. This bridge autoload already
+## runs PROCESS_MODE_ALWAYS (see _ready()), so it keeps answering on a paused
+## tree - `ping` already reports `paused` for exactly this reason. That means a
+## caller racing the bus round-trip against a sub-second effect (a fade, a
+## hit-flash, a cooldown tween) can drive the trigger, poll for the moment it
+## wants, pause the instant it is caught, and then take as long as it likes over
+## sample-pixels/screenshot/node-bounds without racing anything - `unpause`
+## resumes. Idempotent: pausing an already-paused tree is not an error.
+func _cmd_pause(_args: Dictionary) -> Dictionary:
+	var was_paused: bool = get_tree().paused
+	get_tree().paused = true
+	return {
+		"success": true,
+		"message": "Tree paused" if not was_paused else "Tree was already paused",
+		"data": {"was_paused": was_paused, "paused": true},
+	}
+
+
+## Reverses _cmd_pause. Idempotent: unpausing an already-running tree is not an error.
+func _cmd_unpause(_args: Dictionary) -> Dictionary:
+	var was_paused: bool = get_tree().paused
+	get_tree().paused = false
+	return {
+		"success": true,
+		"message": "Tree unpaused" if was_paused else "Tree was already unpaused",
+		"data": {"was_paused": was_paused, "paused": false},
 	}
 
 

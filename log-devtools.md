@@ -5549,3 +5549,87 @@ regex and confirming the newline survives; the sweep-credit regex against three
 GDScript samples (two should-match, one should-not); `--about` against a scratch git
 repo with and without the flag, confirming the denominator narrows and a stray path
 warns. No gaps found in the harness itself this turn beyond the ones fixed above.
+
+## 2026-08-16 — 0.25.0: a mismatched liveness check and a missing pause verb
+
+`gh issue list --state open` after landing 0.24.0 named three fresh reports
+(#24-26), all filed against 0.24.0 the moment it shipped. `git fetch` confirmed
+master was still exactly where the previous turn left it — nothing to re-merge —
+so this turn's work was entirely these three.
+
+1. **[gh#24] `quit --kill`/the launch sweep reported a pid dead for hours as an
+   unverifiable survivor, forever.** `_pid_alive_windows` and `_pid_started_unix`
+   both call `OpenProcess` with the same access right and interpret a failure
+   differently: the former treats any non-87 error as "alive" (comment: "5 =
+   exists but is not ours to open"), the latter treats *any* failure as
+   "unknowable". A pid recycled onto an inaccessible process hits exactly that
+   combination — alive per the first, unreadable per the second — and a ledger
+   row with `started_verified: true` (we *could* read it when we launched it)
+   made it look ambiguous rather than gone. Fixed in `_ledger_survivors`: when a
+   pid was readable at launch and is now unreadable at all, that is not
+   ambiguity, it is a different process wearing the old pid number — skip it,
+   don't report it. Proved with a standalone scratch probe (three synthetic
+   ledger rows: a recycled pid, a genuine survivor, a genuinely-never-verified
+   one) before touching the real `_quit_sweep` exit code, which had the same bug
+   one layer up: `verified: None` (genuinely unknowable, never auto-killed per
+   its own docstring) was exiting 1 same as `verified: True` (an actual,
+   killable survivor) — an exit code a reader could never act on, the exact
+   failure mode PURPOSE.md's "failures must be loud, and distinguishable from
+   success" commitment exists to prevent. Now only `verified: True` fails the
+   run; the kill hint and the `--kill` "STILL ALIVE" tally were also narrowed
+   to verified rows only, since `_kill_survivors` was already silently skipping
+   the unverified ones — the hint used to name a pid a literal copy-paste of it
+   would not touch.
+
+2. **[gh#26] no bus verb reaches `SceneTree.paused`, so a sub-second effect
+   (a fade, a hit-flash, a cooldown tween) cannot be caught and held for
+   inspection.** `set_game_speed`'s own refusal message has said "use the
+   tree's pause for that" since 0.22.0, but nothing implemented it — the only
+   way to pause was a project's own test-fixture method
+   (`harness_set_paused`), which is exactly how `check_paused_bridge` in this
+   repo's own `check_templates.py` had to reach a paused tree, and which no
+   project ships by default. Added generic `pause`/`unpause` bus verbs
+   (idempotent either direction, `was_paused` in the reply) plus CLI
+   subcommands. Given a stage-5 probe of its own (`check_pause_verb`) rather
+   than left to `check_paused_bridge`'s existing fixture-based coverage, and
+   the mutation was proved organically: commenting out the two
+   `register_command` lines and running `check_templates.py` failed exactly
+   that new check (`Unknown action: pause`), restored and reran clean
+   afterward (`cmp` confirmed byte-identical restore).
+
+3. **[gh#25.2] the scaffold's refresh-branch safety net degrades silently in
+   any beads-tracked project.** Step 5's dirty-tree check
+   (`git status --porcelain`) trips on `.beads/*.jsonl`'s auto-export from
+   every `bd update --claim` — this project's own workflow — so the branch
+   protection meant to keep a refresh reviewable falls back to "apply directly
+   on current branch" in exactly the sessions doing real work, silently. Fixed
+   with a pathspec exclusion (`-- . ':!.beads'`); real code WIP still trips it.
+
+4. **[gh#25.1] a stale plugin marketplace cache can downgrade an install with
+   no warning.** Step 4's pristine-file check only asks "does this match *a*
+   released version," not "is it the latest one" — so a real, current file
+   matches `harness_history.json` and gets silently overwritten by an older
+   cached copy. Added a version-gate step before `full` runs: read the
+   installed `.harness_manifest.json`'s `harness_version`, compare as a
+   version *tuple* (not a string — `"0.9.0" > "0.10.0"` lexically, wrongly)
+   against `${CLAUDE_PLUGIN_ROOT}`'s own `plugin.json`, and abort with
+   remediation instructions rather than run `full`. Unit-tested the tuple
+   comparison and the JSON reads standalone (both directions, plus the
+   absent-manifest/fresh-install no-op case); this is prose the agent
+   executes, not a shipped template `check_templates.py` can drive live, so
+   the comparison logic is what got proved, not an end-to-end scaffold run
+   against a deliberately-stale plugin cache.
+
+**Validation run this turn:** `python tools/record_version.py --record` then
+`--check` — OK at 0.25.0, 13 shipped files, 53 bus verb(s) + 55 CLI command(s)
+documented (up from 51+53 — exactly `pause`/`unpause`). `python -m unittest
+discover -s tools` — 35 tests OK. `python tools/check_templates.py` — OK, all
+six stages, run twice: once mutated (pause/unpause registration commented out)
+to prove `check_pause_verb` actually fails naming `Unknown action: pause`, once
+clean after a verified byte-identical restore, printing `stage 5 bridge:
+pause/unpause verbs flip SceneTree.paused directly ... idempotent both
+directions`. The gh#24 ledger fix was proved separately with a standalone
+scratch probe (three synthetic pids covering the recycled/genuine/unverifiable
+cases) since it needs no live Godot to exercise. gh#25's two fixes are prose
+instructions, not template code `check_templates.py` drives — validated by
+unit-testing their embedded logic in isolation instead.

@@ -166,7 +166,10 @@ paused state, cursor mode — "what IS the screen showing", not "is anything wro
 `save-ui-baseline`, `ui-snapshot`, `ui-snapshot-diff` (structured UI state vs baseline);
 `aabb` (3D world-space bounds, `top_y`/`bottom_y`), `node-bounds`' 3D counterpart;
 `step-time`, `set-game-speed` (refuses a scale below 0.01 — that is a freeze, not a
-speed), `wait-frames` (advance time deterministically);
+speed; use `pause`/`unpause` for a real freeze), `wait-frames` (advance time
+deterministically), `pause`/`unpause` (sets `SceneTree.paused` directly, bus keeps
+answering — catch a sub-second effect, poll for the moment, pause, then inspect at
+no rush);
 `raycast --from X,Y[,Z] --to X,Y[,Z]` (2D or 3D by arity; refuses a 2D ray on a
 3D-only tree), `sample-pixels`, `canvas-scale`, `set-resolution`;
 `tilemap-cells`, `tilemap-region`; `curve` (a pure method over a range as one read);
