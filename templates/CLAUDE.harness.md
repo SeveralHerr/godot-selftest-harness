@@ -347,8 +347,11 @@ runtime, which the static checker cannot see) and `name_check_ignore` (path pref
   `user://findings_last.json` (path printed when the count is non-zero) — a transient
   is diagnosable after the frame that produced it is gone.
 - A live check that touches persisted state (a key whose handler saves) writes the
-  developer's real `user://` file — `--isolated` does not isolate `user://`. Use
-  `launch --isolated --snapshot-userstate` so `quit` puts it back.
+  developer's real `user://` file — `--isolated` does not isolate `user://`. `quit`
+  names what the run changed; `launch --isolated --snapshot-userstate` makes `quit`
+  put it back. A save left changed shows up as failing headless tests later.
+- `_T.assert_margin(values, threshold, margin, recorded)` gates a tuned constant on the
+  corpus items sitting near it — use it instead of hand-rolling a sweep.
 - `press` emits `pressed` without moving the mouse: an open tooltip stays open and can
   appear in a screenshot taken straight after. `mouse-move` first if the picture matters.
 - Run `/verify` **inline**; don't wrap routine validation in subagents/workflows.

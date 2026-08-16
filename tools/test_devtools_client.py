@@ -263,6 +263,43 @@ class UserstateSnapshotCase(unittest.TestCase):
         self.assertIsNone(devtools.userstate_restore(self.project, "nothing"))
 
 
+class UserstateStatCase(unittest.TestCase):
+    """gh#33 (a): quit names which user:// files a run wrote, always on."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory(prefix="ustat-")
+        root = Path(self._tmp.name)
+        self.project = root / "project"
+        self.project.mkdir()
+        self.user_dir = root / "user"
+        self.user_dir.mkdir()
+        (self.user_dir / "highscore.save").write_text("orig", encoding="utf-8")
+        (self.user_dir / "settings.cfg").write_text("cfg", encoding="utf-8")
+        (self.user_dir / "devtools_owner.json").write_text("{}", encoding="utf-8")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_diff_names_changed_created_deleted_and_ignores_bridge_files(self):
+        self.assertEqual(devtools.userstate_stat_take(self.project, self.user_dir), 3)
+        time.sleep(0.05)
+        (self.user_dir / "highscore.save").write_text("mutated!", encoding="utf-8")
+        (self.user_dir / "new.save").write_text("x", encoding="utf-8")
+        (self.user_dir / "settings.cfg").unlink()
+        (self.user_dir / "devtools_owner.json").write_text('{"pid": 1}', encoding="utf-8")
+        changed, created, deleted, user_dir = devtools.userstate_stat_diff(self.project)
+        self.assertEqual(changed, ["highscore.save"])
+        self.assertEqual(created, ["new.save"])
+        self.assertEqual(deleted, ["settings.cfg"])
+        self.assertEqual(user_dir, self.user_dir)
+        self.assertIsNone(devtools.userstate_stat_diff(self.project), "record is consumed")
+
+    def test_untouched_run_reports_nothing_changed(self):
+        devtools.userstate_stat_take(self.project, self.user_dir)
+        changed, created, deleted, _ = devtools.userstate_stat_diff(self.project)
+        self.assertEqual((changed, created, deleted), ([], [], []))
+
+
 class SceneTreeCountCase(unittest.TestCase):
     """moving-in:G-056: the trailing N node(s) line counts nodes, not JSON lines."""
 
