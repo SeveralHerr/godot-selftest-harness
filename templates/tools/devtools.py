@@ -89,11 +89,11 @@ from pathlib import Path
 from typing import Optional  # noqa: F401
 
 
-# harness-version: 0.21.0
+# harness-version: 0.22.0
 # Version of the godot-selftest-harness this client was copied from. Compared against
 # the running game's own stamp by the `harness-version` verb, so a half-refreshed
 # install (new client, old autoload) is visible instead of mysterious.
-HARNESS_VERSION = "0.21.0"
+HARNESS_VERSION = "0.22.0"
 
 COMMANDS_FILE = "devtools_commands.json"
 RESULTS_FILE = "devtools_results.json"
@@ -576,7 +576,7 @@ def owner_status(user_data: Path) -> dict:
     if owner is None:
         return {
             "present": False, "pid": None, "alive": False,
-            "polling": False, "poll_age": None, "path": path,
+            "polling": False, "poll_age": None, "path": path, "project_path": None,
         }
     pid = owner.get("pid")
     age = poll_age(owner)
@@ -587,7 +587,47 @@ def owner_status(user_data: Path) -> dict:
         "polling": None if age is None else age <= POLL_STALE_AFTER_SEC,
         "poll_age": age,
         "path": path,
+        # Absent on an owner file written before 0.22.0.
+        "project_path": owner.get("project_path") or None,
     }
+
+
+def _same_project_dir(a, b) -> bool:
+    """Do two project directory spellings name the same checkout? Tolerates
+    slash direction, a trailing slash, and case on Windows - the game reports
+    `ProjectSettings.globalize_path("res://")` (forward slashes, trailing slash),
+    the client holds whatever --path was typed."""
+    if not a or not b:
+        return True
+    try:
+        na = os.path.normcase(os.path.normpath(os.path.abspath(str(a))))
+        nb = os.path.normcase(os.path.normpath(os.path.abspath(str(b))))
+    except (OSError, ValueError):
+        return True
+    return na == nb
+
+
+def foreign_project_owner(owner: dict, project_path: Path):
+    """The owner's project_path when a LIVE, POLLING owner of this bus runs from a
+    different checkout than `project_path`; else None (plant-tower-defense:G-018).
+
+    A sibling git worktree has the same project name, so the same user:// and the
+    same bus files. Its game overwrites the owner record with its own pid, and
+    from then on every reply's pid matches the owner - the pid check that catches a
+    survivor cannot see this. Errors then arrive as `no Game in the tree` /
+    `Root node not found`, i.e. as bugs in your own scene, on a game that is not
+    yours. The path is the one fact that differs, and this is the one place it is
+    compared. A dead or stale owner proves nothing and is left to the liveness
+    logic.
+    """
+    if not owner or not owner.get("present") or not owner.get("alive"):
+        return None
+    if owner.get("polling") is False:
+        return None
+    other = owner.get("project_path")
+    if not other or _same_project_dir(other, project_path):
+        return None
+    return other
 
 
 def owner_liveness_phrase(owner: dict) -> str:
@@ -899,6 +939,23 @@ def send_command(project_path: Path, action: str, args: dict = None, timeout: fl
     # Read the owner BEFORE writing, so a mismatch is attributable on the very
     # first call rather than only once a crossed reply comes back (G-100).
     owner_before = owner_status(user_data)
+
+    # A live owner from ANOTHER checkout (a git worktree of this project) is a
+    # foreign game whose pid the reply check would accept, so it is refused
+    # before the command is written - sending it is the harm.
+    foreign_path = foreign_project_owner(owner_before, project_path)
+    if foreign_path is not None:
+        raise ForeignInstanceError(
+            "The game answering this bus is running from a DIFFERENT checkout:\n"
+            "  owner: pid {pid}, project {other}\n"
+            "  you:   {mine}\n"
+            "Same project name means the same user:// and the same bus files "
+            "({owner_file}), so its replies would read as yours - '{action}' was NOT "
+            "sent. Quit that game, or give one side its own bus: launch with "
+            "--isolated, or `--session <id>` on both the launch and this client."
+            .format(pid=owner_before["pid"], other=foreign_path,
+                    mine=os.path.abspath(str(project_path)),
+                    owner_file=owner_before["path"], action=action))
 
     # Clear any existing result
     if results_path.exists() and not _unlink_retry(results_path):
@@ -1253,12 +1310,24 @@ def cmd_curve(args, project_path: Path):
 
 
 def cmd_performance(args, project_path: Path):
-    """Get performance metrics."""
+    """Get performance metrics.
+
+    Data keys read: fps (mean over the window since 0.22.0), fps_instant, fps_min,
+    fps_max, fps_samples, fps_window_sec, fps_settling, fps_first_half,
+    fps_second_half, nodes, node_baseline, node_growth, node_types_delta.
+    """
     cmd_args = {}
     if getattr(args, "reset_baseline", False):
         cmd_args["reset_baseline"] = True
+    frames = getattr(args, "frames", None)
+    if frames is not None:
+        cmd_args["frames"] = int(frames)
+    if getattr(args, "by_type", False):
+        cmd_args["by_type"] = True
 
-    result = send_command(project_path, "performance", cmd_args)
+    # The window is measured game-side in real frames: give it its seconds.
+    budget = 30.0 + (int(frames) if frames is not None else 30) / 5.0
+    result = send_command(project_path, "performance", cmd_args, timeout=budget)
     if result["success"]:
         data = result["data"]
         # gh#6: the bridge answers on a paused tree, and the numbers look fine.
@@ -1270,14 +1339,39 @@ def cmd_performance(args, project_path: Path):
             print("performance: the reply carried no 'tree_paused' key (installed harness "
                   "older than this client); whether the tree is paused is UNKNOWN - "
                   "check `ping`.", file=sys.stderr)
-        print(f"FPS:              {data['fps']:.1f}")
+        samples = int(data.get("fps_samples", 0) or 0)
+        if samples > 0:
+            settling = " - STILL SETTLING (first half %.1f, second half %.1f): re-read after wait-frames" % (
+                float(data.get("fps_first_half", 0)), float(data.get("fps_second_half", 0))
+            ) if data.get("fps_settling") else ""
+            print(f"FPS:              mean {data['fps']:.1f}  min {float(data.get('fps_min', 0)):.1f}  "
+                  f"max {float(data.get('fps_max', 0)):.1f}  n={samples} frames "
+                  f"({float(data.get('fps_window_sec', 0)):.2f}s){settling}")
+        elif "fps_samples" in data:
+            print(f"FPS:              {data['fps']:.1f}  (single instantaneous read; pass --frames N for a measured window)")
+        else:
+            # Game older than 0.22.0: a single Engine.get_frames_per_second() read.
+            print(f"FPS:              {data['fps']:.1f}  (instantaneous - installed game predates windowed sampling; "
+                  "one frame's rate is not a measurement)")
         print(f"Frame time:       {data['frame_time_ms']:.2f} ms")
         print(f"Physics FPS:      {int(data['physics_fps'])}")
         print(f"Draw calls:       {int(data['draw_calls'])}")
         print(f"Objects:          {int(data['objects'])}")
         print(f"Static memory:    {data['static_memory_mb']:.1f} MB")
         print(f"Video memory:     {data['video_memory_mb']:.1f} MB")
-        print(f"Total nodes:      {int(data['nodes'])}")
+        if "node_growth" in data and int(data.get("node_baseline", -1)) >= 0:
+            print(f"Total nodes:      {int(data['nodes'])}   growth {int(data['node_growth']):+d} "
+                  f"since baseline {int(data['node_baseline'])}")
+        else:
+            print(f"Total nodes:      {int(data['nodes'])}")
+        if "node_types_delta" in data:
+            delta = data.get("node_types_delta") or {}
+            if delta:
+                rows = sorted(delta.items(), key=lambda kv: (-abs(int(kv[1])), kv[0]))
+                print("Node types changed since baseline: " + ", ".join(
+                    f"{cls} {int(n):+d}" for cls, n in rows))
+            else:
+                print("Node types changed since baseline: none")
         _print_orphans(data, cmd_args.get("reset_baseline", False))
         print(f"Physics 2D objs:  {int(data['physics_2d_active_objects'])}")
         print(f"Physics 3D objs:  {int(data['physics_3d_active_objects'])}")
@@ -1560,6 +1654,17 @@ def cmd_ping(args, project_path: Path):
             # infer it. paused is absent on a pre-0.12.0 game.
             if data.get("paused") is True:
                 print("  tree is PAUSED (bridge still polling: PROCESS_MODE_ALWAYS)")
+            # data.project_path (0.22.0+): where the answering game's res:// is.
+            # Printed always, and flagged when it is not the --path you gave,
+            # because a worktree sibling's game reads exactly like your own
+            # otherwise (plant-tower-defense:G-018).
+            if data.get("project_path"):
+                if _same_project_dir(data["project_path"], project_path):
+                    print(f"  project: {data['project_path']}")
+                else:
+                    print(f"  WARNING: the answering game runs from {data['project_path']}, "
+                          f"NOT {os.path.abspath(str(project_path))} - a different checkout "
+                          "(git worktree?) is on this bus")
         else:
             print("DevTools responded but with error")
             sys.exit(1)
@@ -2083,6 +2188,56 @@ def cmd_input_sequence(args, project_path: Path):
         sys.exit(1)
 
 
+def cmd_mouse_move(args, project_path: Path):
+    """Dispatch a real InputEventMouseMotion (bus verb: mouse_move, moving-in:G-029).
+
+    Data keys read: relative, steps, position, mouse_mode.
+    """
+    cmd_args = {"relative": [float(args.relative[0]), float(args.relative[1])]}
+    if args.steps is not None:
+        cmd_args["steps"] = args.steps
+    if args.position is not None:
+        cmd_args["position"] = [float(args.position[0]), float(args.position[1])]
+    if args.buttons is not None:
+        cmd_args["buttons"] = args.buttons
+    result = send_command(project_path, "mouse_move", cmd_args,
+                          timeout=30.0 + (args.steps or 1) / 10.0)
+    if not result["success"]:
+        print(f"Failed: {result['message']}", file=sys.stderr)
+        sys.exit(1)
+    data = result.get("data") or {}
+    if "relative" not in data or "mouse_mode" not in data:
+        print(f"mouse-move: the reply carried no 'relative'/'mouse_mode' key. Keys: {sorted(data)}",
+              file=sys.stderr)
+        sys.exit(1)
+    print(result.get("message", ""))
+    pos = data.get("position") or {}
+    print(f"  cursor now at ({pos.get('x')}, {pos.get('y')}); mouse mode {data['mouse_mode']}")
+    if data["mouse_mode"] == "captured":
+        print("  note: the cursor is CAPTURED, so your physical mouse is a second input source "
+              "on this camera between commands (moving-in:G-024)")
+
+
+def cmd_reload(args, project_path: Path):
+    """Re-read a resource from disk into the running game (bus verb: reload,
+    moving-in:G-033). Data keys read: path, resource_class, was_cached."""
+    result = send_command(project_path, "reload", {"path": args.path})
+    if not result["success"]:
+        print(f"Failed: {result['message']}", file=sys.stderr)
+        sys.exit(1)
+    data = result.get("data") or {}
+    if "was_cached" not in data:
+        print(f"reload: the reply carried no 'was_cached' key. Keys: {sorted(data)}", file=sys.stderr)
+        sys.exit(1)
+    print(result.get("message", ""))
+    if not data["was_cached"]:
+        print("  (nothing held it, so nothing changed on screen - the next load() will read the new file)")
+    elif data.get("holders_updated") is False:
+        print("  WARNING: the cached instance could NOT be updated in place (class changed?) - "
+              "nodes holding the old resource still show the old content", file=sys.stderr)
+        sys.exit(1)
+
+
 def cmd_key(args, project_path: Path):
     """Tap a raw keyboard key by OS keycode name (bus verb: input_key, G-049).
 
@@ -2181,7 +2336,8 @@ def cmd_set_game_speed(args, project_path: Path):
     result = send_command(project_path, "set_game_speed", {"scale": args.scale})
     if result["success"]:
         data = result["data"]
-        print(f"Game speed: {data['previous_scale']:.1f} -> {data['current_scale']:.1f}")
+        # 3 dp: a 1-dp print echoed 0.04 as "1.0 -> 0.0" (moving-in:G-019).
+        print(f"Game speed: {data['previous_scale']:.3f} -> {data['current_scale']:.3f}")
     else:
         print(f"Failed: {result['message']}", file=sys.stderr)
         sys.exit(1)
@@ -2240,6 +2396,20 @@ def cmd_step_time(args, project_path: Path):
 
 
 # ==================== TOUCH SIMULATION ====================
+
+
+def coord_2_or_3(value: str):
+    """Parse "X,Y" (2D) or "X,Y,Z" (3D) into a float list; the arity picks the
+    physics space game-side (moving-in:G-023)."""
+    text = str(value).strip().strip("()[]").strip()
+    parts = [p for p in re.split(r"[,\s]+", text) if p]
+    if len(parts) not in (2, 3):
+        raise argparse.ArgumentTypeError(
+            f"expected 'X,Y' (2D) or 'X,Y,Z' (3D), got {value!r}")
+    try:
+        return [float(p) for p in parts]
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"non-numeric coordinate in {value!r}")
 
 
 def coord_pair(value: str):
@@ -2903,6 +3073,11 @@ def cmd_launch(args, project_path: Path):
         # launching a second instance on top of a live one.
         stale_claim = owner["present"] and owner["alive"] and owner["polling"] is False
         if owner["present"] and owner["alive"] and not stale_claim:
+            other = foreign_project_owner(owner, project_path)
+            if other:
+                print(f"  That game runs from a DIFFERENT checkout: {other} - a git "
+                      "worktree of this project shares its name, its user:// and this bus.",
+                      file=sys.stderr)
             print(f"Error: pid {owner['pid']} still owns this bus "
                   f"({owner['path'].name}).\n"
                   f"  {owner_liveness_phrase(_read_owner(user_data)[0] or {})}\n"
@@ -3380,9 +3555,12 @@ def cmd_raycast(args, project_path: Path):
 
     Data keys read: clear, collider, collider_class, position, mask, mask_names.
     """
+    if len(args.origin) != len(args.to):
+        print("Error: --from and --to must both be X,Y (2D) or both X,Y,Z (3D)", file=sys.stderr)
+        sys.exit(1)
     cmd_args = {
-        "from": [float(args.origin[0]), float(args.origin[1])],
-        "to": [float(args.to[0]), float(args.to[1])],
+        "from": [float(v) for v in args.origin],
+        "to": [float(v) for v in args.to],
         "areas": bool(args.areas),
     }
     if args.mask is not None:
@@ -3401,11 +3579,19 @@ def cmd_raycast(args, project_path: Path):
               file=sys.stderr)
         sys.exit(1)
     print(result.get("message", ""))
-    print(f"  mask {data.get('mask')} = {', '.join(data.get('mask_names') or [])}")
+    space = data.get("space")
+    if space is None and len(args.origin) == 3:
+        print("raycast: the installed game predates 3D raycasts (no 'space' key) - this "
+              "answer came from the 2D space and is meaningless for a 3D query", file=sys.stderr)
+        sys.exit(1)
+    print(f"  space {space or '2d'}; mask {data.get('mask')} = {', '.join(data.get('mask_names') or [])}")
     if not data["clear"]:
         pos = data.get("position") or {}
         print(f"  collider: {data.get('collider')} [{data.get('collider_class')}]")
-        print(f"  hit at:   ({pos.get('x')}, {pos.get('y')})")
+        if "z" in pos:
+            print(f"  hit at:   ({pos.get('x')}, {pos.get('y')}, {pos.get('z')})")
+        else:
+            print(f"  hit at:   ({pos.get('x')}, {pos.get('y')})")
 
 
 def cmd_sample_pixels(args, project_path: Path):
@@ -3499,9 +3685,17 @@ def main():
     p.set_defaults(func=cmd_curve)
 
     # performance
-    p = subparsers.add_parser("performance", help="Get performance metrics")
+    p = subparsers.add_parser("performance", help="Get performance metrics (FPS is measured "
+                              "over a window of frames, not read once)")
     p.add_argument("--reset-baseline", action="store_true",
-                   help="Re-baseline the orphan count at the current value")
+                   help="Re-baseline the orphan AND node counts at the current values")
+    p.add_argument("--frames", type=int, default=None, metavar="N",
+                   help="Measure FPS over N frames by wall clock (game default 30; 0 = one "
+                        "instantaneous read). Reports mean/min/max and flags a window "
+                        "whose halves disagree by >15%% as still settling.")
+    p.add_argument("--by-type", action="store_true", dest="by_type",
+                   help="Also report which node classes grew or shrank since the baseline "
+                        "(in-tree accumulation the orphan count cannot see)")
     p.set_defaults(func=cmd_performance)
 
     # get-state
@@ -3652,6 +3846,23 @@ def main():
                    help="Frames to hold before release (default: release on the next frame)")
     p.set_defaults(func=cmd_key)
 
+    # mouse-move
+    p = subparsers.add_parser("mouse-move", help="Dispatch a real InputEventMouseMotion with a "
+                                                 "chosen relative delta (mouse-look)")
+    p.add_argument("--relative", required=True, type=coord_pair, metavar="DX,DY",
+                   help="Motion delta in pixels, e.g. 40,0 to look right")
+    p.add_argument("--steps", type=int, help="Split the delta into N events, one per frame (default 1)")
+    p.add_argument("--position", type=coord_pair, metavar="X,Y",
+                   help="Absolute cursor position to report (default: current)")
+    p.add_argument("--buttons", type=int, help="Button mask held during the motion (default 0)")
+    p.set_defaults(func=cmd_mouse_move)
+
+    # reload
+    p = subparsers.add_parser("reload", help="Re-read an edited resource (shader, .tres, texture) "
+                                             "into the running game without a relaunch")
+    p.add_argument("path", help="res:// path of the resource to reload")
+    p.set_defaults(func=cmd_reload)
+
     # ==================== TOUCH SIMULATION ====================
 
     # touch - nested subcommands (InputEventScreenTouch / InputEventScreenDrag)
@@ -3747,12 +3958,13 @@ def main():
     # raycast
     p = subparsers.add_parser(
         "raycast", help="What would a ray on this collision mask hit?")
-    p.add_argument("--from", dest="origin", required=True, type=coord_pair, metavar="X,Y")
-    p.add_argument("--to", required=True, type=coord_pair, metavar="X,Y")
+    p.add_argument("--from", dest="origin", required=True, type=coord_2_or_3, metavar="X,Y[,Z]",
+                   help="Two components query the 2D space, three the 3D space")
+    p.add_argument("--to", required=True, type=coord_2_or_3, metavar="X,Y[,Z]")
     p.add_argument("--mask", type=int, help="Collision mask (default: every layer)")
-    p.add_argument("--areas", action="store_true", help="Also hit Area2Ds")
+    p.add_argument("--areas", action="store_true", help="Also hit Area2D/Area3D")
     p.add_argument("--exclude", action="append", metavar="NODE",
-                   help="Exclude this CollisionObject2D (repeatable)")
+                   help="Exclude this CollisionObject2D/3D (repeatable)")
     p.set_defaults(func=cmd_raycast)
 
     # reachable-ui
@@ -3915,4 +4127,15 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except BrokenPipeError:
+        # `devtools.py scene-tree | head` closes our stdout mid-print. The reply
+        # has already been consumed off the bus by then, so exit quietly instead
+        # of a traceback (moving-in:G-040). Redirect stdout to devnull first so
+        # the interpreter's own flush at exit does not raise a second time.
+        try:
+            os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        except OSError:
+            pass
+        sys.exit(0)

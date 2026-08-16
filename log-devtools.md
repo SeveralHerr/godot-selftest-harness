@@ -4236,7 +4236,7 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   instances). Fixed for the rest of this run with
   `Get-Process | Where-Object { $_.ProcessName -like "*Godot*" } | Stop-Process -Force`
   instead of killing one named pid.
-  - [plant-tower-defense:G-012] status: fixed | fixed-in: 0.21.0 | seen: 1 | harness: 0.19.0 | source: plant-tower-defense 2026-08-15
+  - [plant-tower-defense:G-012] status: fixed | fixed-in: 0.21.0 | seen: 2 | harness: 0.19.0 | source: plant-tower-defense 2026-08-15
   - Improvement: `quit --wait` already detects "STILL ALIVE" — it could also print
     `Get-Process`-style guidance for Windows specifically (kill every process matching
     the Godot binary's name, not just the one pid it tracked as bus owner), since the
@@ -4452,7 +4452,7 @@ Shipped, each with the defect planted as a gate:
   cascaded), the windowed `capture.gd` once, and the bridge game inside `step_time`
   twice — while two other sessions' games were live. Each passed on re-run; nothing
   captures the crashing invocation's stderr, so the cause is unknown.
-  - [H-058] status: open | seen: 3 | harness: 0.21.0
+  - [H-058] status: fixed | fixed-in: 0.22.0 | seen: 3 | harness: 0.21.0
   - Improvement: `check_templates.py` should keep stderr for the `--import` and capture
     invocations and print the tail on a non-zero exit (it already does for the game), and
     the `note: --import exited …` line should be a FAIL when the class cache is then
@@ -4485,3 +4485,625 @@ the harness-path exclusion (13 self-noise), 18 game findings after, 4 of them me
 with no reference anywhere. `python -m unittest discover -s tools` — 31 tests OK (was
 24). `python tools/record_version.py --record` then `--check` — OK at `0.21.0`, 13
 shipped files, 48 bus verbs + 50 CLI commands documented.
+
+## 2026-08-15 - Upstreamed 4 open gap(s) from plant-tower-defense (harness 0.18.0, 0.19.0)
+
+Pooled by `tools/upstream_gaps.py` from `C:\Users\gotmi\Documents\GitHub\plant-tower-defense\log-devtools.md`. Gap text is the project's,
+verbatim; only the id line is rewritten (qualified with the project name so
+ids from two projects cannot collide, plus a `source:` back-pointer).
+
+- Gap: **a second Godot from a sibling git worktree silently answers your bus, and
+  nothing in the failure says so.** `launch` refuses a second instance *of the same
+  checkout* by pid, but a worktree is a different directory with the same project name,
+  so the guard does not fire and both processes poll the same
+  `%APPDATA%/Godot/app_userdata/plant-tower-defense`. Errors arrive as
+  `no Game in the tree` and `Root node not found`, i.e. as bugs in your own scene.
+  `launch --isolated` fixes it but you have to already suspect the problem to reach for
+  it, and its own banner says `user:// … (SHARED)` without saying what shares it.
+  - [plant-tower-defense:G-018] status: fixed | fixed-in: 0.22.0 | seen: 1 | harness: 0.19.0 | source: plant-tower-defense 2026-08-15
+  - Improvement: have `ping` and `launch` compare the answering game's `res://` project
+    path against the client's `--path`, and report a mismatch loudly
+    (`the game answering this bus is running from <other path>`). The bridge already
+    knows both. Failing that, make `launch`'s owner-file check key on project *path*
+    rather than pid, so a worktree instance is detected as a second owner.
+
+- Gap: **`set-state` on a typed Array property silently no-ops.**
+  `set-state --node /root/Game/SeedBank --property unlocked --value '["corn_cobbler","sunflower"]'`
+  reported success; the immediately following `get-state` returned
+  `['corn_cobbler']`. No error, no warning, and the printed read-back in the
+  `set-state` reply is the thing that is supposed to catch exactly this. A `Variant`
+  Array cannot be assigned to an `Array[StringName]` in GDScript, so the write is
+  dropped — but the verb reports as though it landed.
+  - [plant-tower-defense:G-019] status: open | seen: 1 | harness: 0.19.0 | source: plant-tower-defense 2026-08-15
+  - Improvement: `set-state` already reads the property back; compare it against what
+    was requested and exit 1 with both values when they differ. That is a general fix,
+    not an Array-specific one, and it would also catch setters that clamp or ignore.
+    Where the type is known (`Array[StringName]` via `get_property_list()`'s hint
+    string), converting the parsed JSON array to the typed array before assigning would
+    make the common case work rather than merely fail loudly.
+
+- Gap: **`press` bypasses the input path, so hover state never clears** — pressing a
+  button over the bus fires `pressed` directly, so a tooltip already open stays open and
+  renders over the overlay the press just created. A real click cancels the tooltip as
+  part of the mouse event; the bridge's press does not, so a screenshot taken after
+  `press` can contain a popup a player would never see. Cost roughly fifteen minutes
+  chasing a "tooltip bleeding through the notebook" bug that only exists under the
+  harness. Workaround: none needed in the end — those tooltips were the wrong design
+  anyway and their text moved into the button labels.
+  - [plant-tower-defense:G-020] status: open | seen: 1 | harness: 0.19.0 | source: plant-tower-defense 2026-08-15
+  - Improvement: have `press` push a synthetic `InputEventMouseButton` through
+    `Input.parse_input_event` when the target is under the pointer; failing that,
+    document on the verb that hover/tooltip state is not cleared and that a screenshot
+    taken straight afterwards may contain a stale popup.
+
+- Gap: **orphaned instances fight over the bus, and the error does not say so plainly** —
+  four Godot processes accumulated across a session of launch/quit/capture cycles. The
+  symptom was not `game not running` but `Foreign instance on the bus: the reply to
+  'scene_tree' came from pid 10584, but devtools_owner.json says pid 704 owns this bus`,
+  raised part-way through a checker that had already made twenty successful calls, so
+  half its measurements were from one process and half from another. Workaround: kill
+  every Godot process from PowerShell and relaunch.
+  - [plant-tower-defense:G-021] status: open | seen: 1 | harness: 0.19.0 | source: plant-tower-defense 2026-08-15
+  - Improvement: `launch` already refuses when a live bus answers; it should also
+    recognise a *stale* owner whose pid is dead and reclaim it, and grow a
+    `launch --reap` that kills instances pointed at this project's `user://` before
+    starting. A mid-run owner change should abort loudly rather than surface as one
+    failed call among many.
+
+## 2026-08-15 - Upstreamed 26 open gap(s) from moving-in (harness 0.11.0, 0.16.0, 0.19.0)
+
+Pooled by `tools/upstream_gaps.py` from `C:\Users\gotmi\Documents\GitHub\moving-in\log-devtools.md`. Gap text is the project's,
+verbatim; only the id line is rewritten (qualified with the project name so
+ids from two projects cannot collide, plus a `source:` back-pointer).
+
+- Gap: **`find-nodes --class` silently fails on script `class_name`s** — 
+  `python tools/devtools.py find-nodes --class PauseMenu` → `0 node(s) matched:` while
+  `scene-tree` showed `/root/House/UnpackUi/PauseMenu` with
+  `script: res://scripts/ui/pause_menu.gd`. `--class` resolves through `Node.is_class()`,
+  which only knows engine classes, so every script class in the project is a silent
+  empty result. This is the worst possible failure shape for this verb: "not found" and
+  "not a class I can see" are the same output, and the CLAUDE.md line for `find-nodes`
+  ("Locate nodes by what they *are*") reads as though script classes work. It cost me
+  three wrong conclusions about where the bug was.
+  - [moving-in:G-017] status: fixed | fixed-in: 0.21.0 | seen: 1 | harness: 0.16.0 | source: moving-in 2026-08-14
+  - Improvement: resolve `--class` against the script class cache as well —
+    `node.get_script()` → `Script.get_global_name()` — and match either. Failing that,
+    when `--class X` matches zero nodes AND `X` is not a known engine class, say so:
+    `0 matched ('X' is not an engine class; script class_names are not searchable by
+    --class — try --method or --group)`. An empty result that cannot distinguish
+    "absent" from "unsearchable" is the one case worth spending a line of output on.
+
+- Gap: **a headless lint/test run leaves a stale bus owner that refuses the next launch** —
+  immediately after `run_tests.gd` exited, `python tools/devtools.py launch` failed with
+  `Error: pid 23964 still owns this bus (devtools_owner.json). that process polled the bus
+  3.1s ago, so it is live and listening`. That pid was the just-exited test runner —
+  `tasklist` showed no such process. The `--script` runners load the DevTools autoload,
+  which claims the bus and heartbeats, and nothing releases it on quit. Workaround: wait
+  ~30s for the heartbeat to go stale and re-run `launch`, which then succeeds with
+  `not a live owner (a recycled pid, or a game that stopped polling)`.
+  - [moving-in:G-018] status: fixed | fixed-in: 0.22.0 | seen: 1 | harness: 0.16.0 | source: moving-in 2026-08-14
+  - Improvement: have `dev_tools.gd` delete `devtools_owner.json` on `NOTIFICATION_WM_CLOSE_REQUEST`
+    / `_exit_tree()` when it is the owner. Cheaper alternative: skip the ownership claim
+    entirely under `--script` mode (`OS.has_feature("headless")` plus no main loop scene),
+    since a headless runner is never a bus a client wants to drive.
+
+- Gap: **`set-game-speed` silently rounds to one decimal, and 0.04 becomes a freeze** —
+  `python tools/devtools.py set-game-speed 0.04` replied `Game speed: 1.0 -> 0.0`. A
+  0.0 time scale stops the game dead while the bus keeps answering, so every subsequent
+  read returns well-formed, identical, completely stale values — the "a run that never
+  changes is broken, not passing" failure, arrived at from a command that reported
+  success. `0.1` works and `0.06` works, so the rounding is not a simple 1-dp clamp;
+  whatever it is, 0.04 lands on zero. Workaround: use 0.06 or larger and read the
+  echoed value rather than the requested one.
+  - [moving-in:G-019] status: fixed | fixed-in: 0.22.0 | seen: 1 | harness: 0.16.0 | source: moving-in 2026-08-14
+  - Improvement: refuse a resolved speed of 0.0 outright — `set-game-speed 0` has no
+    legitimate use through this verb (the bus already answers while paused, and `ping`
+    reports `tree is PAUSED`), and a value that rounds to zero should be an error
+    naming the smallest speed that works, not a silent freeze reported as a set.
+
+- Gap: **no way to ask the harness what a single render feature costs** — the whole
+  perf half of this turn was a hand-rolled loop: `find-nodes --class OmniLight3D`, then
+  `set-state ... shadow_enabled false` per node, then `performance`, then set it back,
+  repeated for `ssil_enabled`, `ssao_enabled` and `light_size`. The FPS counter swings
+  ±3 between samples, so single readings are near-useless and I had to eyeball
+  stability across repeats. Every number in this entry took four commands.
+  - [moving-in:G-020] status: fixed | fixed-in: 0.22.0 | seen: 1 | harness: 0.16.0 | source: moving-in 2026-08-14
+  - Improvement: a `perf-ab --set NODE.PROP=VALUE [--frames N]` verb that samples FPS
+    over N frames, applies the change, samples again, restores, and reports both means
+    with their spread. The primitives all exist — this is a loop the harness should own
+    rather than one every project rewrites in bash, and the mean-over-N is the part
+    hand-rolling gets wrong.
+
+- Gap: **`performance` reports one instantaneous FPS with no spread** — readings across
+  this turn ranged 35 to 70 on identical builds depending on view and warm-up, which
+  made the first shadow measurement (70 -> 37) look like a 47% regression when the
+  controlled A/B says the true cost is 2 fps. I nearly gated a feature behind a video
+  option on the strength of the bad number.
+  - [moving-in:G-021] status: fixed | fixed-in: 0.22.0 | seen: 1 | harness: 0.16.0 | source: moving-in 2026-08-14
+  - Improvement: sample over a window and report `fps: mean 50.2, min 47, max 53, n=60`.
+    A single frame's rate is not a measurement and presenting it as one invites exactly
+    the wrong conclusion.
+
+- Gap: **[G-021] `performance` reports one instantaneous FPS with no spread** —
+  - [moving-in:auto-fd14cd] status: fixed | fixed-in: 0.22.0 | seen: 1 | source: moving-in 2026-08-14
+  status: open | **seen: 2** | harness: 0.16.0. Bit again and worse this time: reading
+  the three quality presets straight after switching them produced
+  `HIGH 110 / MEDIUM 50 / LOW 105`, a non-monotonic ladder that would have led me to
+  report that the High preset was the fastest one. The fix was `wait-frames 90` between
+  the switch and the read, plus a second reading per tier to confirm it had settled.
+  - Improvement: unchanged from the original entry — sample over a window and report
+    `fps: mean 50.2, min 47, max 53, n=60`. Add to that: `performance` should note when
+    the last N frames are still trending, because "the renderer has not settled" and
+    "this is the frame rate" are indistinguishable in a single sample and the first one
+    is what you get immediately after every settings change worth measuring.
+
+- Gap: **`name_check.py` does not flag a script method that shadows an engine virtual
+  with the wrong signature** — `func _set(action: Callable) -> void:` passed
+  `name_check.py` clean (`errors: 0 | warnings: 0`) and then failed the import gate with
+  `Parse Error: The function signature doesn't match the parent. Parent signature is
+  "_set(StringName, Variant) -> bool"`. The checker already resolves engine class
+  members from its API index, which is exactly the data needed: if a script declares a
+  method whose name matches a virtual on any ancestor engine class, its arity and
+  parameter types have to match too.
+  - [moving-in:G-022] status: fixed | fixed-in: 0.22.0 | seen: 1 | harness: 0.16.0 | source: moving-in 2026-08-14
+  - Improvement: add a `virtual_signature_mismatch` error. The names most at risk are
+    the short, tempting ones a UI file naturally wants — `_set`, `_get`, `_init`,
+    `_process`, `_ready`, `_notification` — and the symptom is maximally confusing
+    because Godot reports the failure against the *dependent* script, not the one with
+    the mistake. Cheap to add given the index already exists, and it moves a failure
+    from a 40 s engine round trip to a 2 s static one.
+
+- Gap: **`raycast` is 2D-only and reports `clear` in a 3D project rather than refusing** —
+  `python tools/devtools.py raycast --from 6.0,0.6 --to 6.0,-0.2` returned
+  `clear from (6.0, 0.6) to (6.0, -0.2) on mask 4294967295 ... note that a ray STARTING
+  INSIDE a shape reports nothing`, in a project whose physics engine is Jolt **3D** and
+  where a wall demonstrably stands on that line. The verb takes `X,Y` pairs and queries
+  `direct_space_state_2d`, so in a 3D game it can only ever answer "clear" — and it
+  dresses that up with a plausible explanation ("a ray starting inside a shape reports
+  nothing") which sent me looking for a geometry problem that did not exist. The
+  CLAUDE.md table lists it among the general verbs with no dimensional caveat.
+  - [moving-in:G-023] status: fixed | fixed-in: 0.22.0 | seen: 1 | harness: 0.16.0 | source: moving-in 2026-08-14
+  - Improvement: detect the project's dimension (a `Node3D`/`Node2D` root, or simply
+    whether `World2D` has any bodies) and either refuse with
+    `raycast is 2D-only; this project's main scene is 3D - use --from X,Y,Z --to X,Y,Z`
+    or accept 3-component coordinates and query `direct_space_state_3d`. A verb that
+    answers confidently in the wrong dimension is worse than one that is absent.
+
+- Gap: **the bridge cannot pin the camera while the game holds the mouse** — after the
+  fix I re-cast and got `normal {0, 1, 0}`, which looked like the fix picking the wrong
+  axis. It was not: `debug_state` showed `"heading": -17.0, "pitch": -31.1` when I had
+  set heading 0 and never touched pitch. The game had the cursor captured and my
+  **physical mouse** had been steering the camera between commands, so the ray was
+  pointing into the floor. Every `set_heading` I had issued was being overwritten within
+  frames. Workaround: `capture_mouse(false)`, then `set_heading`, then `set-state _pitch 0`
+  AND `set-state Camera.rotation 0,0,0` — the pitch lives in two places and setting one
+  leaves the camera where it was.
+  - [moving-in:G-024] status: open | seen: 1 | harness: 0.16.0 | source: moving-in 2026-08-14
+  - Improvement: this is the "a run that never changes is broken" hazard in reverse — a
+    run that changes when nothing asked it to. Two things would close it: a
+    `set-feature --ignore-os-input true` that makes the game drop real
+    `InputEventMouseMotion`/`Key` while a bridge session is driving it, and a note in the
+    Gotchas that a captured cursor means the desktop is a second, invisible input source.
+    Any project whose camera reads relative mouse motion has this, and the symptom is a
+    measurement that silently disagrees with the command that set it up.
+
+- Gap: **[G-024] the bridge cannot pin the camera while the game holds the mouse** —
+  - [moving-in:auto-abf843] status: open | seen: 1 | source: moving-in 2026-08-14
+  status: open | **seen: 2** | harness: 0.16.0. Bit twice more this turn. Two matched
+  A/B screenshots came back framed at completely different parts of the kitchen because
+  the physical cursor moved between them, which makes a visual comparison worthless
+  without any indication that anything went wrong. The working incantation is now four
+  commands before every screenshot: `capture_mouse(false)`, `teleport_to_grid`,
+  `set_heading`, `set-state Camera.rotation 0,0,0`.
+  - Improvement: unchanged — `set-feature --ignore-os-input true`. Adding to the
+    original note: a `screenshot --from GRID --heading D --pitch D` convenience would
+    close it from the other direction, since "put the camera exactly here and capture"
+    is what every visual regression check actually wants, and hand-rolling it is four
+    commands that are easy to get subtly wrong.
+
+- Gap: **every engine-side gate claims the bus, so none of them can run while another
+  session drives the game** — [G-018] again from the other direction, and it deserves
+  its own entry because the consequence is different. `lint_project.gd` is the only
+  thing that compiles shaders, and it runs under `--script`, which loads the DevTools
+  autoload, which takes ownership of `devtools_owner.json`. Running it while a colleague
+  session has a live game would hijack their bus mid-command. So the one gate I actually
+  needed — "does this GLSL compile" — was unavailable for the entire turn, on a change
+  that was *nothing but* GLSL.
+  - [moving-in:G-025] status: fixed | fixed-in: 0.22.0 | seen: 1 | harness: 0.16.0 | source: moving-in 2026-08-14
+  - Improvement: two things, and the first is nearly free. **(1)** `lint_project.gd`
+    should not claim the bus at all — nothing in a lint run answers commands, so the
+    autoload's ownership claim is pure cost. Gate the claim on the game actually
+    running a scene. **(2)** Ship the isolated-compile trick as a flag:
+    `lint_project.gd -- --shaders-only --isolated` copying `scan_root`'s shaders into a
+    temp project with its own `.godot` and no autoloads. What I hand-rolled this turn
+    was 30 lines and it is the right answer for any project where more than one agent
+    might be working, which is increasingly the normal case. The check itself is the one
+    already documented in the lint header: assign `Shader.code`, then
+    `RenderingServer.get_shader_parameter_list()` returns `[]` on a compile failure —
+    that works under the dummy driver, so it needs no renderer and no project.
+
+- Gap: **`screenshot --hide` cannot hide a HUD, because a HUD root is a `CanvasLayer`
+  and the verb matches `CanvasItem` only** — and it warns rather than failing, so the
+  capture is written anyway and looks fine until you notice the HUD is still in it.
+  ```
+  $ python tools/devtools.py screenshot --filename hidetest.png \
+      --hide /root/House/UnpackUi/GameHud --hide /root/House/UnpackUi/UnpackPanel
+  WARNING: --hide/--hide-group matched no CanvasItem - the capture shows everything.
+  Screenshot saved: .../hidetest.png
+  ```
+  This is the verb's headline use case — the docs sell it as "can't leave the HUD
+  switched off" — and the one node type every HUD is rooted in is the one type it
+  refuses. Worked around by writing `visible` on each layer with `set-state` before the
+  batch and restoring it in a shell `trap`, which is exactly the un-restorable manual
+  toggle the verb exists to prevent.
+  - [moving-in:G-026] status: fixed | fixed-in: 0.20.0 | seen: 2 | harness: 0.16.0 | source: moving-in 2026-08-14
+  - Improvement: accept `CanvasLayer` in the `--hide` node walk. It has a `visible`
+    property with the same semantics, so this is a type check widening, not new
+    machinery. Failing that, make a `--hide` that matched nothing an **exit 1** — a
+    capture that silently ignored the flag is worse than no capture, because it is
+    presented as the thing that was asked for.
+
+- Gap: **two devtools commands issued back to back can collide on the result file on
+  Windows**, and the command reports failure after the game has already acted on it.
+  ```
+  $ python tools/devtools.py run-method --node /root/House/Player --method set_heading --args "[-20]"
+  PermissionError: [WinError 32] The process cannot access the file because it is being
+  used by another process: '...\moving-in\devtools_results.json'
+  ```
+  The heading had in fact been applied; only the read-back of the reply failed. That is
+  the dangerous shape — a caller scripting a sequence sees an exception and cannot tell
+  whether to retry, and retrying a non-idempotent verb is its own bug. Worked around with
+  `sleep 0.25` between every call in `tools/capture_styles.sh`, which is guesswork
+  standing in for a lock.
+  - [moving-in:G-027] status: fixed | fixed-in: 0.20.0 | seen: 2 | harness: 0.16.0 | source: moving-in 2026-08-14
+  - Improvement: retry the result-file read on `PermissionError`/`WinError 32` for a few
+    hundred milliseconds before giving up — Windows holds a brief exclusive lock while
+    the game writes, and the file is complete moments later. A bare retry loop around the
+    read in `devtools.py` closes it; the alternative (write to a temp name and `os.replace`
+    game-side, which is atomic on Windows) is better still and fixes it for every client.
+
+- Gap: **[G-025] every engine-side gate claims the bus** — status: open | **seen: 2** |
+  - [moving-in:auto-c0be6f] status: fixed | fixed-in: 0.22.0 | seen: 1 | source: moving-in 2026-08-14
+  harness: 0.16.0. `launch` immediately after the lint run was refused with
+  `pid ... still owns this bus`, the lint runner having taken ownership on its way past.
+  Same root cause as G-018, recorded again here because this is the second time in one
+  session that the *ordering the workflow itself prescribes* produced the failure.
+  - Improvement: unchanged — `lint_project.gd` should not claim the bus at all. Nothing
+    in a lint run answers commands, so the ownership claim is pure cost and its only
+    observable effect is breaking the launch that always follows it.
+
+- Gap: **[G-025] every engine-side gate claims the bus** — status: open | **seen: 3** |
+  - [moving-in:auto-bd25ef] status: fixed | fixed-in: 0.22.0 | seen: 1 | source: moving-in 2026-08-14
+  harness: 0.16.0. Third time this session. This run it refused `launch` **twice** in a
+  row, and `ping` diagnosed it as `that process EXISTS but last polled the bus 9s ago, so
+  it is not listening: the tree is paused, the game is wedged, or the pid was recycled` —
+  three plausible causes, none of them the actual one, which was the lint process on its
+  way out still holding the claim. The message cannot name the real cause because the
+  harness does not distinguish "a headless runner owns this" from "a game owns this".
+  - Improvement: unchanged and now urgent enough to be worth doing before anything else
+    in this log — `lint_project.gd` and `run_tests.gd` should not claim the bus. Failing
+    that, the owner file should record HOW the owner was started, so `ping` can say
+    `owned by a headless --script run, which does not answer commands; it will clear
+    shortly` instead of listing three wrong guesses.
+
+- Gap: **nothing looks for a signal the project emits and nobody connects** — the exact
+  shape of this bug. `restart_requested` was declared, emitted from two call sites, and
+  had zero listeners for the life of the project; lint validates scenes, `name_check`
+  resolves names (the signal exists, so it resolves), and every test that touches the UI
+  either ignores restart or connects the signal itself. The one gate that comes close is
+  lint's `--find-orphans`, which reports public functions called only from tests — this
+  is the same idea one step over.
+  - [moving-in:G-028] status: fixed | fixed-in: 0.22.0 | seen: 1 | harness: 0.16.0 | source: moving-in 2026-08-15
+  - Improvement: extend `--find-orphans` to signals: for each `signal x` declared under
+    `scan_root`, report it when the project emits it and nothing outside the declaring
+    file connects to it. Advisory, like the function version, because a signal meant for
+    an external host is a legitimate design (this project has one — `quit_requested`,
+    which deliberately checks `has_connections()` before falling back). That distinction
+    is exactly why it should be advisory and exactly why it is worth printing: the two
+    cases look identical in the source and only one of them is a dead button.
+
+- Gap: **input events cannot be synthesised into a specific node's handler** — [G-029].
+  The bridge can drive actions (`input tap`), raw keys (`key`) and touch (`touch`), and
+  all three go through `Input.parse_input_event` to the whole tree. There is no way to
+  hand a specific node a specific `InputEvent`, and no way at all to produce an
+  `InputEventMouseMotion` with a chosen `relative` — which is the single most common
+  thing a first-person camera reads. `run-method --method _unhandled_input --args
+  '[{"__type__":"InputEventMouseMotion"}]'` is silently a no-op: the arg cannot become
+  an object, the call succeeds, and the state does not change.
+  - [moving-in:G-029] status: fixed | fixed-in: 0.22.0 | seen: 1 | harness: 0.16.0 | source: moving-in 2026-08-15
+  - Improvement: a `mouse move --relative X,Y [--buttons N]` verb that builds a real
+    `InputEventMouseMotion` and pushes it through `Input.parse_input_event`, matching
+    what `key` already does for keyboard. Mouse-look is the one input a first-person
+    game cannot be tested without, and it is the one the harness cannot produce. Second
+    best, and cheaper: say so in the CLAUDE.md input section, so the next person extracts
+    a testable method instead of spending a cycle discovering it.
+
+- Gap: **`performance`'s orphan count is the only leak signal, and it misses in-tree
+  accumulation** — the case above. A node parented to a live node is never orphaned, so
+  a UI that adds a layer per visit, a pool that grows per spawn, or a list that appends
+  per event all report `orphan growth +0` forever.
+  - [moving-in:G-030] status: fixed | fixed-in: 0.22.0 | seen: 1 | harness: 0.16.0 | source: moving-in 2026-08-15
+  - Improvement: `performance` already prints `Total nodes:` — the gap is that nothing
+    baselines or diffs it. Baseline it alongside orphans under `--reset-baseline` and
+    gate on its growth the same way, and this would have been caught the moment the menu
+    was opened twice. A stronger version: a `node-delta` verb reporting which node TYPES
+    grew since the baseline, which turns "something is accumulating" into "three more
+    CanvasLayers under UnpackUi".
+
+- Gap: **`validate-ui`'s baseline is keyed on auto-generated node paths, so an unrelated
+  insertion invalidates it wholesale** — this run reported `53 UI issues found (30 NEW,
+  23 pre-existing)` where the previous session reported 0 NEW / 53 pre-existing. Same 53
+  findings. Nothing in my diff touches UI. The findings are on runtime-built rows named
+  `@VBoxContainer@465` / `@HBoxContainer@466`, and a parallel session's commit inserting a
+  `TitleLayer` sibling renumbered them — so 30 baseline keys stopped matching and
+  re-presented as NEW. A gate that fires on someone else's unrelated commit is a gate that
+  gets waved through, which is the exact failure the baseline was added to prevent.
+  - [moving-in:G-031] status: fixed | fixed-in: 0.22.0 | seen: 2 | harness: 0.16.0 | source: moving-in 2026-08-15
+  - Improvement: key the baseline on something stable across renumbering — the node's
+    path with `@Type@NNN` segments normalised to `@Type@*`, or path-from-nearest-named-
+    ancestor plus sibling index. Failing that, report `NEW (path changed, matched by
+    rule+type)` as a third category so a renumber is visibly not a regression.
+
+- Gap: **`sample-pixels` and `screenshot --region` disagree about what is at a given
+  rect** — `sample-pixels --rect 350,470,90,90` reported `mean #99b470` (olive green);
+  `screenshot --region 350,470,90,90` on the same frame, seconds apart, returned a crop
+  of tan cabinet and dark line with no green in it, and no olive appears anywhere in the
+  full frame. I could not resolve which coordinate space or colour handling differs, and
+  abandoned `sample-pixels` for the run, measuring the saved PNGs with PIL instead. The
+  cost was real: an A/B I ran through `sample-pixels` gave two readings that disagreed by
+  more than the effect I was testing, and I spent several commands chasing a camera drift
+  that turned out not to exist.
+  - [moving-in:G-032] status: fixed | fixed-in: 0.22.0 | seen: 1 | harness: 0.16.0 | source: moving-in 2026-08-15
+  - Improvement: state the origin and colour space in the `sample-pixels` reply
+    (`"origin": "top-left"`, `"space": "srgb"`) and make its rect interpretation
+    identical to `screenshot --region`'s by construction — ideally one shared crop
+    helper, so the two verbs cannot drift apart again. Until then the two should not be
+    documented as interchangeable views of the same pixels.
+
+- Gap: **an edited resource cannot be reloaded into a running session** — after editing
+  `gouache.gdshader`, `style_set` re-`load()`ed it and got the version compiled at
+  startup, because Godot's resource cache is keyed on path. The edit appears to have had
+  no effect, which is indistinguishable from an edit that genuinely did nothing. Worked
+  around with `ResourceLoader.load(path, "Shader", CACHE_MODE_IGNORE_DEEP)`, and every
+  shader iteration before that cost a full quit/launch/dismiss-title/re-pose cycle.
+  - [moving-in:G-033] status: fixed | fixed-in: 0.22.0 | seen: 1 | harness: 0.16.0 | source: moving-in 2026-08-15
+  - Improvement: a generic `reload --path res://...` verb that re-loads a resource with
+    `CACHE_MODE_IGNORE_DEEP` and reports what re-loaded, so iterating on any resource a
+    running game holds does not require a relaunch.
+
+- Gap: **Phase 2 declares the game "up" without noticing the tree is PAUSED, and every
+  later phase then measures a frozen game** — `entry_hook` is empty in this project's
+  config, so /verify skipped the advance-past-the-menu step entirely and went straight to
+  Phase 3. `performance` reported `FPS: 68.0` and `validate-all` reported `[OK] 2 scenes
+  validated` against a tree that was not stepping. `ping` *does* say `tree is PAUSED
+  (bridge still polling: PROCESS_MODE_ALWAYS)`, but nothing in Phase 2 asks you to read
+  it, and I only found out at Phase 4 because `step-time` happened to warn
+  `WARNING: the tree is paused - nothing actually advanced.` A whole phase of green
+  results had already been recorded by then.
+  - [moving-in:G-034] status: fixed | fixed-in: 0.20.0 | seen: 1 | harness: 0.16.0 | source: moving-in 2026-08-15
+  - Improvement: make Phase 2's post-launch check read the paused flag `ping` already
+    returns — after the entry hook (or after launch, when no hook is configured), a
+    paused tree should stop the run with "the tree is paused; set `entry_hook` to whatever
+    dismisses the menu, because FPS, validate-all and every animation assertion below are
+    meaningless on a frozen tree". The datum is already in the reply; only the gate is
+    missing.
+
+- Gap: **`quit` reports a survivor that has already exited, and tells you to kill a pid
+  that is gone** — `python tools/devtools.py quit` printed `WARNING: pid 1440 is STILL
+  ALIVE 10s after quit` with `taskkill /F /PID 1440` and exited 1. Seconds later
+  `tasklist /FI "PID eq 1440"` returned `INFO: No tasks are running which match the
+  specified criteria` and the taskkill itself returned `ERROR: The process "1440" not
+  found`. The game had shut down; it just took longer than the 10 s default. The exit 1
+  is the problem, not the wait: this project's Godot exits slowly enough to trip it on an
+  ordinary run, and an exit code that cries wolf is one you stop reading — which is
+  exactly the failure the code exists to prevent (a real survivor answering the bus
+  alongside the next launch).
+  - [moving-in:G-035] status: fixed | fixed-in: 0.20.0 | seen: 1 | harness: 0.16.0 | source: moving-in 2026-08-15
+  - Improvement: re-poll the pid once after the wait expires before declaring a survivor,
+    and distinguish the two outcomes in the exit code — "gone, but took longer than
+    `--wait`" is a note at exit 0, "still alive on re-poll" is the exit 1 that means
+    something.
+
+- Gap: **`scaffold_install.py config` blanks a scaffold-owned key to the template's
+  static default the moment a call omits it**, when that key's *real* value only
+  ever comes from being explicitly `--set` on a separate, later call. Step 7's call
+  (`--set main_scene=... --set hud_layer_name=...`, no `godot_version`) rewrote
+  `godot_version` from `"4.7.1"` (recorded by a prior scaffold run) to `""`. Cause:
+  `patch_config` builds `proposed = dict(template)` then `.update(overrides)`, so a
+  key absent from `--set` still enters `proposed` at the template's blank default;
+  since `godot_version` was in the previous run's `owned` list and unchanged since,
+  `scaffold_owns` is true and the blank "proposal" silently overwrites the real
+  value. `godot_bin` escaped only because it happened to already be project-owned
+  from an earlier manual edit — the same call would have blanked it too otherwise.
+  Confirmed by re-running step 11's detection afterward, which restored it.
+  - [moving-in:G-036] status: fixed | fixed-in: 0.20.0 | seen: 1 | harness: 0.16.0 | source: moving-in 2026-08-15
+  - Improvement: in `patch_config`, don't seed `proposed` with template defaults for
+    keys the caller didn't pass via `--set` this invocation — only compare/merge keys
+    actually present in `overrides` (plus genuinely new schema keys, via `template`
+    minus `existing`). A key nobody supplied this run should never be treated as
+    "scaffold proposes blank," regardless of ownership. Proposed diff:
+    ```python
+    # before
+    proposed = dict(template)
+    proposed.update(overrides)
+    ...
+    for key, value in proposed.items():
+    # after
+    new_keys = {k: v for k, v in template.items() if existing is None or k not in existing}
+    proposed = dict(new_keys)
+    proposed.update(overrides)
+    ...
+    for key, value in proposed.items():
+    ```
+    (When `existing is None` — first-ever install — behavior is unchanged: every
+    template key is still proposed.)
+
+- Gap: **`step-time`'s reported rate does not match the actual `_process` delta
+  accumulation**, or the two disagree in a way this session did not get to the bottom
+  of. Two isolated 1s-scale windows measured on the SAME spinning fixture (rate =
+  16 deg/s by design) gave *different* apparent rates: ~44.5 deg/s over one
+  `step-time --seconds 3` window and ~95.9 deg/s over a following
+  `step-time --seconds 1` window (computed from `rotation.y` deltas against the
+  tool's own reported `process time`). Both are wrong, and they disagree with each
+  other, which rules out a single fixed multiplier. Not investigated further this
+  session — the qualitative claim (does it spin at all, does it keep spinning) is what
+  `moving-in-ad0` needed, and that was answered cleanly; only the quantitative rate
+  reading is suspect. Left as a live discrepancy rather than a diagnosed root cause: it
+  could be `_process` firing at an idle-frame rate decoupled from the 60 Hz physics
+  count `step-time` reports, `rotation.y`'s Euler read-back wrapping non-linearly
+  across ±π, or something in how `step-time` drives frames under `--mute --headless`-
+  adjacent launch. Any test that needs an exact real-time rotation *rate* (not just "did
+  it move") should not trust `step-time`'s printed duration as the actual elapsed
+  `_process` time until this is root-caused.
+  - [moving-in:G-039] status: open | seen: 1 | harness: 0.19.0 | source: moving-in 2026-08-15
+  - Improvement: reproduce with a minimal counter script (`_process(delta): count +=
+    1; total_delta += delta`) driven the same way, and compare `total_delta` against
+    `step-time`'s own reported `process_seconds` — if they disagree, the bug is in
+    `step-time`'s frame-driving loop, not in this project's script.
+
+- Gap: **a large `scene-tree` reply piped into `head` wedges the game.**
+  `python tools/devtools.py scene-tree --depth 4 | head -50` printed fine, and every verb
+  after it returned `game not running: 'find_nodes' was never picked up ... that process
+  EXISTS but last polled the bus 14s ago`. The game had to be killed and relaunched; the
+  same `scene-tree --depth 3` on a fresh launch worked perfectly, so the reply itself was
+  never the problem — closing the pipe mid-write is. This is a footgun for exactly the
+  advice the harness gives (prefer `scene-tree` over a screenshot), since the first thing
+  anyone does with a 1000-node tree is pipe it somewhere narrower.
+  - [moving-in:G-040] status: fixed | fixed-in: 0.22.0 | seen: 1 | harness: 0.19.0 | source: moving-in 2026-08-15
+  - Improvement: have the client write large replies to a file and print the path (as
+    `screenshot` already does), or catch `BrokenPipeError` in `devtools.py`'s output path
+    and finish draining the result file before exiting — either one keeps a truncated
+    read from leaving the bus in a state the game cannot recover from.
+
+## 2026-08-15 — 0.22.0: it shares the machine — the top ten from 27 newly pooled gaps
+
+Ranked from `moving-in` G-017..G-040 (26 entries pooled for the first time this turn),
+`plant-tower-defense:G-018`, `harness-test-1:G-001` (= gh#16, shipped in 0.21.0) and this
+repo's H-058. gh#11–16 were all closed by 0.21.0 and nothing newer is filed, so this turn is
+the project logs' turn. Two themes carried nine of the ten items: **several sessions,
+agents and worktrees share one machine** (a bus that assumes it is alone hands out
+plausible wrong answers), and **a number is a measurement only with its spread**. Both are
+now `PURPOSE.md` commitments (*It shares the machine*; the spread paragraph under *Gate on
+the number that means something*), and the "Not concurrent" non-goal is narrowed to
+one bus — several buses on one machine is the supported case now.
+
+Verified before building, per [H-033]: `moving-in:G-017` (find-nodes --class), `G-026`
+(screenshot --hide on a CanvasLayer), `G-027` (WinError 32 on the result file), `G-034`
+(Phase 2 paused gate), `G-035` (quit re-poll) and `G-036` (config blanking) were already
+fixed in 0.20.0/0.21.0 under gh#5/6/7/15 — the moving-in log was written on 0.16.0 —
+and are marked so below rather than rebuilt ([H-044] again: six of 26 pooled entries were
+open under one id and fixed under another).
+
+1. **A `--script` instance is passive on the bus** (`moving-in:G-018`, `G-025` ×3). The
+   mechanism, read from `_ready()`: every runner brings the autoload up, and its
+   `_ready()` ran `_clear_stale_files()` (deleting the live game's owner, command AND
+   result files) then `_write_owner_file()` with its own pid — so a headless lint in one
+   session hijacked a colleague's game mid-command and, once the runner exited, refused
+   their next `launch` for 30 s with a dead-pid owner. `_is_script_run()` reads
+   `--script`/`-s` off the engine args; a passive instance registers handlers (tests may
+   call them in-process), never touches a bus file, never polls, never heartbeats.
+   Stage 4 plants a live-looking owner record and an in-flight command in the scratch
+   user dir before both runners and asserts both survive byte-for-byte.
+2. **The owner file and `ping` carry `project_path`** (`plant-tower-defense:G-018`). A
+   worktree sibling shares the project name, so the same `user://` and bus; its game
+   overwrites the owner record with its own pid and from then on the reply-pid check is
+   satisfied by the wrong game. The client compares the owner's path to its `--path`
+   *before writing the command* and raises `ForeignInstanceError` naming both checkouts;
+   `launch` says the same in its refusal; `ping` prints the path and flags a mismatch.
+   Four engine-free unit tests, one of which asserts the command file was never written.
+3. **`performance` measures FPS over a window** (`G-021` ×2, `G-020`): `--frames N`
+   (default 30) → `fps` mean, `fps_min/max`, `fps_samples`, `fps_window_sec`,
+   `fps_instant`, `fps_settling` when the halves disagree >15%; `findings` uses it too.
+   `set-game-speed` refuses a scale below 0.01 and prints 3 dp (`G-019`: `0.04` echoed as
+   `1.0 -> 0.0`). Not built: `perf-ab` — `set-state` + `performance --frames` is the loop,
+   and the part hand-rolling got wrong (mean-over-N) is the part that shipped.
+4. **`raycast` is 2D or 3D by arity** (`G-023`): `[x,y,z]` queries `direct_space_state`
+   3D with `layer_names/3d_physics`; `data.space` says which; a 2D ray on a tree whose
+   only colliders are `CollisionObject3D`s is refused naming `--from X,Y,Z`. Counted from
+   the tree, not the physics monitors — a static body is not an "active object". Stage 5
+   plants a Wall2D and a Wall3D, hits each in its space, and removes the 2D wall to see
+   the refusal fire.
+5. **`validate-ui`'s baseline survives auto-name renumbering** (`G-031` ×2): keys
+   normalise `@Type@NNN` → `@Type`, with multiplicity (three accepted rows under one key
+   stay accepted, a fourth is NEW); pre-0.22.0 baselines are normalised on read. Stage 5
+   frees and rebuilds an auto-named holder (0 NEW), then adds one more broken row (1 NEW).
+6. **`performance` reports in-tree node growth** (`G-030`): `node_baseline` /
+   `node_growth` sampled with the orphan baseline, `--by-type` → `node_types_delta`.
+   Stage 5 parents 7 nodes and asserts growth +7, `Node2D +7`, orphan growth 0.
+7. **`mouse-move --relative DX,DY [--steps N]`** (`G-029`): a real
+   `InputEventMouseMotion` through `Input.parse_input_event`. Stage 5's fixture counts
+   `_unhandled_input` motion events and reads the last `relative` (10, −2 from 40,−8 in
+   4 steps). The first cut failed there organically — `screen_position` is not a property
+   of `InputEventMouseMotion` in 4.7 and the handler aborted with an empty reply.
+8. **`reload res://path`** (`G-033`): `CACHE_MODE_REPLACE`, and when the loader hands back
+   a new object (shaders, binaries) the stored properties are copied onto the cached
+   instance so holders see the edit. Stage 5 rewrites a held `.tres` (11 → 23) and a held
+   `.gdshader` (0.5 → 0.75) and reads both back through the fixture. GDScript has no
+   `ResourceCache`; a REUSE load of a cached path is the cached instance.
+9. **`name_check.py` gains `virtual_signature_mismatch`** (`G-022`): the index now carries
+   `virtuals` (`is_virtual` methods with `[required, total]` arity) and a hand table for
+   `Object`'s script-level virtuals (`_set`, `_get`, `_notification`, …), which are **not
+   in `--dump-extension-api`** — the first cut passed every scratch stage and named
+   nothing, because `_set` was simply absent from the dump. An index without the table
+   reports the check SKIPPED and `--refresh-api` regenerates it. Stage 2.5's planted file
+   carries the verbatim `func _set(action: Callable)` plus three negative controls (a
+   correct `_process`, an extra-optional-arg `_notification`, an inner class's
+   `_process`) and asserts the rule names `_set` only. **Real projects**: 0 findings across
+   plant-tower-defense (39 scripts), moving-in (57), findmyballs (32), gather (174).
+10. **Lint's orphan scan covers signals** (`G-028`): `Signals: N of M declared signal(s)
+    have no listener anywhere` — declared, emitted, connected by no other game file and
+    no scene, tests not counting as the game hearing it. Advisory. Stage 4 plants a
+    dead button and a heard control. (The runtime `findings` check `signal_unconnected`
+    already existed for live nodes; this is the headless, no-game counterpart.)
+
+Also: `sample-pixels` states `origin`, `space`, `image_size`, `same_image_as_screenshot`
+(`G-032` — same image, same `Rect2i` as `screenshot --region`, by construction; the
+reported disagreement was on 0.16.0 and did not reproduce by reading); `devtools.py`
+exits quietly on `BrokenPipeError` (`G-040` — the client half; whether the *game* still
+wedges after a truncated pipe needs a project sighting); `check_templates.py` keeps
+`--import`'s and the windowed capture's stderr and FAILs when `--import` leaves no class
+cache ([H-058]). And gh#17, filed mid-turn by the session that landed 0.21.0 on master while
+this one was building 0.22.0: the `harness-release` skill gains §6b (land on master in a
+throwaway worktree, assert tree-hash equality with the release commit and a stamp-clean
+`--check` before pushing), its §6 block pushes the release branch rather than `master`, and
+§0a refreshes the index before trusting `git status` — the count moved under exactly this
+pair of concurrent sessions.
+
+- Not done, deliberately: `moving-in:G-024` (`--ignore-os-input`) — needs a way to tell
+  synthesized events from OS ones inside `_input`, and the cheap half (say so in the docs,
+  and `mouse-move` warns when the cursor is captured) shipped; `G-039` (step-time rate)
+  — still needs the project's repro; the `first-frame` verb from moving-in's *second*
+  `G-027` — the id collision means it pooled as one entry under the fixed one, so it is
+  re-filed here as [H-059] below rather than lost.
+
+- Value: **warranted** — three checks failed for reasons the reports did not predict, and
+  one real-project run changed nothing only because it was run.
+  - Expected: ten point fixes from a well-written log.
+  - Got: `_set` absent from the extension API (item 9) — a check that would have shipped
+    reporting clean forever; `screen_position` not a property (item 7); a `ResourceCache`
+    that GDScript does not have (item 8, caught by the parse stage before the bridge).
+  - Cheaper: the parse stage (40 s) for item 8; the 15-second real-project runs for item 9.
+
+- Gap: **moving-in's second `[G-027]` (a `first-frame` verb: what can the player see on
+  frame N — visible CanvasLayers, topmost Control, paused, cursor mode) was lost to an id
+  collision.** `upstream_gaps.py` keys on id, so two entries with one id pool as one and
+  the second is silently the one that is not there. The idea itself is good — it is the
+  one state every game has and no check looks at.
+  - [H-059] status: open | seen: 1 | harness: 0.22.0
+  - Improvement: `upstream_gaps.py` should detect a duplicate id in the *source* log and
+    append both, suffixing the second (`G-027b`) and saying so, rather than pooling the
+    first and dropping the second. Then build `first-frame`.
+
+- Gap: **`performance`'s `fps_max` is meaningless headless** — 58823 fps from a 17 µs
+  frame, because a headless frame does no work and waits for nothing. Harmless (min and
+  mean are the numbers a gate reads) but the line reads as broken.
+  - [H-060] status: open | seen: 1 | harness: 0.22.0
+  - Improvement: cap or annotate `fps_max` when `DisplayServer.get_name() == "headless"`,
+    the way geometry findings already carry the headless caveat.
+
+**Validation run this turn:** `python tools/check_templates.py` — OK (fourth run; runs
+one to three failed as described above), new lines: `stage 2.5 names: … virtual_signature_mismatch names _set only`, `stage 4 lint: signals 1 of 2 unheard (harness_dead_button named, harness_heard_signal not)`, `stage 4 runners: a planted owner record and in-flight command survived both --script runners untouched (passive bus)`, `stage 5 bridge: validate_ui baseline survives auto-name renumbering (0 NEW), and one extra auto row is exactly 1 NEW`, `stage 5 bridge: ping/owner carry project_path = the scratch; the same game read from another --path is reported foreign`, `stage 5 bridge: performance --frames 24 -> mean 157.5 in [143.5, 58823.5] over 0.15s, --frames 0 instantaneous; 7 in-tree nodes -> node_growth +7, by-type Node2D +7, orphan growth 0`, `stage 5 bridge: set_game_speed 0.0 refused (names the floor), 0.04 applied as 0.04, restored`, `stage 5 bridge: raycast 3D hits Wall3D (space 3d), 2D hits Wall2D, mixed arity refused, 2D on a 3D-only tree refused naming X,Y,Z`, `stage 5 bridge: mouse_move 40,-8 in 4 steps reached _unhandled_input 4 times, last relative (10, -2)`, `stage 5 bridge: reload updated a held .tres (font_size 11 -> 23) and a held .gdshader (0.5 -> 0.75) in place; missing path refused`.
+Confirmed to FAIL under mutation - eight one-line mutations in one run (mutation script asserted each anchor once; `grep -c` of the mutated lines printed `5` and `1` between the edit and the run; both files restored byte-exact against a pre-mutation copy, `cmp` OK), each check naming itself: `signal scan reports 0 of 2`, `a --script runner touched the bus it does not own (moving-in:G-018/G-025): owner file REWRITTEN` (lint AND tests), `after renumbering the auto-named holder, findings must stay pre-existing: new=1 pre=4 of 5; NEW paths ['/root/Main/@VBoxContainer@9/@Button@8']`, `ping.project_path should name the scratch project, got None`, `7 nodes parented under a live node must show as node_growth 7, got 0`, `set_game_speed 0.0 must be refused naming the floor, got 'Game speed: 1.000 -> 0.000'`, `a 2D raycast on a tree whose only colliders are 3D must be refused`; the reload mutation (REPLACE -> REUSE) in a second run: `after reload the HELD LabelSettings should read font_size 23, got 11`. The virtual-signature and mouse_move checks failed organically before they passed (items 7 and 9), and the first mutation run showed the reload property-copy branch is never taken on 4.7 - the shader loader re-parses in place too - so that branch stays as a fallback for loaders that do not.
+`python -m unittest discover -s tools` — 35 tests OK. Real-project `name_check.py`
+runs as in item 9. `python tools/record_version.py --record` then `--check` — OK at
+`0.22.0`.

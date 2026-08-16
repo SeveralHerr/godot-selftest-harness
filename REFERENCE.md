@@ -382,10 +382,79 @@ get_ui_snapshot, get_node_bounds, save_ui_baseline, ui_snapshot_diff,
 list_commands, touch_press, touch_release, touch_drag, touch_clear, touch_list,
 set_feature, tilemap_cells, tilemap_region, scripts_seen, canvas_scale,
 set_resolution, harness_version, find_nodes, press, raycast, sample_pixels,
-reachable_ui, findings
+reachable_ui, findings, mouse_move, reload
 ```
 
 Notable behaviors:
+
+- **A `--script` instance is passive on the bus** (0.22.0, moving-in:G-018/G-025).
+  `lint_project.gd`, `run_tests.gd`, `eval.gd` and `capture.gd` all bring the
+  autoload up; before 0.22.0 its `_ready()` deleted the "stale" owner/command/result
+  files and wrote its own owner record — so a headless lint in one session deleted a
+  colleague's in-flight command and then, once the runner exited, refused their next
+  `launch` for 30 s with a dead pid. Now an instance started by `godot --script` (or
+  `-s`) registers its handlers (a test may call them in-process) and never touches a
+  bus file, never polls, never heartbeats. `is_bus_active()` says which kind you have.
+- **`performance` measures FPS over a window** (0.22.0, moving-in:G-021 twice, G-020).
+  `{"frames": N}` (default 30, `0` = the old one-shot read) samples wall-clock frame
+  times and reports `fps` (the mean), `fps_min`, `fps_max`, `fps_samples`,
+  `fps_window_sec`, `fps_instant`, and `fps_settling: true` when the two halves of the
+  window disagree by more than 15% — which is what "the renderer has not settled after
+  that change" looks like from inside one window. A single `get_frames_per_second()`
+  read straight after a quality-preset switch produced `HIGH 110 / MEDIUM 50 / LOW 105`
+  and nearly reported the slowest preset as the fastest. `findings` uses the window too.
+- **`performance` reports in-tree node growth** (0.22.0, moving-in:G-030). A node
+  parented under a live node is never an orphan, so a UI that adds a layer per visit
+  reports orphan growth `+0` forever. `node_baseline` / `node_growth` are sampled and
+  reset alongside the orphan baseline; `{"by_type": true}` adds `node_types_delta`
+  (`{class: ±N}` since the baseline) — "something accumulates" becomes "3 more
+  CanvasLayers".
+- **`set_game_speed` refuses a scale below 0.01** (0.22.0, moving-in:G-019). A time
+  scale of 0 stops the game while the bus keeps answering well-formed stale values;
+  `0.04` used to echo as `1.0 -> 0.0` from a 1-dp print. The reply names the floor;
+  the client prints three decimals.
+- **`raycast` is 2D or 3D by arity** (0.22.0, moving-in:G-023): `[x,y]` queries the 2D
+  space, `[x,y,z]` the 3D space (`layer_names/3d_physics`), `data.space` says which.
+  A 2D query on a tree whose only colliders are `CollisionObject3D`s is **refused**
+  naming `--from X,Y,Z` — before, it answered `clear` in a 3D project with the
+  inside-a-shape caveat attached, which sent a session hunting a geometry bug that
+  did not exist. Mixed arity is refused.
+- **`validate_ui`'s baseline survives auto-name renumbering** (0.22.0,
+  moving-in:G-031 twice). Keys normalise `@VBoxContainer@465` to `@VBoxContainer`;
+  the counter is a per-process allocation order, and an unrelated commit inserting one
+  sibling earlier in the scene renumbered every runtime-built row and re-presented 30
+  accepted findings as NEW on a diff that touched no UI. Multiplicity is kept: three
+  accepted rows under one key stay accepted, a fourth is NEW. Baselines written before
+  0.22.0 are normalised on read and stay valid.
+- **`mouse_move`** (0.22.0, moving-in:G-029) dispatches a real `InputEventMouseMotion`
+  through `Input.parse_input_event`: `{"relative": [dx, dy], "steps": N, "position":
+  [x, y], "buttons": mask}` — `steps` splits the delta into one event per frame, so a
+  look handler that clamps per event sees them individually. Data: `relative, steps,
+  position, mouse_mode`. Mouse-look was the one input a first-person game could not be
+  tested with; `run-method _unhandled_input` with a JSON event was silently a no-op.
+  When `mouse_mode` is `captured`, your physical mouse is a second input source on the
+  same camera between commands (moving-in:G-024) — release it first if a read must be
+  stable.
+- **`reload`** (0.22.0, moving-in:G-033) re-reads `{"path": "res://…"}` from disk into
+  the running game with `CACHE_MODE_REPLACE`. A text resource is re-parsed into the
+  cached instance; a shader/binary/texture loader builds a new object, so the verb
+  copies its stored properties onto the cached one — either way every node already
+  holding that resource sees the edit without a relaunch. Data: `path,
+  resource_class, was_cached, holders_updated, properties_copied`. `was_cached: false`
+  means nothing held it and nothing changed on screen.
+- **`ping` and the owner file carry `project_path`** (0.22.0, plant-tower-defense:G-018)
+  — where the answering game's `res://` is on disk. A sibling git worktree has the same
+  project name, so the same `user://` and the same bus; its game overwrites the owner
+  record with its own pid, after which every reply's pid matches the owner and the
+  survivor check cannot see it — errors arrive as `no Game in the tree`, i.e. as bugs
+  in your own scene, on a game that is not yours. The client compares the owner's
+  `project_path` to its `--path` before writing any command and raises
+  `ForeignInstanceError` naming both checkouts; `launch` says the same in its refusal;
+  `ping` prints the path and flags a mismatch.
+- **`sample_pixels` states its frame** (0.22.0, moving-in:G-032): `origin: "top-left"`,
+  `space: "srgb_0_1"`, `image_size`, `same_image_as_screenshot: true` — it crops the
+  same root-viewport image with the same `Rect2i` that `screenshot --region` uses. If
+  the two ever disagree, the reply now carries enough to say in which coordinate space.
 
 - **`findings`** runs every live check at once — `ui_layout`, `ui_reachable`,
   `signal_unconnected`, `performance`, `scene_validation` — and returns one flat
@@ -587,8 +656,9 @@ Notable behaviors:
   press would do nothing either and emitting anyway manufactures a state no player can
   reach. `{"toggle": bool}` sets `button_pressed` first on a `toggle_mode` button. Data:
   `node_path, type, disabled, button_pressed`.
-- **`raycast`** casts through the 2D physics space: `{from, to, mask, areas, exclude}`
-  in, `{clear, collider, collider_class, position, normal, mask, mask_names}` out. The
+- **`raycast`** casts through the 2D physics space (or the 3D one — see above):
+  `{from, to, mask, areas, exclude}`
+  in, `{clear, collider, collider_class, position, normal, mask, mask_names, space}` out. The
   harness could say what tiles are where and where a node is, but nothing could say what
   a given `collision_mask` would actually *hit*, which is the only form the question
   takes once a project has more than one physics layer — so every project wrote its own
@@ -748,7 +818,8 @@ touch <press|release|drag|clear|list>, set-feature, step-time,
 set-game-speed, wait-frames, clear-nodes, validate-ui, ui-snapshot,
 node-bounds, save-ui-baseline, ui-snapshot-diff, tilemap-cells,
 tilemap-region, scripts-seen, canvas-scale, set-resolution,
-find-nodes, press, raycast, sample-pixels, reachable-ui, aabb, new-uid
+find-nodes, press, raycast, sample-pixels, reachable-ui, aabb, new-uid,
+mouse-move, reload
 ```
 
 `new-uid` is the one subcommand that never touches the bus — see below.
@@ -784,10 +855,16 @@ Notable flags:
   is the one".
 - `press --node PATH [--toggle BOOL]` — emit `pressed` on the button at, or directly
   under, `PATH`.
-- `raycast --from X,Y --to X,Y [--mask N] [--areas] [--exclude NODE]` — `--exclude` is
+- `raycast --from X,Y[,Z] --to X,Y[,Z] [--mask N] [--areas] [--exclude NODE]` — two
+  components query the 2D space, three the 3D space; `--exclude` is
   repeatable; without `--mask` every layer is tested.
 - `sample-pixels [--rect X,Y,W,H]` — mean / dominant colour over a screen rect
   (default: the whole viewport).
+- `mouse-move --relative DX,DY [--steps N] [--position X,Y] [--buttons MASK]` — a
+  real `InputEventMouseMotion` (mouse-look); prints the mouse mode and warns when
+  the cursor is captured.
+- `reload res://path` — re-read an edited resource into the running game; exits 1
+  if the cached instance could not be updated in place.
 - `reachable-ui` — no flags. Prints every interactive Control with its rect, marking
   each `OFF-SCREEN`, `SCROLL TO REACH (inside <ScrollContainer>)` or `BLOCKED BY <path>`
   rather than dropping it. Run it once per device profile
@@ -826,7 +903,11 @@ Notable flags:
   from a tree that already compiles, which a fan-out doesn't have until every agent has
   landed. `--write` refuses to overwrite an existing sidecar, because changing a uid
   breaks every reference to it.
-- `performance --reset-baseline` — re-baseline the orphan count (see below). The reply
+- `performance [--frames N] [--by-type] [--reset-baseline]` — FPS is a mean over N
+  frames (game default 30; `0` = one instantaneous read) printed as `mean … min … max …
+  n=… (…s)` and marked `STILL SETTLING` when the halves disagree; `--by-type` prints
+  which node classes grew or shrank since the baseline; `--reset-baseline`
+  re-baselines the orphan AND node counts (see below). The reply
   also carries `time_scale`, `devtools_set_speed` (the last `set-game-speed` value this
   session, `null` if never) and `orphan_baseline_age_frames`, so a reading taken under
   a leftover speed override or a stale baseline says so.

@@ -18,8 +18,12 @@ session — a merged PR, a parallel session, a `pull --ff-only` between turns.
 
 ```bash
 git log --oneline -3
-git status --short
+git update-index --refresh >/dev/null; git status --short
 ```
+
+(`update-index --refresh` first: a stale stat cache, or a parallel session, can move the
+modified-file count under a long session — gh#17 saw 6 become 8 across one worktree
+add/remove. Re-run it rather than remember it.)
 
 Compare the top sha against whatever your context claims. If they differ, **re-read every
 file you were about to change** and re-derive line numbers; do not edit by remembered
@@ -197,7 +201,8 @@ commit; if you are already on `master` with the work in the tree,
 
 Landing it on `master` is a **separate, explicit ask.** When it comes, prefer a PR;
 merge locally with `--no-ff` only if the user asked for `master` directly, so the history
-keeps the merge-commit shape the PRs produce.
+keeps the merge-commit shape the PRs produce — and do it by §6b, never by checking out
+`master` in the main worktree.
 
 The commit message is the release note: what shipped, **why the obvious implementation
 was not used** if it wasn't, how it was validated, and what was considered and rejected.
@@ -212,9 +217,40 @@ release X.Y.Z: <the one-line claim>
 
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
 EOF
-git push origin master
+git push -u origin release/X.Y.Z     # the branch; master is §6b, and only when asked
 bd dolt push        # beads sync is separate from git; ask before running it
 ```
+
+## 6b. Landing it on master (gh#17)
+
+Separate, explicit ask; prefer a PR. When the user asks for `master` directly, **do not
+`git checkout master` in the main worktree.** A release branch is normally dirty with the
+next version's work, and `experiments/` and `.devtools/` are untracked by design with no
+stash, reflog or Recycle Bin fallback ([H-052]) — `git checkout master` there either
+refuses or carries all of it onto `master`, where the next `git add -A` commits an
+unstamped half-version onto the default branch. Merge in a throwaway worktree instead; it
+cannot reach the main tree at all:
+
+```bash
+WT="$TEMP/master-wt"
+git worktree add "$WT" master
+git -C "$WT" merge --no-ff release/X.Y.Z -m "Merge release/X.Y.Z: <release commit subject>"
+
+# prove nothing from the working tree leaked in, and that the result is stamp-clean
+[ "$(git rev-parse "$(git -C "$WT" rev-parse HEAD)^{tree}")" = "$(git rev-parse release/X.Y.Z^{tree})" ] \
+  && echo "tree match OK"
+(cd "$WT" && python tools/record_version.py --check)   # expect exit 0
+
+git -C "$WT" push origin master
+git worktree remove "$WT"
+git update-index --refresh >/dev/null; git status --short   # your uncommitted work, still here
+```
+
+The tree-hash equality is the load-bearing assertion: a `--no-ff` merge of a descendant
+branch must produce exactly the release commit's tree, so any difference means
+working-tree content got in. Then close the GitHub issues the release named
+(`gh issue close N --comment "shipped in X.Y.Z"`) — they stay open until the merge, not
+until the branch commit.
 
 ## Docs that must move with the code
 

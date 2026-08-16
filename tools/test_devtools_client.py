@@ -167,5 +167,65 @@ class VerbArgScan(unittest.TestCase):
         self.assertEqual(got["reset"], [])
 
 
+class ForeignProjectOwner(unittest.TestCase):
+    """plant-tower-defense:G-018: a live owner from a sibling git worktree shares
+    the project name, user:// and bus; only its project_path differs."""
+
+    def _owner(self, project_path, alive=True, polling=True):
+        child = _sleeper()
+        self.addCleanup(lambda: (child.kill(), child.wait()))
+        return {"present": True, "pid": child.pid if alive else 999999999,
+                "alive": alive, "polling": polling, "poll_age": 0.5,
+                "path": Path("owner.json"), "project_path": project_path}
+
+    def test_same_dir_spellings_are_not_foreign(self):
+        here = Path(__file__).resolve().parent
+        for spelling in (str(here), str(here).replace(os.sep, "/") + "/",
+                         str(here).upper() if sys.platform == "win32" else str(here)):
+            self.assertIsNone(devtools.foreign_project_owner(self._owner(spelling), here),
+                              "spelling %r read as a different checkout" % spelling)
+
+    def test_other_checkout_live_and_polling_is_foreign(self):
+        here = Path(__file__).resolve().parent
+        other = str(here.parent / "worktree-of-this")
+        self.assertEqual(devtools.foreign_project_owner(self._owner(other), here), other)
+
+    def test_dead_or_stale_or_legacy_owner_is_left_to_liveness_logic(self):
+        here = Path(__file__).resolve().parent
+        other = str(here.parent / "worktree-of-this")
+        self.assertIsNone(devtools.foreign_project_owner(self._owner(other, alive=False), here))
+        self.assertIsNone(devtools.foreign_project_owner(self._owner(other, polling=False), here))
+        legacy = self._owner(None)
+        self.assertIsNone(devtools.foreign_project_owner(legacy, here),
+                          "an owner file written before 0.22.0 has no project_path and proves nothing")
+
+    def test_send_command_refuses_before_writing(self):
+        """The refusal must happen BEFORE the command file is written - sending
+        the verb to the foreign game is the harm."""
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "mine"
+            project.mkdir()
+            (project / "project.godot").write_text(
+                'config_version=5\n[application]\nconfig/name="ForeignTest"\n', encoding="utf-8")
+            udir = Path(tmp) / "userdata"
+            udir.mkdir()
+            child = _sleeper()
+            self.addCleanup(lambda: (child.kill(), child.wait()))
+            (udir / "devtools_owner.json").write_text(json.dumps({
+                "pid": child.pid, "start_unix": 1.0, "last_poll_unix": time.time(),
+                "project": "ForeignTest", "project_path": str(Path(tmp) / "theirs") + "/",
+            }), encoding="utf-8")
+            old = devtools._USERDATA_OVERRIDE if hasattr(devtools, "_USERDATA_OVERRIDE") else None
+            try:
+                devtools._USERDATA_OVERRIDE = str(udir)
+                with self.assertRaises(devtools.ForeignInstanceError) as ctx:
+                    devtools.send_command(project, "ping", {}, timeout=1.0)
+                self.assertIn("DIFFERENT checkout", str(ctx.exception))
+                self.assertFalse((udir / "devtools_commands.json").exists(),
+                                 "the command was written despite the foreign owner")
+            finally:
+                devtools._USERDATA_OVERRIDE = old
+
+
 if __name__ == "__main__":
     unittest.main()

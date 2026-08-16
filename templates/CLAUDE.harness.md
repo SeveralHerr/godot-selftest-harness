@@ -151,10 +151,17 @@ Worth knowing exists, reach for `REFERENCE.md` when you need them — `validate-
 `findings`, and worth calling alone only to re-check one thing after a fix);
 `save-ui-baseline`, `ui-snapshot`, `ui-snapshot-diff` (structured UI state vs baseline);
 `aabb` (3D world-space bounds, `top_y`/`bottom_y`), `node-bounds`' 3D counterpart;
-`step-time`, `set-game-speed`, `wait-frames` (advance time deterministically);
-`raycast`, `sample-pixels`, `canvas-scale`, `set-resolution`;
+`step-time`, `set-game-speed` (refuses a scale below 0.01 — that is a freeze, not a
+speed), `wait-frames` (advance time deterministically);
+`raycast --from X,Y[,Z] --to X,Y[,Z]` (2D or 3D by arity; refuses a 2D ray on a
+3D-only tree), `sample-pixels`, `canvas-scale`, `set-resolution`;
 `tilemap-cells`, `tilemap-region`; `curve` (a pure method over a range as one read);
-`input clear`, `input list`, `input sequence FILE`, `key NAME`;
+`input clear`, `input list`, `input sequence FILE`, `key NAME`,
+`mouse-move --relative DX,DY [--steps N]` (a real `InputEventMouseMotion` — the
+only way to drive mouse-look; a captured cursor makes your physical mouse a second
+input source between commands);
+`reload res://path` (re-read an edited shader/.tres/texture into the running game —
+holders see it, no relaunch);
 `touch press`/`release`/`drag`/`clear`/`list` (the only way to exercise multi-touch);
 `set-feature --touchscreen` (makes touch UI show itself on desktop — set it *before*
 the scene loads); `clear-nodes --via-method` (free nodes through the game's own removal
@@ -174,6 +181,16 @@ path); `scripts-seen`, `new-uid`, `logs`, `harness-version`, `cmd <verb>`.
   `position`/`scale`/`rotation` on container children, so a scale animation on a
   `VBoxContainer` child is invisible to a property read while working on screen.
 - **A run that never changes is broken, not passing.** Check the `status` field.
+- **`performance` FPS is a mean over a window** (`--frames N`, default 30, with min/max
+  and `STILL SETTLING` when the halves disagree). Read after `wait-frames 60`+ past a
+  settings change; a single frame's rate is not a measurement. Its `Total nodes …
+  growth +N` is the leak signal the orphan count cannot see (in-tree accumulation);
+  `--by-type` names which classes grew.
+- **A headless gate never touches the bus.** `lint_project.gd` / `run_tests.gd` bring
+  the autoload up passive: safe to run while another session drives this game.
+- **A worktree sibling shares your bus.** Same project name → same `user://`. `ping`
+  prints the answering game's `project` path and the client refuses to send to a game
+  from another checkout — if you see `DIFFERENT checkout`, quit it or `launch --isolated`.
 
 ### Add project-specific debug verbs
 Register domain verbs in `res://devtools_ext/commands.gd` (loaded after generic verbs,
