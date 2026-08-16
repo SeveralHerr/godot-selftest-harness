@@ -185,6 +185,9 @@ so step + read pairs carry no ambient drift), `set-game-speed` (refuses a scale 
 the moment, pause, then inspect at no rush);
 `project-settings [--filter PREFIX|--name KEY]` (ProjectSettings as the RUNNING game
 sees them — did the value written to `project.godot` actually land?);
+`contained-in --node PATH --within PATH` (is this Control's box inside that panel's;
+exit 1 with the per-side overhang — `findings` reports the same as `ui_escapes_panel`
+for a sibling panel);
 `raycast --from X,Y[,Z] --to X,Y[,Z]` (2D or 3D by arity; refuses a 2D ray on a
 3D-only tree), `sample-pixels`, `canvas-scale`, `set-resolution`;
 `fire-entry-point NAME` (fires a named `entry_points` entry on demand — switches

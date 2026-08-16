@@ -441,6 +441,35 @@ Notable behaviors:
   scale of 0 stops the game while the bus keeps answering well-formed stale values;
   `0.04` used to echo as `1.0 -> 0.0` from a 1-dp print. The reply names the floor;
   the client prints three decimals.
+- **`validate_ui` / `findings` report `ui_escapes_panel`** (0.37.0,
+  plant-tower-defense:G-048b): a visible Control whose CENTRE sits on a sibling
+  `Panel`/`PanelContainer` but whose box hangs off it. A legend row hanging 34px past
+  a pause card passed every gate, because the row's *parent* is the screen, not the
+  card, and "inside its parent" was trivially true; `ui_text_trimmed` measured text
+  against a `size` that had already been clamped. The centre rule keeps a neighbouring
+  HUD element that merely brushes an edge out of the report, and a Control that
+  *contains* the panel (a backdrop) is skipped. Siblings only — the parent case is
+  `ui_overflow`. Stage 5 plants a Panel + escaping Label and an inside one; the stock
+  fixture must report none.
+- **`run_tests.py` prints `Engine errors: N ERROR: line(s) emitted`** (0.37.0, gh#35 /
+  moving-in:G-058) — plain `ERROR:` lines (which is how `push_error` prints), counted
+  and quoted, **never gated**: the reporter measured a clean baseline of exactly two
+  legitimate ones, so zero is not the threshold; the number is there to be seen
+  *moving*. `SCRIPT ERROR` / `USER SCRIPT ERROR` stay in the gated bucket. Also prints
+  **`user:// writes: N file(s) changed by the suite`** (plant-tower-defense:G-048c) —
+  four tests staged scores through a real `record_score()` → `_save()` and destroyed
+  both high scores across two runs while every one restored the in-memory values.
+  Advisory, but a suite that writes a file no test named a path for is driving
+  production state.
+- **`run_tests.gd` refuses an argument it does not know** (0.37.0,
+  plant-tower-defense:G-049): `-- --select test_x` used to run the whole suite under
+  `Selected: 491 of 491 (no selector)`; now exit 2, naming the flag and the three it
+  takes.
+- **Every Python client reconfigures stdout/stderr to UTF-8 with `errors="replace"`**
+  (0.37.0, gh#34 / plant-tower-defense:G-048): on a default Windows console (`cp1252`)
+  any verb echoing a `← Back` caption or an arrow key legend died with
+  `UnicodeEncodeError`, and the traceback read as "this verb is broken on this node".
+  A glyph the console cannot render prints `?` and the verb finishes.
 - **`quit` names every `user://` file the run changed, created or deleted** (0.36.0,
   gh#33) — always on, no flag: `launch` records size+mtime of the top-level `user://`
   files, `quit` diffs and prints `user://: this run wrote the developer's REAL user
@@ -988,7 +1017,7 @@ set-game-speed, pause, unpause, wait-frames, clear-nodes, validate-ui, ui-snapsh
 node-bounds, save-ui-baseline, ui-snapshot-diff, tilemap-cells,
 tilemap-region, scripts-seen, canvas-scale, set-resolution,
 find-nodes, press, raycast, sample-pixels, reachable-ui, aabb, look-at, new-uid,
-mouse-move, reload, first-frame, fire-entry-point, project-settings
+mouse-move, reload, first-frame, fire-entry-point, project-settings, contained-in
 ```
 
 `new-uid` is the one subcommand that never touches the bus — see below.
@@ -1032,6 +1061,12 @@ Notable flags:
   `--property` the resolver cannot read prints `<unresolved: reason>` instead of a bare
   `null` (0.32.0, H-046) — `null` alone was indistinguishable from a property that holds
   null.
+- `contained-in --node PATH --within PATH` (0.37.0, plant-tower-defense:G-048b) — is
+  one Control's screen box inside another's? Exit 1 with the per-side overhang
+  (`hangs off by 40px right`) when it is not; `control_centre_inside` says whether it
+  visibly *belongs* on that panel. The question three screens in one project each
+  answered with a bespoke test, and the read a `ui_escapes_panel` finding is checked
+  against.
 - `project-settings [--filter PREFIX] [--name KEY ...] [--json]` (0.32.0,
   dave-game:G-003) — `ProjectSettings` as the **running** game sees them. A value
   written into `project.godot` that never applied (a typo'd key, an editor overwrite,
