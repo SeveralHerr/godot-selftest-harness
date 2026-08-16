@@ -14,14 +14,14 @@ extends Node
 ## extension loads AFTER the generic handlers, a project may override a generic
 ## verb by registering the same action string (last-writer-wins).
 
-# harness-version: 0.33.0
+# harness-version: 0.34.0
 # --- Constants ---
 
 ## Version of the godot-selftest-harness these files were copied from. Reported by the
 ## `harness_version` verb and stamped into every copied tool script, so a gap logged
 ## against a project can name the version it was seen on, and a refresh can tell a
 ## stale file from a customized one. Bump with .claude-plugin/plugin.json.
-const HARNESS_VERSION: String = "0.33.0"
+const HARNESS_VERSION: String = "0.34.0"
 
 ## Default bus filenames. With a session id (see _resolve_session) the id is spliced in
 ## before the extension, so two instances can each own a bus in the same user:// dir.
@@ -3405,6 +3405,21 @@ func _cmd_validate_ui(args: Dictionary) -> Dictionary:
 				overlap["node_a"], overlap["node_b"], overlap["overlap_area"],
 			],
 		})
+	# plant-tower-defense:G-046: "not overlapping" used to pass for "touching" -
+	# Rect2.intersects is false for boxes sharing an edge, and a Back button flush
+	# under a row reads as broken to a player. Off by default (min_control_gap 0
+	# keeps today's behaviour); a project that sets it gets a named finding.
+	var min_gap: float = float(_config.get("min_control_gap", 0))
+	if min_gap > 0.0:
+		for pair: Dictionary in _check_interactive_gaps(interactive_controls, min_gap):
+			issues.append({
+				"path": str(pair["node_a"]),
+				"severity": "warning",
+				"code": "controls_touching",
+				"message": "Interactive controls too close: '%s' and '%s' are %.0fpx apart (min_control_gap %.0f)" % [
+					pair["node_a"], pair["node_b"], pair["gap"], min_gap,
+				],
+			})
 
 	var baseline: Dictionary = _apply_ui_baseline(issues, args)
 
@@ -4506,6 +4521,31 @@ func _check_interactive_overlaps(controls: Array) -> Array:
 					"overlap_rect": {"x": intersection.position.x, "y": intersection.position.y, "w": intersection.size.x, "h": intersection.size.y},
 				})
 	return overlaps
+
+
+## Pairs of NON-overlapping interactive controls whose rects are closer than
+## `min_gap` px on either axis (a shared edge is gap 0). Overlapping pairs are
+## already reported by _check_interactive_overlaps and are skipped here so one
+## fault never prints twice.
+func _check_interactive_gaps(controls: Array, min_gap: float) -> Array:
+	var close: Array = []
+	for i in range(controls.size()):
+		for j in range(i + 1, controls.size()):
+			var a: Rect2 = controls[i]["rect"]
+			var b: Rect2 = controls[j]["rect"]
+			if a.intersects(b):
+				continue
+			var dx: float = maxf(0.0, maxf(b.position.x - a.end.x, a.position.x - b.end.x))
+			var dy: float = maxf(0.0, maxf(b.position.y - a.end.y, a.position.y - b.end.y))
+			# The pair must be near on BOTH axes to count as touching: a button far
+			# to the right of another shares no edge whatever their y-overlap.
+			var gap: float = maxf(dx, dy)
+			if gap < min_gap:
+				close.append({
+					"node_a": controls[i]["path"], "node_b": controls[j]["path"],
+					"gap": gap, "dx": dx, "dy": dy,
+				})
+	return close
 
 
 # --- TileMap Inspection Handlers ---

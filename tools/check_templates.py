@@ -433,6 +433,12 @@ def stage_coverage():
     return ok
 
 
+# Fixture-source building blocks: a GDScript indent and a quote, named so the
+# fixture lines that use them read as source rather than as escape soup.
+BT = "\t"
+BQ = '"'
+
+
 def stage_assemble(scratch, user_dir_name):
     # The project's own files first (project.godot, the fixture scene), then the
     # REAL installer over them. This stage used to copy templates/ by hand, which
@@ -694,6 +700,43 @@ def stage_assemble(scratch, user_dir_name):
         "\tfor _i: int in extra_broken:",
         "\t\tharness_build_auto_rows()",
         "\treturn get_tree().get_nodes_in_group(\"harness_auto_rows\").size()",
+        "",
+        "",
+        "## plant-tower-defense:G-046: two Buttons sharing an edge on their own",
+        "## (unscaled) CanvasLayer, so they are not world-space and validate_ui's",
+        "## interactive-control walk sees them. Planted and removed by",
+        "## check_controls_touching(); held by reference (H-065).",
+        "var _touch_layer: CanvasLayer = null",
+        "",
+        "",
+        "func harness_plant_touching_pair() -> Array:",
+        "%sif _touch_layer != null:" % BT,
+        "%s%sreturn [str(_touch_layer.get_node(%sA%s).get_path()), str(_touch_layer.get_node(%sB%s).get_path())]" % (BT, BT, BQ, BQ, BQ, BQ),
+        "%s_touch_layer = CanvasLayer.new()" % BT,
+        "%s_touch_layer.name = %sTouchLayer%s" % (BT, BQ, BQ),
+        "%sadd_child(_touch_layer)" % BT,
+        "%svar a := Button.new()" % BT,
+        "%sa.name = %sA%s" % (BT, BQ, BQ),
+        "%sa.text = %sA%s" % (BT, BQ, BQ),
+        "%sa.position = Vector2(100, 400)" % BT,
+        "%sa.size = Vector2(120, 40)" % BT,
+        "%s_touch_layer.add_child(a)" % BT,
+        "%svar b := Button.new()" % BT,
+        "%sb.name = %sB%s" % (BT, BQ, BQ),
+        "%sb.text = %sB%s" % (BT, BQ, BQ),
+        "%sb.position = Vector2(100, 440)  # flush under A: shared edge, gap 0" % BT,
+        "%sb.size = Vector2(120, 40)" % BT,
+        "%s_touch_layer.add_child(b)" % BT,
+        "%sreturn [str(a.get_path()), str(b.get_path())]" % BT,
+        "",
+        "",
+        "func harness_remove_touching_pair() -> bool:",
+        "%sif _touch_layer == null:" % BT,
+        "%s%sreturn false" % (BT, BT),
+        "%sremove_child(_touch_layer)" % BT,
+        "%s_touch_layer.free()" % BT,
+        "%s_touch_layer = null" % BT,
+        "%sreturn true" % BT,
         "",
         "",
         "func harness_set_wall_2d(on: bool) -> bool:",
@@ -1568,6 +1611,31 @@ def check_run_tests_py(godot, scratch):
         if "Invalid operands" not in wrapped.stdout:
             return fail("run_tests.py must quote the actual SCRIPT ERROR line:\n%s"
                         % wrapped.stdout)
+        # moving-in:G-054 (0.34.0): unfiltered, the wrapper prints the written-vs-
+        # executed line. The planted file declares 2 sites and runs 1 (it aborts
+        # between them), so the "written but not run" clause must fire; under
+        # --filter (the runs above) the line must NOT print, because the
+        # denominator is the whole dir.
+        if "Declared:" in wrapped.stdout:
+            return fail("run_tests.py printed a Declared: line under --filter, where the "
+                        "whole-dir denominator is wrong:\n%s" % wrapped.stdout)
+        unfiltered = subprocess.run(
+            [sys.executable, str(scratch / "tools" / "run_tests.py"),
+             "-p", str(scratch), "--godot", str(godot)],
+            capture_output=True, text=True, timeout=GODOT_TIMEOUT)
+        m = re.search(r"^Declared: (\d+) assertion call site\(s\) across (\d+) test file\(s\); (\d+) executed(.*)$",
+                      unfiltered.stdout, re.M)
+        if not m:
+            return fail("run_tests.py (unfiltered) must print the Declared: line (G-054):\n%s"
+                        % unfiltered.stdout[-1500:])
+        declared, nfiles, executed = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        if nfiles < 2 or declared < 2:
+            return fail("Declared: counted %d site(s) in %d file(s); the seed test plus the "
+                        "planted file (2 sites) must be in the denominator" % (declared, nfiles))
+        if executed >= declared or "written but not run" not in m.group(4):
+            return fail("the planted abort leaves at least one declared site unexecuted; "
+                        "Declared: must say so, got %r" % m.group(0))
+        declared_line = m.group(0)
     finally:
         planted.unlink(missing_ok=True)
 
@@ -1584,7 +1652,8 @@ def check_run_tests_py(godot, scratch):
 
     print("stage 4 tests: run_tests.py catches a test that aborts AFTER a real "
           "assertion already ran (invisible to both the return value and [VACUOUS]) "
-          "-- run_tests.gd itself reports it clean; the wrapper does not")
+          "-- run_tests.gd itself reports it clean; the wrapper does not; unfiltered it "
+          "printed %r and said nothing under --filter" % declared_line)
     return True
 
 
@@ -2082,6 +2151,62 @@ def check_geometry_caveat_and_hide(client, scratch):
                     "gh#5 fix (CanvasLayer counts) is not in effect: %r" % layer)
     print("stage 5 bridge: node-bounds headless carries the H-051 caveat; screenshot --hide "
           "refuses a missing node and a Node3D by name, accepts a CanvasLayer")
+    return True
+
+
+def check_controls_touching(client, scratch):
+    """min_control_gap turns a flush edge into a named finding (plant G-046).
+
+    The fixture plants two Buttons sharing an edge on their own CanvasLayer
+    (harness_plant_touching_pair; the Shop rows cannot serve because Main is a
+    Node2D and everything under it is world-space, which validate_ui's
+    interactive-control walk deliberately excludes - the first draft of this
+    check found that out). Rect2.intersects is false for a shared edge, so the
+    stock validate_ui says nothing about them. Flip the live config through the
+    same dotted set_state any project can use, expect controls_touching naming
+    the pair, flip it back, expect none - a check that reported the finding with
+    the gap at 0 would be the regression this exists to catch. The pair is
+    removed afterwards so reachable_ui's contract row keeps its count.
+    """
+    def call(action, args):
+        return client.send_command(scratch, action, args, timeout=20.0)
+
+    def touching():
+        data = call("validate_ui", {"use_baseline": False}).get("data") or {}
+        return [i for i in data.get("issues", []) if i.get("code") == "controls_touching"]
+
+    planted = call("run_method", {"node_path": "/root/Main", "method": "harness_plant_touching_pair", "args": []})
+    if not planted.get("success"):
+        return fail("could not plant the touching pair: %s" % planted.get("message"))
+    try:
+        if touching():
+            return fail("controls_touching reported with min_control_gap at its default 0 - "
+                        "the check must be off by default")
+        on = call("set_state", {"node_path": "/root/DevTools", "property": "_config.min_control_gap",
+                                "value": 4})
+        if not on.get("success"):
+            return fail("could not set _config.min_control_gap live: %s" % on.get("message"))
+        try:
+            hits = touching()
+            pair = [h for h in hits if "TouchLayer/A" in str(h.get("path")) and "TouchLayer/B" in str(h.get("message"))]
+            if not pair:
+                return fail("min_control_gap=4 should report the planted flush pair as "
+                            "controls_touching; got %r" % [h.get("message") for h in hits])
+            if "0px apart" not in str(pair[0].get("message")):
+                return fail("the planted pair shares an edge and must read as 0px apart, got %r"
+                            % pair[0].get("message"))
+        finally:
+            call("set_state", {"node_path": "/root/DevTools", "property": "_config.min_control_gap",
+                               "value": 0})
+        if touching():
+            return fail("controls_touching still reported after min_control_gap was reset to 0")
+    finally:
+        removed = call("run_method", {"node_path": "/root/Main", "method": "harness_remove_touching_pair", "args": []})
+        if removed.get("data", {}).get("result") is not True:
+            return fail("harness_remove_touching_pair did not remove the planted layer: %r"
+                        % removed.get("message"))
+    print("stage 5 bridge: min_control_gap=4 names the planted flush pair as "
+          "controls_touching (0px apart); 0 reports none; pair removed")
     return True
 
 
@@ -3401,6 +3526,7 @@ def stage_bridge(godot, scratch, full):
         # moves the planted UI findings to pre-existing, and this check needs them
         # gating so a zero here means "the check did not run".
         ok = check_findings_aggregate(client, scratch) and ok
+        ok = check_controls_touching(client, scratch) and ok
         ok = check_geometry_caveat_and_hide(client, scratch) and ok
         ok = check_ui_baseline(client, scratch) and ok
         ok = check_validator_reach(client, scratch) and ok

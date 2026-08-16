@@ -92,7 +92,7 @@ narrated in a sentence.
 | `status:` | `open` / `fixed` / `wontfix` | `wontfix` needs a reason on the Improvement line. |
 | `fixed-in:` | a harness version | Only on `status: fixed`. Omit otherwise. |
 | `seen:` | an integer | How many times this gap has been hit. **Bump this instead of writing a second entry** — a recurrence is a stronger signal than a new gap, and only a counter makes that visible. |
-| `harness:` | `X.Y.Z` | The installed harness version it was observed against, from `python tools/devtools.py harness-version` (`python3` outside Windows — probe by executing, the Store alias lies). Without it, a gap logged before an upgrade can't be told from a regression after one. |
+| `harness:` | `X.Y.Z` | The installed harness version it was observed against, from `python tools/devtools.py harness-version --client` (`python3` outside Windows — probe by executing, the Store alias lies). Without it, a gap logged before an upgrade can't be told from a regression after one. |
 
 Guidelines that make an entry useful later:
 

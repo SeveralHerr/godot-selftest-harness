@@ -5328,7 +5328,7 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   `game/plant.gd`), which the harness correctly buckets as a declaration rather
   than an observation. This is the same shape as G-015 (a base class invisible
   because only a subclass owned the live node).
-  - [plant-tower-defense:G-028] status: open | seen: 2 | harness: 0.23.0 | source: plant-tower-defense 2026-08-15
+  - [plant-tower-defense:G-028] status: open | seen: 3 | harness: 0.23.0 | source: plant-tower-defense 2026-08-15
   - Improvement: `scripts-seen` already records every script the engine *loaded*,
     which for a static-only class is exactly the right signal and is an
     observation rather than a declaration. Reach consults it today only as a
@@ -6242,7 +6242,7 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   shared `.godot/` import cache), but this time the crash was a hard segfault
   rather than a truncated cache, and it happened on the FIRST import call of
   the session rather than after `/verify` was already mid-run.
-  - [plant-tower-defense:G-044] status: fixed | fixed-in: 0.29.0 | seen: 1 | harness: 0.25.0 | source: plant-tower-defense 2026-08-16
+  - [plant-tower-defense:G-044] status: fixed | fixed-in: 0.29.0 | seen: 4 | harness: 0.25.0 | source: plant-tower-defense 2026-08-16
   - Improvement: `/verify`'s import step retrying once on a non-zero exit
     before surfacing failure would turn "verified nothing, investigate a
     crash" into "verified cleanly, noted a transient" — the same shape as the
@@ -6481,7 +6481,7 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   pass, the number it would need to say "this method contains 6 assert calls and
   executed 3". That comparison is the abort detector #27 asks for, available without
   attributing stderr to a method at all.
-  - [moving-in:G-054] status: fixed | fixed-in: 0.28.0 | seen: 1 | harness: 0.21.0 | source: moving-in 2026-08-16 | dup-of: gh#27 / moving-in:G-050 (same abort-detection ask; shipped as run_tests.py's stderr-scan wrapper rather than the per-method assertion-count heuristic proposed here - the wrapper is exact where the count is advisory, and it was already in 0.28.0 before this copy was pooled)
+  - [moving-in:G-054] status: fixed | fixed-in: 0.28.0 | seen: 2 | harness: 0.21.0 | source: moving-in 2026-08-16 | dup-of: gh#27 / moving-in:G-050 (same abort-detection ask; shipped as run_tests.py's stderr-scan wrapper rather than the per-method assertion-count heuristic proposed here - the wrapper is exact where the count is advisory, and it was already in 0.28.0 before this copy was pooled)
   - Improvement: reuse the `[VACUOUS]` source scan to count `_T.assert_*` occurrences per
     method, and report `[PARTIAL] method (3 of 6 assertions executed)` when a passing
     method runs fewer than it contains. Imperfect — loops and early returns legitimately
@@ -6843,3 +6843,42 @@ holds; the guard says what this call is; the user does the update.
 `python -m unittest discover -s tools` — 46 tests OK (39 + 7). `python
 tools/check_templates.py` — OK, all stages; its own stage 2 now prints `[version] fresh
 install of 0.33.0` through the same installer users get.
+
+## 2026-08-16 - Upstreamed 1 open gap(s) from plant-tower-defense (harness 0.18.0, 0.19.0, 0.21.0, 0.23.0, 0.24.0, 0.25.0)
+
+Pooled by `tools/upstream_gaps.py` from `C:\Users\gotmi\Documents\GitHub\plant-tower-defense\log-devtools.md`. Gap text is the project's,
+verbatim; only the id line is rewritten (qualified with the project name so
+ids from two projects cannot collide, plus a `source:` back-pointer).
+
+- Gap: **`findings` and the layout gates have no concept of a minimum gap between
+  two Controls** — `python tools/devtools.py findings` reported
+  `0 finding(s) across 4 of 5 checks` over a Keys screen whose "← Back" button sat
+  at y=528 directly under a row button ending at y=528. `ui_layout` measures a
+  Control against its own box, and the project's own pair-wise checks
+  (`test_the_pause_card_lists_the_keys_and_still_fits_its_paper`, and the helper
+  written this session) use `Rect2.intersects`, which is false for boxes sharing an
+  edge. So "not overlapping" passes for "touching", and touching is what reads as
+  broken. Worked around with an explicit `assert_gte(gap, 16.0)` in the test.
+  - [plant-tower-defense:G-046] status: open | seen: 1 | harness: 0.25.0 | source: plant-tower-defense 2026-08-16
+  - Improvement: give the UI checks a `min_control_gap` threshold in
+    `devtools_config.json` (default 0 = today's behaviour) and have the sibling
+    comparison report `controls_touching` as its own finding class, so a flush
+    edge is named rather than being indistinguishable from a laid-out one.
+
+## 2026-08-16 - Upstreamed 1 open gap(s) from moving-in (harness 0.11.0, 0.16.0, 0.19.0, 0.21.0, 0.31.0)
+
+Pooled by `tools/upstream_gaps.py` from `C:\Users\gotmi\Documents\GitHub\moving-in\log-devtools.md`. Gap text is the project's,
+verbatim; only the id line is rewritten (qualified with the project name so
+ids from two projects cannot collide, plus a `source:` back-pointer).
+
+- Gap: **[G-055] — `harness-version` cannot answer without a running game, and says so
+  in a way that reads like a failure.** Asked for the version to stamp this entry; got
+  `(game not running: 'harness_version' was never picked up ...)` on stderr and then the
+  answer I wanted, `Client: 0.31.0 (tools/devtools.py)`, printed underneath. The client
+  version is a static read of a file on disk and needs no bus at all. The log entry
+  format requires this value on every turn, including turns with no game running, so
+  this warning fires constantly and trains the reader to skip it.
+  - [moving-in:G-055] status: open | seen: 1 | harness: 0.31.0 | source: moving-in 2026-08-16
+  - Improvement: when the bus is unreachable, print the client version alone and exit 0
+    without the `game not running` preamble — or take a `--client` flag that never opens
+    the bus. The installed version is the one the log entry wants.
