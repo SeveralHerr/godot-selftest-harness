@@ -184,6 +184,8 @@ answering — catch a sub-second effect, poll for the moment, pause, then inspec
 no rush);
 `raycast --from X,Y[,Z] --to X,Y[,Z]` (2D or 3D by arity; refuses a 2D ray on a
 3D-only tree), `sample-pixels`, `canvas-scale`, `set-resolution`;
+`fire-entry-point NAME` (fires a named `entry_points` entry on demand — switches
+scene first if one is configured, then calls the node/method with its `args`);
 `tilemap-cells`, `tilemap-region`; `curve` (a pure method over a range as one read);
 `input clear`, `input list`, `input sequence FILE`, `key NAME`,
 `mouse-move --relative DX,DY [--steps N]` (a real `InputEventMouseMotion` — the
@@ -316,8 +318,11 @@ A Phase 4 check that failed and was fixed keeps `"result": "fail"` with
 ### Config
 `res://addons/godot_selftest/devtools_config.json` holds thresholds and hooks:
 `fps_min`, `orphan_growth_max` (gate on this — `orphan_max: 0` is unreachable),
-`safe_area_inset`, `mute`, `main_scene`, `entry_hook {node_path, method}` (advances past
-a menu into the playable scene), `entry_points` (named alternates), `test_dir`,
+`safe_area_inset`, `mute`, `main_scene`, `entry_hook {node_path, method}` (fires
+**automatically, once**, shortly after launch — advances past a menu into the playable
+scene; check `ping`'s `entry_hook_status` if it does not seem to have fired: `fired` /
+`not_configured` / a specific error, never silent), `entry_points` (named alternates
+reached **on demand** via `fire-entry-point NAME`, not automatically), `test_dir`,
 `scan_root`, `hud_layer_name`, `name_check_extra_types` (types a GDExtension registers at
 runtime, which the static checker cannot see) and `name_check_ignore` (path prefixes).
 
@@ -330,7 +335,8 @@ runtime, which the static checker cannot see) and `name_check_ignore` (path pref
   `get_window().size` sits off-viewport headless and centred for a player. Confirm an
   off-screen verdict windowed before reporting it as a defect.
 - **`TREE IS PAUSED`** on `ping` / `performance` means every metric describes a game
-  that is not stepping — unpause (or set `entry_hook`) before believing them.
+  that is not stepping — call `unpause` if you paused it, or set `entry_hook` to
+  advance past whatever's pausing it automatically on launch, before believing them.
 - `get-state` dumps ~120 keys for a `Label` — pass `--property NAME` (repeatable).
 - Run `/verify` **inline**; don't wrap routine validation in subagents/workflows.
 - On Windows, probe Python by running it (`python3` may be a Store alias stub that

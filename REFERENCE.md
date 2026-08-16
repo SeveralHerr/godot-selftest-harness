@@ -367,8 +367,8 @@ Lives at `res://addons/godot_selftest/devtools_config.json`.
 | `orphan_growth_max` | int | `20` | Max tolerated growth in orphan nodes vs. the startup baseline. This is the number that means "this change leaks". |
 | `safe_area_inset` | Object | `{left:0, top:0, right:0, bottom:0}` | Pixels trimmed off each viewport edge before `validate_ui` judges on-screen-ness. All-zero disables the check. |
 | `main_scene` | String | `""` | Main scene path (detected from `run/main_scene`). |
-| `entry_hook` | Object | `{ "node_path": "", "method": "" }` | Optional node/method the harness calls to reach a testable game state. |
-| `entry_points` | Object | `{}` | Named alternate entry points, each `{scene, node_path, method, args, match}`. `/verify` picks the one whose `match` substrings hit the diff, so a change to a boss/shop/level script has a runtime path instead of only a code read. |
+| `entry_hook` | Object | `{ "node_path": "", "method": "" }` | Node/method the harness calls **automatically, once, shortly after launch** to reach a testable game state (0.30.0, gh#29 — before this it was accepted and read by nothing). Both keys required together; leave both `""` for "not configured". Outcome rides on every `ping` reply as `entry_hook_status`: `not_configured`, `fired`, or an error naming what went wrong (`node not found: …`, `no such method: …`) — never silent. `ping`'s CLI print shows it too. See the "entry_hook / entry_points" section below. |
+| `entry_points` | Object | `{}` | Named alternates to `entry_hook`, each `{node_path, method, scene, args, match}` (`node_path`/`method` required, rest optional) — fired **on demand**, not automatically, via the `fire-entry-point NAME` verb. `match` is read only by `/verify`'s own workflow (`commands/verify.md`), not by this core: an agent compares it against the diff to pick a runtime path for a changed boss/shop/level script instead of only a code read. |
 | `godot_version` | String | `""` | Engine version the scaffolder resolved (`X.Y.Z`, from `godot --version`). `name_check.py` compares its cached API index against this and warns on a mismatch — without it, an index built by another engine is used silently, resolving classes the project's engine may not have. |
 | `mute` | bool | `true` | Prefer launching muted during automated runs. |
 | `log_files` | Array | `["log-devtools.md"]` | Files the `Stop` hook expects to change alongside code. |
@@ -390,7 +390,8 @@ get_ui_snapshot, get_node_bounds, save_ui_baseline, ui_snapshot_diff,
 list_commands, touch_press, touch_release, touch_drag, touch_clear, touch_list,
 set_feature, tilemap_cells, tilemap_region, scripts_seen, canvas_scale,
 set_resolution, harness_version, find_nodes, press, raycast, sample_pixels,
-reachable_ui, findings, mouse_move, reload, first_frame, pause, unpause, look_at
+reachable_ui, findings, mouse_move, reload, first_frame, pause, unpause, look_at,
+fire_entry_point
 ```
 
 Notable behaviors:
@@ -436,6 +437,29 @@ Notable behaviors:
   over `sample-pixels`/`screenshot`/`node-bounds` without racing anything, `unpause`
   to resume. Idempotent either direction; the reply's `was_paused` says what state it
   found.
+- **`entry_hook` / `entry_points` actually fire, and say so** (0.30.0, gh#29). Before
+  this, `entry_hook` accepted a value, validated fine, and was read by nothing — a
+  config key that *looks* configured is the harness's own worst failure mode applied
+  to its own config, and the natural symptom (a launched session still sitting on a
+  title screen) reads as a broken game, not an unwired setting. `entry_hook`
+  (`{node_path, method}`, both required together) fires **automatically, once,
+  shortly after launch** — polled rather than fired on a fixed frame delay, since
+  autoloads run before the main scene is instantiated and the target usually does
+  not exist yet at `_ready()`. Gives up after 10s and reports `node not found` if it
+  never resolves, so a typo is an error, not permanent silence. Outcome rides on
+  every `ping` reply as `entry_hook_status` (`not_configured` / `fired` / an error
+  string) and `entry_hook_result` (the method's own return value); `ping`'s CLI
+  print surfaces it too. `entry_points` (same shape plus optional `scene` and
+  `args`) are named alternates reached **on demand** via `fire-entry-point NAME`,
+  not fired automatically — `/verify` picks one whose `match` substrings hit the
+  diff (see `commands/verify.md`), so a change to a boss/shop/level script gets a
+  runtime path instead of only a code read. An entry with `scene` set switches to
+  it first via `change_scene_to_file()` (polling for the target node the same way,
+  since the new scene is deferred to the end of the frame) and reports
+  `scene_changed: true`. Neither mechanism guards against being fired twice — that
+  is the target method's own job, the same way a project verb should already guard
+  a non-idempotent action, and the workaround this report shipped with
+  (`"already in play, nothing to dismiss"`) is the pattern to copy.
 - **`raycast` is 2D or 3D by arity** (0.22.0, moving-in:G-023): `[x,y]` queries the 2D
   space, `[x,y,z]` the 3D space (`layer_names/3d_physics`), `data.space` says which.
   A 2D query on a tree whose only colliders are `CollisionObject3D`s is **refused**
@@ -871,7 +895,7 @@ set-game-speed, pause, unpause, wait-frames, clear-nodes, validate-ui, ui-snapsh
 node-bounds, save-ui-baseline, ui-snapshot-diff, tilemap-cells,
 tilemap-region, scripts-seen, canvas-scale, set-resolution,
 find-nodes, press, raycast, sample-pixels, reachable-ui, aabb, look-at, new-uid,
-mouse-move, reload, first-frame
+mouse-move, reload, first-frame, fire-entry-point
 ```
 
 `new-uid` is the one subcommand that never touches the bus — see below.

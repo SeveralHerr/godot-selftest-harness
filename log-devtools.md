@@ -6345,3 +6345,67 @@ outside `check_templates.py` (no existing coverage of that tool there at all,
 a gap this turn didn't have room to close) via a stand-in Godot binary in both
 directions, matching the standard this repo already applies to claims that
 need a real process to prove, not a scratch fixture.
+
+## 2026-08-16 — 0.30.0: gh#29, patched on request
+
+Deferred last cycle as "needs a design decision, not a quick patch" — asked
+to proceed anyway. Implemented option 1 from the report's own preference
+order (implement it), not options 2 (delete) or 3 (fail loudly and stop
+there).
+
+**`entry_hook` now fires automatically, once, shortly after launch.**
+`{node_path, method}`, both required together. Resolution is polled rather
+than fired on a fixed frame delay — autoloads run before the main scene is
+instantiated (the same timing problem `_seed_scripts_seen` already solved
+with `node_added`; this uses a bounded poll instead since a genuine typo
+never fires another `node_added` to wake an event-driven version). Gives up
+after 10s and reports `node not found` — a typo is now an error, not
+permanent silence, which was the entire complaint. Outcome rides on every
+`ping` reply as `entry_hook_status` (`not_configured` / `fired` / a specific
+error) and `entry_hook_result` (the method's own return value); the CLI's
+`ping` print surfaces it too, and `performance`'s `TREE IS PAUSED` advice
+(`devtools.py:1350`) — which told the reader to set `entry_hook` when doing
+so could not fix anything — is now honest about being one of two real
+remedies (the other being the `unpause` verb shipped 0.25.0).
+
+**`entry_points` now exist at runtime, not only in the scaffolder's shipped
+config template.** The gap was narrower than the report first read: the
+shipped `templates/addons/godot_selftest/devtools_config.json` already
+carried `"entry_points": {}`, so `patch_config`'s merge already added it to
+every refreshed project as a "new key" — accepted, validated, present in the
+file, and still read by nothing, which is the precise shape the report
+diagnosed. Added `entry_points` to `dev_tools.gd`'s in-code `DEFAULT_CONFIG`
+too (the fallback for a project with no config file at all) and a new
+`fire_entry_point` verb / `fire-entry-point NAME` CLI command: resolves a
+named entry (`{node_path, method, scene, args, match}`, first two required),
+switches `scene` first if configured and different from the current one
+(polling for the target the same way, since `change_scene_to_file()` defers
+the new scene to end-of-frame), then calls `node_path.method(*args)` and
+reports the return value. Refuses an unconfigured name by listing what IS
+configured, never silently. `commands/verify.md` already had a full,
+well-written "Named entry points (diff-aware)" section describing exactly
+this selection logic (`match` substrings against the diff) — written
+speculatively for a feature that did not exist yet, which is itself a small
+instance of the same failure class. Updated it to call the real verb instead
+of the placeholder `cmd start_game` workaround it had been carrying.
+
+Neither mechanism guards against firing twice - that is the target method's
+own job, per the report's own worked example (`"already in play, nothing to
+dismiss"`), and is now called out as the pattern to copy rather than left
+implicit.
+
+**Validation run this turn:** `python tools/record_version.py --record` then
+`--check` — OK at 0.30.0, 14 shipped files (unchanged - `fire_entry_point` is
+the only new bus verb, `entry_hook` fires from existing startup plumbing).
+`python -m unittest discover -s tools` — 35 tests OK. `python
+tools/check_templates.py` — OK, all stages including a new dedicated control
+(`check_entry_hook_and_entry_points`) that mutates `devtools_config.json` for
+a SEPARATE launched instance (entry_hook fires once at `_ready()`, before the
+main scratch instance - already running under the default session - would
+ever see a config change), asserts `fired` status, the surfaced return value,
+a successful named `fire-entry-point` call with args, and refusal on an
+unconfigured name; config restored and the instance quit in `finally`
+regardless of outcome. Mutation-tested both mechanisms separately (the
+`_start_entry_hook()` call site, and the `fire_entry_point` registration) -
+each failure correctly named the specific assertion it broke, confirmed
+against a byte-identical restore both times.
