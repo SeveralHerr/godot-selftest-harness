@@ -79,9 +79,16 @@ game; run them anytime:
 ```bash
 python tools/name_check.py                                       # names only — no engine at all
 godot --headless --path . --script res://tools/lint_project.gd   # UID + scene + dup-id + shader lint
-godot --headless --path . --script res://tools/run_tests.gd      # unit tests (test_dir)
+python tools/run_tests.py                                        # unit tests (test_dir) — NOT the bare .gd
 godot --path . --script res://tools/capture.gd -- --scene res://ui/hud.tscn --out shot.png
 ```
+
+**Run `run_tests.py`, not the bare `run_tests.gd`.** A test that aborts mid-method
+after already running one real assertion is reported `[PASS]` by `run_tests.gd` itself
+— the aborted coroutine's return value is coerced to `""`, identical to a genuine pass,
+and `[VACUOUS]` only catches zero assertions. `run_tests.py` wraps it, catches the
+`SCRIPT ERROR` the return value can't carry, and fails the run even when `run_tests.gd`
+reported `ALL TESTS PASSED` (0.27.0, gh#27). Same flags via `-- ...` passthrough.
 
 **Lint flags** (after `--`): `--strict` (warnings fail the run), `--baseline-write PATH` /
 `--baseline PATH` (split findings into `NEW` vs `PRE-EXISTING` against a saved snapshot —
@@ -195,8 +202,12 @@ path); `scripts-seen`, `new-uid`, `logs`, `harness-version`, `cmd <verb>`.
   another request's data. A command sent mid-handler waits on disk and runs after —
   deferred, never dropped, never concurrent. So a timeout can mean *your command never
   started*; the error says which, naming the verb hogging the bus. For parallel
-  instances use `launch --isolated`, which isolates the **bus only** — `user://` (saves,
-  screenshots, UI baselines, `.godot/`) stays shared unless you also set `GODOT_USERDATA`.
+  instances use `launch --isolated`, which isolates the **bus only**
+  (`GODOT_DEVTOOLS_BUSDIR` / `--devtools-busdir`) — `user://` (saves, screenshots, UI
+  baselines, `.godot/`) stays **shared, with no way to isolate it**: Godot has no
+  `--user-data-dir` flag and honours no `GODOT_USERDATA` env var (gh#28 — an earlier
+  version of this line implied setting one would isolate it; it does nothing). Parallel
+  `--isolated` instances can still collide on saves/screenshots/UI baselines.
 - **`game not running` in ~2s** means a dead game *or* the wrong `user://` dir; the
   error can't tell them apart. Check `--userdata` before assuming a crash.
 - **Assert transforms on `data.transform`, not the property dump.** Godot hides

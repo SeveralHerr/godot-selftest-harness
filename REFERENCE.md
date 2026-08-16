@@ -627,6 +627,17 @@ Notable behaviors:
   against an empty autoload in the project that found this. The runner counts
   `_T.assert_*` calls per method and only makes the call when the method's own source
   contains one, so a project that hand-rolls its failure strings is never accused.
+- **A test that aborts mid-method, having already run a real assertion, is reported
+  `[PASS]`** (0.27.0, gh#27 / moving-in:G-050, reported independently by two projects
+  the same day) — a third failure in the same family, and the one `[VACUOUS]`
+  structurally cannot catch, because `[VACUOUS]` only fires on *zero* assertions and
+  an abort mid-method has usually already run some. Godot coerces the aborted
+  coroutine's return value to the declared type's default — `""` for a `-> String`
+  test — indistinguishable from a genuine pass by the return value alone; a real run
+  measured `ALL TESTS PASSED` over a test whose body raised
+  `SCRIPT ERROR: Invalid operands 'float' and 'Nil' in operator '+'`. GDScript cannot
+  observe its own process's stderr after the fact, so no fix inside `run_tests.gd`
+  itself is possible — see `tools/run_tests.py` below.
 - **`validate_ui`** flags `ui_outside_safe_area` when `safe_area_inset` is configured
   — for overlays (a CRT shader, a notch, a rounded corner) that eat the viewport edges
   without any validator knowing. The check is skipped entirely when the inset is
@@ -977,6 +988,17 @@ Notable flags:
   - Everything after a bare `--` is forwarded to the Godot command line, so a run
     needing an engine flag no longer has to re-implement launching:
     `devtools.py launch --no-mute -- --write-movie out/frame.png --fixed-fps 30`.
+  - **A `--devtools-session`/`--devtools-busdir` token in that passthrough is now
+    wired correctly, not silently dropped** (0.28.0, gh#28). Those two only ever
+    reach the addon via `OS.get_cmdline_user_args()` — everything after Godot's
+    *own* `--` — so `launch -- --devtools-session X` used to append them straight
+    onto the engine command line with no `--` ahead of them at all: two
+    unrecognized top-level tokens, silently ignored, and every later
+    `ping --session X` timed out reading exactly like a crashed game. `launch`
+    now also adopts `X` for its own owner-conflict pre-check and post-launch
+    poll, so a bare passthrough session behaves identically to `--isolated` /
+    the top-level `--session` flag rather than being the one spelling that
+    silently did nothing.
   - `--no-mute` opts out of `--mute`: a `--write-movie` run records the audio bus, and
     a muted run captures silence.
   - `launch` **refuses to join a bus a live pid already owns** — two instances
@@ -1054,24 +1076,41 @@ variable. With no session the filenames are exactly what they always were, so no
 about existing single-instance usage changes. `ping` and `harness-version` report the
 session they answered on, so "which instance is this?" is answerable rather than assumed.
 
-**A shared `user://` is still shared.** Separate buses fix the crossing, not the rest of
-the directory: screenshots, UI baselines and save files still collide, and
-`--headless --import` still races on a single `.godot/` class cache. For real isolation,
-give each instance its own userdata directory too:
+**A shared `user://` is still shared, and there is no supported way to isolate it**
+(gh#28). Separate buses fix the crossing, not the rest of the directory: screenshots,
+UI baselines and save files still collide, and `--headless --import` still races on a
+single `.godot/` class cache. Godot has **no `--user-data-dir` engine flag and honours
+no `GODOT_USERDATA` environment variable** — setting one before launching Godot does
+nothing to where the engine writes; only `devtools.py` reads it, and only to decide
+where *it* polls. Setting `GODOT_USERDATA` (or `--userdata`) without also changing
+where the *game* writes just makes the client poll an empty directory while the game
+writes to the real one — the exact silent-timeout shape `launch -- --devtools-session`
+takes when it is not wired correctly (see below).
+
+The only way to actually move an instance's `user://` is
+`application/config/use_custom_user_dir` + `custom_user_dir_name` in a **per-worker
+copy of `project.godot`** — heavier than an env var, but it is the one mechanism Godot
+itself honours. Set `GODOT_USERDATA` / `--userdata` to match wherever that custom dir
+resolves to, so the client polls the same place the game actually writes:
 
 ```bash
-GODOT_USERDATA=/tmp/run-a godot --path . -- --devtools-session a &
-python tools/devtools.py --session a --userdata /tmp/run-a ping
+# project.godot in this worker's copy sets custom_user_dir_name="run-a"
+godot --path . -- --devtools-session a &
+python tools/devtools.py --session a --userdata /path/to/run-a's/resolved/userdir ping
 ```
 
-or set `application/config/use_custom_user_dir` + `custom_user_dir_name` in a per-worker
-copy of `project.godot`. Use `--session` when instances share a directory; use both when
-they must not share anything.
+Without a per-worker `project.godot`, treat `user://` as shared and serialize anything
+that touches it (screenshots, imports, save files) across parallel instances. Use
+`--session` alone when instances only need separate buses; add the custom-user-dir
+setup when they must not share `user://` at all.
 
 ### Userdata directory resolution
 
-The CLI must poll the same `user://` directory the game writes to. It resolves
-that directory in priority order:
+The CLI must poll the same `user://` directory the game writes to. **This resolution
+is entirely client-side** — Godot itself is never told any of this; both entries below
+only change where `devtools.py` looks, so they only help once something ELSE (usually
+`custom_user_dir_name` in a per-worker `project.godot`) has actually moved where the
+game writes. It resolves that directory in priority order:
 
 1. `--userdata <path>` CLI flag.
 2. `GODOT_USERDATA` environment variable.
@@ -1389,6 +1428,36 @@ contain no [...]` followed by a `NOT COVERED:` line naming what `--import` struc
 cannot see — rather than reading as a compile verdict it isn't. `/verify` still runs
 lint alongside import in every tier that reaches Phase 1, so nothing ships broken on
 this gap; the fix is honesty about which gate actually caught it.
+
+### `tools/run_tests.py`
+
+`run_tests.gd`'s own PASS/FAIL tally is fooled by a test that aborts mid-method: Godot
+coerces the aborted coroutine's return to the declared type's default (`""` for a
+`-> String` test), which is byte-for-byte identical to a genuine pass, and `[VACUOUS]`
+only fires on *zero* assertions — an abort that already ran some is the more dangerous
+case (0.27.0, gh#27 / moving-in:G-050). GDScript cannot observe its own process's
+stderr after the fact, so no fix inside `run_tests.gd` is possible; the signal has to
+come from outside the process, same reasoning as `import_check.py` wrapping `--import`.
+
+```bash
+python tools/run_tests.py                       # the whole suite
+python tools/run_tests.py -- --filter foo        # passthrough to run_tests.gd
+python tools/run_tests.py -- --file test_x.gd
+python tools/run_tests.py --json                 # this wrapper's own verdict
+```
+
+Runs the suite as a subprocess, captures stdout+stderr together (in order, to
+`.devtools/tests.log`) exactly as `run_tests.gd` printed them, then scans for
+`SCRIPT ERROR` / `USER SCRIPT ERROR` lines — deliberately narrower than
+`import_check.py`'s signal set, since `Parse Error` / `Failed to load script` /
+`Compilation failed` are load-time signals that tool already owns. Reports
+`Errors: N emitted during the suite` next to the runner's own denominators, and
+**a nonzero count overrides a reported-clean exit** — the entire point — while never
+downgrading a genuine `run_tests.gd` exit `2` (could not run at all). Args after `--`
+pass straight through to `run_tests.gd`, so `--filter`/`--file`/its own `--json` all
+still work. Exit codes follow the harness convention: `0` clean, `1` the suite failed
+or emitted an error under a reported pass, `2` could not run. Binary resolution and
+flags match `import_check.py`: `-p/--project`, `--godot`, `--json`, `--timeout`.
 
 ### Standalone runners: `tools/eval.gd` and `tools/capture.gd`
 

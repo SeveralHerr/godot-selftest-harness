@@ -89,11 +89,11 @@ from pathlib import Path
 from typing import Optional  # noqa: F401
 
 
-# harness-version: 0.27.0
+# harness-version: 0.28.0
 # Version of the godot-selftest-harness this client was copied from. Compared against
 # the running game's own stamp by the `harness-version` verb, so a half-refreshed
 # install (new client, old autoload) is visible instead of mysterious.
-HARNESS_VERSION = "0.27.0"
+HARNESS_VERSION = "0.28.0"
 
 COMMANDS_FILE = "devtools_commands.json"
 RESULTS_FILE = "devtools_results.json"
@@ -3111,6 +3111,7 @@ def cmd_launch(args, project_path: Path):
     needing an engine flag (`--write-movie out/frame.png --fixed-fps 30`) no
     longer has to re-implement launching (gather:G-092).
     """
+    global _SESSION
     config = _read_harness_config(project_path)
     godot = args.godot or os.environ.get("GODOT_BIN") or str(config.get("godot_bin", "") or "")
     if not godot:
@@ -3121,6 +3122,54 @@ def cmd_launch(args, project_path: Path):
     if not godot_path.is_file():
         print(f"Error: Godot binary not found: {godot_path}", file=sys.stderr)
         sys.exit(2)
+
+    # gh#28: split passthrough into godot-native args and --devtools- prefixed ones
+    # BEFORE the owner pre-check below, not after - the pre-check reads _SESSION to
+    # pick which owner file to look at (_owner_file_path splices it in), and a bare
+    # `launch -- --devtools-session X` used to leave _SESSION empty this whole
+    # function, so the pre-check examined the DEFAULT bus's owner file instead of
+    # X's. With another instance alive on the default bus, that read as "a live
+    # process already owns this bus" and refused to launch a session that would
+    # never have touched it. Doing this split first, and adopting X into the global
+    # _SESSION the same way --isolated/--session already do, fixes both the
+    # pre-check and (further down) the actual command line and post-launch poll
+    # with the one parse instead of three separate ones that could drift apart.
+    #
+    # argparse.REMAINDER keeps the separator itself; drop it so `launch -- --foo`
+    # forwards `--foo` and not `-- --foo`.
+    passthrough = list(getattr(args, "godot_args", None) or [])
+    if passthrough and passthrough[0] == "--":
+        passthrough = passthrough[1:]
+    native_passthrough = []
+    devtools_passthrough = []
+    i = 0
+    while i < len(passthrough):
+        token = passthrough[i]
+        if token.startswith("--devtools-"):
+            devtools_passthrough.append(token)
+            if i + 1 < len(passthrough) and not passthrough[i + 1].startswith("--"):
+                i += 1
+                devtools_passthrough.append(passthrough[i])
+        else:
+            native_passthrough.append(token)
+        i += 1
+    passthrough_session = ""
+    passthrough_busdir = ""
+    for j, tok in enumerate(devtools_passthrough):
+        if tok == "--devtools-session" and j + 1 < len(devtools_passthrough):
+            passthrough_session = devtools_passthrough[j + 1]
+        elif tok == "--devtools-busdir" and j + 1 < len(devtools_passthrough):
+            passthrough_busdir = devtools_passthrough[j + 1]
+    if devtools_passthrough:
+        print(f"  note: --devtools- passthrough arg(s) routed after Godot's own -- "
+              f"so they actually reach the addon: {' '.join(devtools_passthrough)}")
+        if passthrough_session and not args.isolated:
+            if _SESSION and _SESSION != passthrough_session:
+                print(f"  WARNING: --session named {_SESSION!r} but passthrough also "
+                      f"names {passthrough_session!r} - the passthrough value is what "
+                      "reaches Godot; adopting it here too so the owner check and the "
+                      "post-launch poll agree with the game.")
+            _SESSION = passthrough_session
 
     # Refuse to add a second instance to a bus a LIVE process already owns
     # (gather:G-112): two instances answering one bus is silent data corruption,
@@ -3197,8 +3246,8 @@ def cmd_launch(args, project_path: Path):
 
     env = os.environ.copy()
     session = ""
-    bus_dir = ""
-    user_args = []
+    bus_dir = passthrough_busdir
+    user_args = list(devtools_passthrough)
     if args.isolated:
         session = uuid.uuid4().hex[:8]
         bus_dir = tempfile.mkdtemp(prefix="devtools_bus_")
@@ -3206,16 +3255,16 @@ def cmd_launch(args, project_path: Path):
         env["GODOT_DEVTOOLS_BUSDIR"] = bus_dir
         user_args = ["--devtools-session", session, "--devtools-busdir", bus_dir]
     elif _SESSION:
+        # Covers both the top-level --session flag AND a bare --devtools-session
+        # passthrough - the block above adopted the latter into _SESSION already,
+        # specifically so this is the only place that has to build the launch
+        # command from it.
         session = _SESSION
         env["GODOT_DEVTOOLS_SESSION"] = _SESSION
-        user_args = ["--devtools-session", _SESSION]
+        if not user_args:
+            user_args = ["--devtools-session", _SESSION]
 
-    # argparse.REMAINDER keeps the separator itself; drop it so `launch -- --foo`
-    # forwards `--foo` and not `-- --foo`.
-    passthrough = list(getattr(args, "godot_args", None) or [])
-    if passthrough and passthrough[0] == "--":
-        passthrough = passthrough[1:]
-    cmd += passthrough
+    cmd += native_passthrough
     if user_args:
         # Godot's own `--` separator: everything after it reaches
         # OS.get_cmdline_user_args(), which is where the autoload reads from.
@@ -3253,8 +3302,8 @@ def cmd_launch(args, project_path: Path):
     print(f"Launched pid {proc.pid}: {' '.join(cmd)}")
     print(f"  stdout: {out_log}")
     print(f"  stderr: {err_log}")
-    if passthrough:
-        print(f"  forwarded to Godot: {' '.join(passthrough)}")
+    if native_passthrough:
+        print(f"  forwarded to Godot: {' '.join(native_passthrough)}")
 
     if args.no_wait:
         print("  --no-wait: the bus was NOT verified. "
