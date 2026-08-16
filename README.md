@@ -51,9 +51,16 @@ This project asserts 70 things across 3 test files.
 
 That's the thing a hand-rolled suite structurally cannot do: notice what it forgot.
 
-## Try it
+## Install
 
-Add this plugin to Claude Code, then run this once inside your Godot project:
+In Claude Code:
+
+```
+/plugin marketplace add SeveralHerr/godot-selftest-harness
+/plugin install godot-selftest-harness@godot-selftest-harness
+```
+
+Then run this once inside your Godot project:
 
 ```
 /scaffold-godot-harness
