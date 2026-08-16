@@ -118,7 +118,12 @@ contract-table mismatches (`clear_nodes`, `raycast`, `reachable_ui` all failing 
 perfectly clean 0.25.0 tree) sat unreported release after release: the default run
 every past log entry quotes stayed clean throughout. A stage that only runs when
 someone remembers to ask for it is the "reports success, is not running" shape this
-project keeps finding everywhere else.
+project keeps finding everywhere else. **When a `--full` row fails on a clean tree,
+check the fixture before the row:** an earlier stage-5 check may have mutated the
+fixture (`check_raycast_3d` removes and restores `Wall2D`) and a restore helper whose
+return value nothing asserts reads exactly like row drift — the `raycast` row in H-062
+was that for seven releases (H-065, 0.32.0). Two of the three H-062 rows were drift;
+the third was a real bug.
 
 `python3` on Windows is the Microsoft Store alias stub: it satisfies `command -v` and then
 refuses to run. Use `python`.
