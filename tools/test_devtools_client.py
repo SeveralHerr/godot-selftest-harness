@@ -22,6 +22,19 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "templates" / "tools"))
 import devtools  # noqa: E402
+import contextlib, io
+
+
+@contextlib.contextmanager
+def captured_stderr():
+    buf = io.StringIO()
+    old = sys.stderr
+    sys.stderr = buf
+    try:
+        yield buf
+    finally:
+        sys.stderr = old
+
 
 
 def _sleeper(seconds=30):
@@ -298,6 +311,28 @@ class UserstateStatCase(unittest.TestCase):
         devtools.userstate_stat_take(self.project, self.user_dir)
         changed, created, deleted, _ = devtools.userstate_stat_diff(self.project)
         self.assertEqual((changed, created, deleted), ([], [], []))
+
+
+class SharedUserDirWarningCase(unittest.TestCase):
+    """H-067: launch names a user:// last used by a game from another checkout."""
+
+    def _run(self, owner_project, my_project):
+        with tempfile.TemporaryDirectory(prefix="shared-") as td:
+            user_dir = Path(td) / "user"
+            user_dir.mkdir()
+            devtools._owner_file_path(user_dir).write_text(
+                json.dumps({"pid": 1, "project_path": owner_project}), encoding="utf-8")
+            with captured_stderr() as buf:
+                devtools._warn_shared_user_dir(user_dir, Path(my_project))
+            return buf.getvalue()
+
+    def test_other_checkout_is_named(self):
+        out = self._run(r"C:/games/plant-tower-defense/", r"C:/tmp/plantcopy")
+        self.assertIn("DIFFERENT checkout", out)
+        self.assertIn("use_custom_user_dir=true", out)
+
+    def test_same_checkout_is_silent(self):
+        self.assertEqual(self._run(r"C:/games/plant/", r"C:\games\plant"), "")
 
 
 class SceneTreeCountCase(unittest.TestCase):

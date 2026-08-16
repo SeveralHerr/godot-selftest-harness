@@ -89,11 +89,11 @@ from pathlib import Path
 from typing import Optional  # noqa: F401
 
 
-# harness-version: 0.37.0
+# harness-version: 0.38.0
 # Version of the godot-selftest-harness this client was copied from. Compared against
 # the running game's own stamp by the `harness-version` verb, so a half-refreshed
 # install (new client, old autoload) is visible instead of mysterious.
-HARNESS_VERSION = "0.37.0"
+HARNESS_VERSION = "0.38.0"
 
 COMMANDS_FILE = "devtools_commands.json"
 RESULTS_FILE = "devtools_results.json"
@@ -2302,6 +2302,24 @@ def _print_plugin_staleness(project_version: str) -> None:
               f"against {project_version} may be fixed there already.", file=sys.stderr)
 
 
+def _warn_shared_user_dir(user_dir: Path, project_path: Path) -> None:
+    """H-067: say when this checkout's user:// was last used by a game from ANOTHER
+    checkout - a copy or worktree of the same `config/name` resolves to the same
+    directory, and only `use_custom_user_dir=true` + `custom_user_dir_name` in the
+    copy's project.godot moves it (`custom_user_dir_name` alone is ignored, which is
+    how a 0.37.0 probe rewrote a developer's real save). The owner file already
+    carries the checkout path; this is the one place it is compared before launch."""
+    owner, _ = _read_owner(user_dir)
+    other = owner.get("project_path") if isinstance(owner, dict) else None
+    if not other or _same_project_dir(other, project_path):
+        return
+    print(f"user://: {user_dir} was last used by a game running from a DIFFERENT checkout "
+          f"({other}). A copy or worktree of this project shares the same saves, screenshots "
+          f"and baselines. `--snapshot-userstate` protects the save; to really separate it, "
+          f"set application/config/use_custom_user_dir=true AND custom_user_dir_name in this "
+          f"copy's project.godot (the name alone is ignored).", file=sys.stderr)
+
+
 def _harness_version_offline(project_path: Path, as_json: bool, why: str) -> int:
     """Print what disk alone can prove, and say plainly what is unknown.
 
@@ -3660,7 +3678,9 @@ def cmd_launch(args, project_path: Path):
     # back before anything else starts; then, if asked, take a fresh one.
     userstate_restore(project_path, "previous launch never quit cleanly")
     try:
-        userstate_stat_take(project_path, get_user_data_path(project_path))
+        launch_user_dir = get_user_data_path(project_path)
+        userstate_stat_take(project_path, launch_user_dir)
+        _warn_shared_user_dir(launch_user_dir, project_path)
     except FileNotFoundError:
         pass  # no user:// yet (first ever launch); nothing to diff against
     snapshot_patterns = getattr(args, "snapshot_userstate", None)
