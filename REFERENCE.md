@@ -463,7 +463,14 @@ Notable behaviors:
   engine had rotated the auto-names, so a path that answered 20 seconds earlier 404'd.
   A node missing a `where` property is a **non-match, never an error**: the predicate is
   meant to run across a heterogeneous subtree. `properties` (extra keys to report),
-  `root` and `limit` (default 200) narrow the answer.
+  `root` and `limit` (default 200) narrow the answer. **`class` matches a script
+  `class_name` too, subclasses included** (0.21.0, gh#15.2): the node's script and its
+  base-script chain are compared by `get_global_name()`, so `--class Pest` finds the six
+  live `Pest` nodes that report `type: Node2D`, and `--class Plant` finds every plant. A
+  `class` that names neither an engine class nor a registered `class_name` **fails**
+  (naming the project's script classes) rather than returning a clean zero — and when
+  the selector itself matched nothing, the empty result says so instead of diagnosing a
+  `where` predicate that never ran. `clear_nodes` shares the matcher and the refusal.
 - **`get_state`** takes an optional `properties` array (the CLI's repeatable
   `--property`). Names that don't exist come back in `data["missing"]` rather than
   being silently dropped. `data["transform"]` is **always** present — see the sharp
@@ -533,6 +540,19 @@ Notable behaviors:
   — for overlays (a CRT shader, a notch, a rounded corner) that eat the viewport edges
   without any validator knowing. The check is skipped entirely when the inset is
   all-zero, so it adds no findings to an existing project.
+- **`validate_ui`'s `ui_text_overflow` measures a Label per line** (0.21.0, gh#15.1).
+  `get_string_size()` lays a string holding `
+` out as one line, so a two-line banner
+  that rendered perfectly inside its box measured 1052px against 896px and gated a run;
+  the only workaround was a baseline entry that would also have hidden a *genuine*
+  overflow of that Label forever. The widest single line is what the box has to hold;
+  the message says `(widest of N lines)` when it applies. Autowrapping Labels are still
+  skipped, as before. A Label with `clip_text` or a `text_overrun_behavior` is not
+  spilling past its box, it is **trimming** the string — the player reads a cut readout
+  and the fix is room or a shorter string — so that case is now `ui_text_trimmed`
+  (plant:G-017); the two used to share one code and were triaged by eye. A baseline
+  written before 0.21.0 that held such a Label under `ui_text_overflow` will show it as
+  NEW once under the new code — re-run `--baseline-write` after checking it.
 - **`run_method` and `set_state` coerce JSON arguments to the declared types.** JSON
   cannot carry a `Vector2`, so a `func take_vec(v: Vector2)` used to be uncallable over
   the bus. `[x, y]` / `{"x": .., "y": ..}` / `"x,y"` / `"(x,y)"` (and 3-component /
@@ -583,8 +603,14 @@ Notable behaviors:
   assertion would have to carry. This is the same capture path `screenshot` uses,
   summarized instead of saved.
 - **`reachable_ui`** returns every Control a finger or cursor could actually hit this
-  frame: `{controls: [{path, type, text, rect, on_screen, blocked_by, kind}], count,
-  reachable, viewport}`. A Control qualifies when it is effectively visible, has a
+  frame: `{controls: [{path, type, text, rect, on_screen, scroll_reachable,
+  scroll_container, blocked_by, kind}], count, reachable, scroll_reachable, viewport}`.
+  **A Control inside a `ScrollContainer`** (0.21.0, gh#16) is `on_screen` only where
+  the container's own on-screen rect shows it — a row clipped by its container no
+  longer reads as hittable — and a row past the fold that lies within the scrolled
+  content's extent is `scroll_reachable`, which `findings` **counts and reports but
+  never gates** (a shop list taller than the viewport used to fail `findings` forever
+  with no baseline to accept it). A Control qualifies when it is effectively visible, has a
   non-zero on-screen rect, does not ignore the mouse, and is either a `BaseButton` or
   carries a `gui_input` connection. `blocked_by` names a **later** sibling whose rect
   covers this one's centre and which stops input — the full-rect `MOUSE_FILTER_STOP`
@@ -763,8 +789,9 @@ Notable flags:
 - `sample-pixels [--rect X,Y,W,H]` — mean / dominant colour over a screen rect
   (default: the whole viewport).
 - `reachable-ui` — no flags. Prints every interactive Control with its rect, marking
-  each `OFF-SCREEN` or `BLOCKED BY <path>` rather than dropping it. Run it once per
-  device profile (`set-feature --touchscreen true|false`) and diff.
+  each `OFF-SCREEN`, `SCROLL TO REACH (inside <ScrollContainer>)` or `BLOCKED BY <path>`
+  rather than dropping it. Run it once per device profile
+  (`set-feature --touchscreen true|false`) and diff.
 - `curve --node PATH --method NAME --from N --to N [--step N] [--args JSON]
   [--arg-index N]` — the series a pure method produces over an integer range.
 - `scene-tree [--depth N] [--root PATH] [--property NAME]` — `--root` lists one subtree
@@ -774,8 +801,14 @@ Notable flags:
   `--hide` / `--hide-group` are repeatable and accept a `CanvasLayer` as well as any
   `CanvasItem`; the crop and the hiding happen game-side in one command, and previous
   visibility is always restored. Naming nothing hideable **exits 1 with no file**.
-- `quit [--wait S]` — sends the verb, then confirms the owner pid actually exited (with
-  a short grace beyond `--wait`), exit 1 only for a real survivor. On Windows the
+- `quit [--wait S] [--kill]` — sends the verb, then confirms the owner pid actually exited (with
+  a short grace beyond `--wait`), exit 1 only for a real survivor. It then **sweeps
+  `.devtools/launched.jsonl`** (0.21.0, gh#14.1): every pid this project ever launched —
+  the `_console.exe` wrapper that spawned the engine, and an engine from an earlier
+  launch that stopped polling without exiting — is checked alive-and-same-start-time
+  and listed; `--kill` terminates exactly those. Never by image name (other sessions run
+  games on this machine); a recycled pid whose creation time does not match the record
+  is left alone. On Windows the
   liveness check uses `OpenProcess`/`GetExitCodeProcess` (0.20.0, gh#6): `os.kill(pid, 0)`
   raises `WinError 87` for a **dead** pid, which read as "alive", so `quit` on Windows
   used to warn `STILL ALIVE` after every wait and name a pid `tasklist` no longer had.
@@ -833,15 +866,26 @@ Notable flags:
     post-crash state. `--allow-second-instance` overrides the refusal.
   - `--no-wait` returns as soon as the process is spawned, without proving the bus
     answers.
-- `quit [--exit-code N] [--wait SECONDS]` — sends the quit and then **waits for the pid
+- `quit [--exit-code N] [--wait SECONDS] [--kill]` — sends the quit and then **waits for the pid
   in the owner file to actually go** (default 10 s), exiting **1** on a survivor with
-  the `taskkill`/`kill -9` line to run. `quit` was not reliably fatal: three separate
+  the kill line to run — on Windows **both** `Stop-Process -Force -Id` (PowerShell) and
+  `taskkill /F /PID` (cmd.exe only: through Git-Bash/MSYS the `/F` is rewritten to a
+  phantom `F:/` path and it fails with `Invalid argument/option - 'F:/'`, gh#12).
+  `launch` writes every pid it starts, and the pid the bus answers with, to
+  `.devtools/launched.jsonl`; `launch` warns about earlier ones still alive
+  (`--kill-survivors` clears them) and `quit` sweeps them after the owner exits.
+  `quit` was not reliably fatal: three separate
   times the old process was still alive after a relaunch (once at 1.4 GB), and the only
   symptom was verbs returning empty output while `ping` said `No response` — which
   reads as *no* game rather than as *two*.
 - `list-commands --offline` — no running game: statically parse `register_command(`
   names from the installed core and the config's extension script, labeled
-  generic/project (a text scan, not runtime truth).
+  generic/project (a text scan, not runtime truth). **Both modes print each verb's
+  arg keys** (`place_plant  args: plant, x, y`, 0.21.0, gh#14.2), scanned from the
+  handler body's `args.get("k")` / `args["k"]` / `args.has("k")` — a key not listed is
+  silently ignored by that verb, which is how a guessed `cell` planted the default at
+  the default cell and reported success. `--json` in online mode now returns
+  `{"actions": [...], "args": {verb: [keys]}}` (was a bare list).
 - `set-feature --query` — read the current feature-flag values without writing.
 
 Two subcommands make project verbs first-class without touching the CLI:
@@ -938,7 +982,7 @@ The linter's flags (pass after `--`):
 | `--strict` | Warnings fail the run too (default: errors only). |
 | `--baseline-write PATH` | Write the current finding set to `PATH` and exit 0. |
 | `--baseline PATH` | Group findings into `NEW` (drives the exit code) and `PRE-EXISTING`. |
-| `--find-orphans` | Warn on public functions whose only outside callers are tests. Advisory; never fails. |
+| `--no-orphans` | Skip the orphan scan (on by default since 0.21.0; `--find-orphans` is accepted as a no-op). Advisory; never fails. |
 | `--no-shaders` | Skip the shader compile pass. |
 
 Baseline keys are `file|rule|subject` with no line numbers, so a finding survives
@@ -958,11 +1002,15 @@ you pass `--strict`), `uid_check_ignore` exempts paths, and the check stands dow
 entirely if no `.gd` in the project has a sidecar — Godot only started writing them in
 4.4, and flagging every file in a 4.3 project would be noise, not a finding.
 
-`--find-orphans` covers a failure both other gates miss: a system with passing unit
+The **orphan scan** covers a failure both other gates miss: a system with passing unit
 tests and no caller anywhere in the game. Lint checks UIDs and scenes, the test runner
 green-lights orphaned code, and both report clean. It is a heuristic — signal
 callbacks, `call()`-by-name, and `@export` hooks produce false positives — so it is
-opt-in and advisory.
+advisory and never gates. It **runs by default** (0.21.0, gh#11) and prints
+`Orphans: N of M public function(s) across S script(s) have no live reference` as a
+denominator, because opt-in meant the default gate passed on a method nothing could
+ever call and nothing in the output said the check existed — the same reason the
+string-reference scan below is always on. `--no-orphans` turns it off.
 
 The **global class cache** check runs before the compile pass, on purpose. Every
 top-level `class_name` in the scanned scripts is compared against
@@ -1315,6 +1363,16 @@ readers to discount the number:
   alias is a project's declaration, not an observation, and the whole value of the field
   is that it doesn't blur the two. Aliases don't chain: a voucher that was itself only
   alias-credited credits nothing.
+- **Base classes** (0.21.0, gh#15.3) land in `reached_base` with the observed
+  descendant in `reached_base_via`, printed inline (`+1 as base class: X extended by
+  Y`). A node reports only the script attached to it, never its ancestry, so a base
+  class whose only live instances were subclasses scored NOT reached while its `_draw()`
+  ran every frame — systematic, in every project, and the only escape was an alias that
+  turns an observation into a claim. Reach now walks each observed script's `extends`
+  line statically (a quoted `res://` path, or a `class_name` resolved through
+  `.godot/global_script_class_cache.cfg` — or a scan for `class_name` when the project
+  was never imported) and credits every ancestor in the changed set. A static fact about
+  the files, needing no config; still a distinct bucket so it stays auditable.
 
 Each row also carries the run's `value` verdict, its `expected` prediction, and its
 `cheaper_alternative` — the countable form of the log's `Value:` block, so "how often was

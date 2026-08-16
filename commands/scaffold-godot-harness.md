@@ -237,6 +237,11 @@ else
   echo "devtools_ext/commands.gd already exists — left untouched."
 fi
 cp "${CLAUDE_PLUGIN_ROOT}/templates/devtools_ext/commands.example.gd" "$ROOT/devtools_ext/commands.example.gd"
+# These land OUTSIDE lint's default uid_check_ignore, so mint their sidecars
+# (plant:G-002; `full` does this itself). new-uid --write refuses an existing one.
+for f in commands.gd commands.example.gd; do
+  [ -f "$ROOT/devtools_ext/$f.uid" ] || "$PY" "$ROOT/tools/devtools.py" new-uid --write "$ROOT/devtools_ext/$f"
+done
 ```
 
 ## Step 6 — Seed the project's selftest and a sequence example (only if empty) (done by `full` in step 3)
@@ -261,6 +266,8 @@ else
   echo "test/unit already has files — left untouched."
 fi
 cp "${CLAUDE_PLUGIN_ROOT}/templates/test/sequences/smoke.json" "$ROOT/test/sequences/smoke.json"
+# plant:G-002 - the seed is outside uid_check_ignore too
+[ -f "$ROOT/test/unit/test_selftest.gd" ] && [ ! -f "$ROOT/test/unit/test_selftest.gd.uid" ]   && "$PY" "$ROOT/tools/devtools.py" new-uid --write "$ROOT/test/unit/test_selftest.gd"
 ```
 
 ## Step 7 — Write `devtools_config.json` with detected values (done by `full` in step 3; `config --set` for anything detected later)

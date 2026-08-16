@@ -77,6 +77,15 @@ godot --headless --path . --script res://tools/run_tests.gd      # unit tests (t
 godot --path . --script res://tools/capture.gd -- --scene res://ui/hud.tscn --out shot.png
 ```
 
+**After adding a new `class_name` file (or a new `.tscn`/`.tres`), run
+`godot --headless --path . --import` once before the next lint/test pass.** The
+class cache is built by import; until it is, every script that references the new
+class fails to compile with `Could not find type "X"` — and it cascades into files
+you did not touch, reading like a broad regression. Lint's `stale class cache` hint
+names the fix after the fact; this is the note that says to do it *before*
+(`/verify` runs `import_check.py` for you; a bare lint does not). Also mint a
+`.uid` for a new `.gd`: `python tools/devtools.py new-uid --write path/to/file.gd`.
+
 **Exit codes are `0` pass / `1` findings / `2` the runner couldn't run.** A `2` means
 you verified nothing — not that the code is clean. Redirect to a file and read it back;
 the Windows Godot build often prints nothing to the console, so a failed run looks like
@@ -86,8 +95,10 @@ silent success.
 this harness's worst failure mode. Every test run prints `Selected: N of M discovered`,
 `Autoloads: N of M ready`, `Assertions: N executed` and `Suite: N test script(s)`; lint
 prints `Shaders: N of M compiled OK` (`Shaders: none found` means there are none, not
-that they passed) and `UIDs: OK` (no stale `uid=` **and** no `.gd` missing its `.uid`
-sidecar). A selector matching nothing, and a suite with no `test_*` methods, are both
+that they passed), `UIDs: OK` (no stale `uid=` **and** no `.gd` missing its `.uid`
+sidecar) and `Orphans: N of M public function(s) ... have no live reference` (advisory,
+never gates — but a public method whose only caller is nothing is a feature that cannot
+run; read the `WARN:` lines it prints, especially for a method you just added). A selector matching nothing, and a suite with no `test_*` methods, are both
 exit `2`. A test returning pass having executed none of its own `_T.assert_*` calls
 prints `[VACUOUS]` and fails — usually a loop over an empty collection, so fix the
 data, not the test.
@@ -119,20 +130,21 @@ Launch first: `python tools/devtools.py launch` (or `godot --path . --mute &` th
 Measured across real sessions: 1192 verb calls used 25 of ~48 verbs, the top ten were
 92% of all calls, and `get-state` alone was 44%. Those are below. **The rest are in
 `REFERENCE.md`** — or run `list-commands`, which discovers generic and project verbs at
-runtime (`--offline` parses the scripts statically when no game is running).
+runtime and prints each verb's arg keys (`place_plant  args: plant, x, y` — a key not
+listed is silently ignored; `--offline` parses the scripts statically with no game running).
 
 | Verb | Use |
 |---|---|
 | `get-state --node PATH [--property N ...]` | Read a node's properties. **Always pass `--property`** — an unfiltered `Label` is ~120 keys. Repeatable; dotted paths walk into Resources and Dictionaries (`slot_data.item.name`); unknown names are reported, not dropped |
 | `scene-tree [--root PATH] [--depth N]` | Discover root scene name + node paths (don't assume names). Each node carries `script` and `scene_file`, so a changed file maps to the node that runs it |
-| `find-nodes [--class C\|--group G\|--method M] [--where N=V] [--property N]` | Locate nodes by what they *are*, not where they sit. `--where` is repeatable and takes dotted paths. Usually the right verb for identifying one node in a large tree |
+| `find-nodes [--class C\|--group G\|--method M] [--where N=V] [--property N]` | Locate nodes by what they *are*, not where they sit. `--class` takes a script `class_name` too (subclasses included) and **fails on a name that is neither**; `--where` is repeatable and takes dotted paths. Usually the right verb for identifying one node in a large tree |
 | `run-method --node PATH --method N --args "[...]"` | Call a method — preferred over `set-state` when a signal should fire. Reports `returned_null` + `declared_return`, so a `-> void` that ran is distinguishable from a call that aborted |
 | `set-state --node PATH --property N --value V` | Set raw property (bypasses setters/signals) and print the read-back. Dotted paths write through — note that mutates the **Resource**, so a shared material changes for every node using it. Write `--value=-200,-296` with an `=` when it starts with `-` |
 | `node-bounds PATH` | Exact **screen-space** position/size — deterministic layout ground truth, ancestor `CanvasLayer` transforms applied. Prefer this over a screenshot |
 | `press --node PATH` | Emit `pressed` on the nearest `BaseButton` at or under PATH — a real press with no screen coordinates to guess. A disabled button is reported, not silently "pressed" |
 | `input press`/`release`/`tap` ACTION, `input state [ACTION ...]` | Simulate input actions; `state` polls what the game is actually seeing. `tap` releases on the NEXT frame and reports `pressed_during`/`pressed_after` |
 | `screenshot [--region X,Y,W,H] [--hide NODE]` | Visual check only (`sleep 0.5`–`1` after a state change). Crop and hiding happen game-side, so a capture is reproducible |
-| `ping` / `quit` | Confirm the bridge is live (reports `bus_dir`, `user_dir`, and `tree is PAUSED`; **the bridge answers while paused**, so pause menus are verifiable) / shut down, **exiting 1 if the process survived** |
+| `ping` / `quit [--kill]` | Confirm the bridge is live (reports `bus_dir`, `user_dir`, and `tree is PAUSED`; **the bridge answers while paused**, so pause menus are verifiable) / shut down, **exiting 1 if the process survived** — or if any earlier launch of this project is still alive (`.devtools/launched.jsonl`); `--kill` terminates exactly those pids, never by image name. On Windows the printed fallback is `Stop-Process -Force -Id` (PowerShell) — `taskkill /F` through Git-Bash becomes `F:/` and fails |
 
 Worth knowing exists, reach for `REFERENCE.md` when you need them — `validate-ui`,
 `reachable-ui`, `performance`, `validate --scene`, `validate-all` (all folded into

@@ -4042,3 +4042,446 @@ unittest discover -s tools` — 24 tests OK (was 17). `python tools/record_versi
 commands documented. No static-analysis template changed, so no real-project
 false-positive run was owed; the live-bus verbs were exercised on a scratch project only
 (a real project's game was in use by another session).
+
+## 2026-08-15 - Upstreamed 19 open gap(s) from plant-tower-defense (harness 0.18.0, 0.19.0)
+
+Pooled by `tools/upstream_gaps.py` from `C:\Users\gotmi\Documents\GitHub\plant-tower-defense\log-devtools.md`. Gap text is the project's,
+verbatim; only the id line is rewritten (qualified with the project name so
+ids from two projects cannot collide, plus a `source:` back-pointer).
+
+- Gap: **`scaffold_install.py config` does not record `--set` values as scaffold-owned,
+  so a later bare `config` call reverts them to the shipped schema default** — step 11 of
+  `scaffold-godot-harness` issues two separate invocations by design:
+  `--set godot_bin=<path>` then `--set godot_version=<ver>`. The second printed
+  `^ godot_bin: "C:/Users/.../Godot_v4.7.1-stable_win64_console.exe" -> ""`, wiping the
+  value the first had just written. Worked around by passing both `--set` flags in one
+  invocation, which produced the correct result.
+  - [plant-tower-defense:G-001] status: fixed | fixed-in: 0.20.0 | seen: 1 | harness: 0.18.0 | source: plant-tower-defense 2026-08-15
+  - Improvement: in `config`, write each `--set` key's value into `_scaffold_defaults`
+    (so the key stays scaffold-owned at its *new* value rather than the schema default).
+    Failing that, collapse step 11 into a single `--set godot_bin=… --set godot_version=…`
+    call in the command doc.
+
+- Gap: **Steps 5 and 6 copy `.gd` files with plain `cp`, bypassing the installer's `.uid`
+  minting, and those paths are outside `uid_check_ignore`** — so the scaffold's own smoke
+  check (step 12) reports 3 warnings on a *fresh* install. `uid_check_ignore` defaults to
+  `["res://addons/", "res://tools/"]`, but the `cp`-copied files land in `res://devtools_ext/`
+  and `res://test/unit/`, which lint does check. Step 4's summary explicitly promises `.uid`
+  sidecars are minted for "every `.gd` the installer writes" — these three are not written
+  by the installer. Worked around with
+  `python tools/devtools.py new-uid --write devtools_ext/commands.gd devtools_ext/commands.example.gd test/unit/test_example.gd`
+  (run per-file), after which lint reported `UIDs: OK`, 0 warnings.
+  - [plant-tower-defense:G-002] status: fixed | fixed-in: 0.21.0 | seen: 1 | harness: 0.18.0 | source: plant-tower-defense 2026-08-15
+  - Improvement: route steps 5 and 6 through `scaffold_install.py files` (which already
+    mints uids and skips existing ones) instead of `cp`, keeping the "never overwrite
+    `commands.gd`" rule. `commands.example.gd`, `test_example.gd` and `smoke.json` are
+    refreshable and fit the installer's normal path unchanged.
+
+- Gap: **`run_tests.gd` blames the selector when the cause was a failed compile.** A test
+  script that fails to parse is excluded from the discovered count, so a `--file` selector
+  naming it "matches nothing" and the run ends on
+  `SELECTED NOTHING - file 'test_sprite_style.gd' selected 0 of 3 discovered test(s) (exit 2)`
+  followed by three lines of advice about how `--filter` matches method names. The real
+  cause — `[ERR] res://test/unit/test_sprite_style.gd: Script failed to compile` — is
+  printed above but is not what the verdict points at, and stderr above it was 60 lines
+  of backtrace. Worked around by scrolling back to the `[ERR]` line.
+  - [plant-tower-defense:G-003] status: fixed | fixed-in: 0.20.0 | seen: 1 | harness: 0.18.0 | source: plant-tower-defense 2026-08-15
+  - Improvement: track the count of scripts that failed to compile during discovery, and
+    when it is non-zero prefer that in the final verdict —
+    `SELECTED NOTHING - 1 test script failed to compile (see [ERR] above); selector
+    'test_sprite_style.gd' cannot match a script that did not load` — before falling back
+    to the selector-syntax advice, which is only correct when every script loaded.
+
+- Gap: **the DEVELOPMENT RULE is unsatisfiable on a project with no main scene, and
+  nothing says so.** `project.godot` has no `run/main_scene` and
+  `devtools_config.json` has `"main_scene": ""`, so `/verify`'s runtime phases have
+  nothing to launch; this change (art pipeline + tooling + tests) is real work that
+  cannot reach a running game. Ran the three headless gates instead —
+  `name_check` (errors 0), `lint_project.gd` (`Scripts: 9 compiled OK | UIDs: OK`,
+  exit 0), `run_tests.gd` (`Total: 10 | Passed: 10 | Assertions: 54`, exit 0) — and
+  am reporting that as "lint + tests green, runtime unreached", not as "verified".
+  - [plant-tower-defense:G-004] status: fixed | fixed-in: 0.20.0 | seen: 2 | harness: 0.18.0 | source: plant-tower-defense 2026-08-15
+  - Improvement: have `/verify` detect an empty `main_scene` up front and exit with an
+    explicit *degraded* verdict — run Phases 1–2, skip 3–4, and still write the Phase 5
+    ledger row with `reach: 0` and a `skipped: no main_scene` field — rather than leaving
+    the caller to decide whether an unlaunchable project counts as a pass.
+
+- Gap: **`find-nodes` locates a node but the auto-generated name is the only handle you
+  get, and it is not stable across launches.** `find-nodes --class ChompFlower` returned
+  `/root/Game/Entities/@Node2D@128`, which is what every follow-up `run-method` and
+  `get-state` then has to be typed against; relaunch and it is `@Node2D@131`. Workaround
+  was to re-run `find-nodes` before every read and paste the path back in by hand.
+  - [plant-tower-defense:G-005] status: open | seen: 1 | harness: 0.18.0 | source: plant-tower-defense 2026-08-15
+  - Improvement: give `find-nodes` a `--call METHOD` / `--property NAME` pass-through that
+    invokes the read on each match and reports it beside the path, so identifying a node
+    and reading it are one command. `--property` already exists for properties; the
+    missing half is a method call, which is the only way to read anything behind a getter.
+
+- Gap: **`scaffold_install.py config` treats an empty shipped default as a proposal, so a
+  refresh wipes `godot_bin`/`godot_version` before the step that re-detects them.** The
+  template ships `"godot_bin": ""`, the key is scaffold-owned, and step 7 runs *before*
+  step 11's binary detection — so every refresh transiently destroys a working recorded
+  path. Here step 11 put it back, but on a machine where the detection globs miss (binary
+  moved, `GODOT_BIN` unset) the refresh would leave the project with no binary at all,
+  having deleted the one an earlier run had found. Workaround: re-ran
+  `scaffold_install.py config --set godot_bin=… --set godot_version=…` by hand after
+  detection.
+  - [plant-tower-defense:G-006] status: fixed | fixed-in: 0.20.0 | seen: 1 | harness: 0.19.0 | source: plant-tower-defense 2026-08-15
+  - Improvement: in `cmd_config`, an empty/None shipped default is a placeholder, not a
+    proposal — never let it clear a non-empty existing value unless `--set` names the key:
+
+    ```python
+            for key, value in proposed.items():
+                if key not in merged:
+                    ...
+                    continue
+    +           # An empty shipped default is a placeholder, not a proposal. It must not
+    +           # clear a value a previous run detected and recorded (e.g. godot_bin).
+    +           if (key not in overrides and value in ("", None)
+    +                   and merged.get(key) not in ("", None)):
+    +               owned.add(key)
+    +               print("  = %s kept as %s (shipped default is empty - not a proposal)"
+    +                     % (key, json.dumps(merged[key])))
+    +               continue
+    ```
+
+- Gap: **the check that catches a dead-on-arrival feature is opt-in, so the default gate
+  reports green on code that can never execute.** `--find-orphans` found `set_selected` in
+  one run, but nothing suggests reaching for it: plain lint does not mention orphans exist,
+  and `/verify` does not pass the flag. A method added in the same diff as its only reader,
+  with no caller, is the signature of unfinished wiring — and it is invisible to every gate
+  that runs by default.
+  - [plant-tower-defense:G-007] status: fixed | fixed-in: 0.21.0 | seen: 1 | harness: 0.19.0 | source: plant-tower-defense 2026-08-15
+  - Improvement: run the orphan pass always and print the count as a denominator line
+    (`Orphans: 0 of 24 script(s)`), the way `Shaders:` and `UIDs:` already report. Keep it
+    non-gating — the heuristic has real false positives on callbacks — but a silent absence
+    and a clean result should not look identical. Narrower alternative: gate only on a
+    public method that is **new in the diff** and has no reference outside its own file,
+    which is the unfinished-wiring case without the callback noise.
+
+- Gap: **`cmd place_plant`'s devtools arg name doesn't match the intuitive `cell` used
+  everywhere else in this project's own docs/tests, and a wrong key is silently ignored
+  rather than reported.** `_cmd_place_plant` reads `args.get("x", 0)` / `args.get("y", 0)`;
+  passing `{"plant":"...", "cell":[1,1]}` doesn't error, it just defaults both to 0 and
+  reports success at `(0, 0)` — which reads exactly like "I placed it where I asked."
+  - [plant-tower-defense:G-008] status: fixed | fixed-in: 0.21.0 | seen: 1 | harness: 0.19.0 | source: plant-tower-defense 2026-08-15
+  - Improvement: this is a project verb (`devtools_ext/commands.gd`), not harness core, so
+    the actual fix belongs there: accept `cell: [x,y]` as an alias, or reject unknown keys
+    when `x`/`y` are absent instead of defaulting silently. Noting it here because the
+    *pattern* — a project verb accepting an args dict with no key validation — is generic
+    enough that the harness's own `list-commands`/`cmd` help text could recommend project
+    verbs assert `args.has(...)` rather than `.get(key, default)` for anything spatial.
+
+- Gap: **`quit` reported the launched process as "STILL ALIVE 10s after quit" three times
+  in one session** (pids 19132, 18560, and one earlier), every time requiring a manual
+  `Stop-Process -Force` before the next `launch` would proceed. `taskkill /F /PID <n>` run
+  through the Bash tool's MSYS path translation mangles `/F` into a phantom `F:/` path
+  argument and fails outright — PowerShell's `Stop-Process -Id <n> -Force` is what actually
+  worked.
+  - [plant-tower-defense:G-009] status: fixed | fixed-in: 0.21.0 | seen: 5 | harness: 0.19.0 | source: plant-tower-defense 2026-08-15
+  - Improvement: on Windows, `devtools.py quit`'s own follow-up guidance
+    (`taskkill /F /PID <pid>`) is wrong for an agent shelling out through a POSIX-translating
+    bash — either quote/escape the flag in the printed suggestion, or print the
+    PowerShell form (`Stop-Process -Id <pid> -Force`) as an alternative on Windows.
+
+- Gap: **`godot --headless --path . --import` must be re-run after adding any new
+  `class_name`-declared script, or every script that references it fails with
+  `Could not resolve external class member` / `stale class cache` — and the failure mode
+  cascades into completely unrelated files**, which reads like a broad regression rather
+  than "the cache needs a refresh." Hit twice this session: once after adding
+  `compost_meter.gd`/`husk_layer.gd`/`sunflower.gd`/`title_screen.gd`/`notebook_screen.gd`,
+  and once more after editing (not even adding) `notebook_screen.gd`/`title_screen.gd` for
+  the layout fix, which briefly looked like a *different* bug (`get_viewport_height()` not
+  found) before `lint_project.gd`'s own `class_cache_stale` hint pointed at the real cause.
+  - [plant-tower-defense:G-010] status: fixed | fixed-in: 0.21.0 | seen: 2 | harness: 0.19.0 | source: plant-tower-defense 2026-08-15
+  - Improvement: `lint_project.gd` already prints the `stale class cache` hint — the CLAUDE.md
+    workflow section could say explicitly "after creating a new `class_name` file, run
+    `--import` before the next lint/test pass" rather than leaving it to be rediscovered
+    from the hint each time.
+
+- Gap: **project verb arg names aren't discoverable from `list-commands` or `--help`** —
+  `place_plant`'s actual keys are `plant`/`x`/`y` (read from `devtools_ext/commands.gd`
+  source), but a first guess of `id`/`cell` (matching `Game.place_plant(id, cell)`'s own
+  signature) was silently accepted and planted the *default* plant at the *default* cell
+  instead of erroring on the unknown keys — `args.get("plant", "corn_cobbler")` treats a
+  wrong key name identically to an omitted one. Cost two wasted calls before reading the
+  handler source.
+  - [plant-tower-defense:G-011] status: fixed | fixed-in: 0.21.0 | seen: 1 | harness: 0.19.0 | source: plant-tower-defense 2026-08-15
+  - Improvement: `list-commands` already enumerates registered project verbs by name;
+    printing each verb's `args.get(...)` keys (grep-able straight out of the handler, no
+    schema needed) alongside the name would remove the guess-then-read-source step for
+    every project verb, not just this one.
+
+- Gap: none — `spawn_pest --args '{"mutation": "hungry"}'` worked first try (arg name
+  - [plant-tower-defense:auto-01d27c] status: open | seen: 1 | source: plant-tower-defense 2026-08-15
+  guessed correctly this time, unlike `place_plant`'s `plant`/`x`/`y` in G-011).
+
+- Gap: none this run.
+  - [plant-tower-defense:auto-3fd0c9] status: open | seen: 1 | source: plant-tower-defense 2026-08-15
+
+- Gap: **three separate live Godot processes were found still running simultaneously**
+  (`Get-Process | Where-Object ProcessName -like "*Godot*"` showed pids started at
+  6:02pm, 6:37pm and 6:39pm, all in this one session), after *every* `quit` in this
+  session reported "STILL ALIVE" (G-009) and every follow-up `Stop-Process -Id <pid>`
+  reported success. The pid `quit`'s warning names and the pid `Stop-Process` killed
+  successfully is the **bus-answering engine pid** — but on Windows, `launch`'s own
+  console-wrapper process (`..._console.exe`) spawns a separate child process that
+  actually owns the window and answers the bus, and `Stop-Process` on the wrapper's own
+  reported "Launched pid" does not reliably take the child down with it. Across 5+
+  quit/relaunch cycles this session, that left a trail of zombie engines all still
+  polling the same `user://` bus directory, which is exactly the "Crossed replies"
+  failure mode named in the harness's own gotchas — it presented as newly-spawned pest
+  nodes reporting "Node not found" seconds after a `scene-tree` call had just listed
+  them (a `spawn_pest`/`scene-tree`/`set-state` triplet hitting three different engine
+  instances). Fixed for the rest of this run with
+  `Get-Process | Where-Object { $_.ProcessName -like "*Godot*" } | Stop-Process -Force`
+  instead of killing one named pid.
+  - [plant-tower-defense:G-012] status: fixed | fixed-in: 0.21.0 | seen: 1 | harness: 0.19.0 | source: plant-tower-defense 2026-08-15
+  - Improvement: `quit --wait` already detects "STILL ALIVE" — it could also print
+    `Get-Process`-style guidance for Windows specifically (kill every process matching
+    the Godot binary's name, not just the one pid it tracked as bus owner), since the
+    pid it names is demonstrably not sufficient to guarantee a clean kill on this
+    platform. Named it G-012 rather than folding into G-009, since G-009 is about the
+    `taskkill`-vs-`Stop-Process` command form and this is about which pid to target at
+    all — the two compound (a session hitting G-009 five times in a row is exactly the
+    session at risk of also hitting this).
+
+- Gap: **`find-nodes --class X` does not match a script `class_name`, only engine
+  classes, and reports the miss as an empty result rather than as an unknown type.**
+  `python tools/devtools.py find-nodes --class Pest` returned `0 node(s) matched:` with
+  six live `Pest` nodes in the tree — they report `type: Node2D`, since that is their
+  engine class. Worse, combining it with a predicate produces a *misleading* diagnosis:
+  `find-nodes --class Pest --where mutation=hungry` printed
+  `no candidate exposes 'mutation'`, which reads as "the property is wrong" when the
+  truth is "the population was empty". Workaround was `--group pests`, which only works
+  because this project happens to add its pests to a group.
+  - [plant-tower-defense:G-013] status: fixed | fixed-in: 0.21.0 | seen: 1 | harness: 0.19.0 | source: plant-tower-defense 2026-08-15
+  - Improvement: resolve `--class` against the global class cache
+    (`ProjectSettings.get_global_class_list()` / the script's `get_global_name()`) before
+    falling back to `is_class()`, and when a `--class` value matches neither an engine
+    class nor a registered `class_name`, exit 1 naming it as an unknown type instead of
+    returning a clean zero-match. A predicate message must not be emitted for an empty
+    candidate set.
+
+- Gap: **`validate-ui`'s overflow check does not account for newlines or autowrap, so any
+  multiline `Label` is a permanent false positive.** The game-over banner is a two-line
+  Label; the check joined the lines and compared 1052px of text against an 896px box,
+  gating a run over UI that a screenshot shows is correct. There is no way to express
+  "this Label is multiline" short of baselining the node, which also suppresses real
+  overflow findings on it forever.
+  - [plant-tower-defense:G-014] status: fixed | fixed-in: 0.21.0 | seen: 1 | harness: 0.19.0 | source: plant-tower-defense 2026-08-15
+  - Improvement: measure per line. Split the Label's `text` on `\n` and compare the
+    widest line against the box; when `autowrap_mode != AUTOWRAP_OFF`, compare
+    `get_line_count() * get_line_height()` against the box *height* instead and skip the
+    width test entirely, since a wrapping Label is supposed to exceed its width.
+
+- Gap: **reach treats a base class as unreached whenever only subclasses are
+  instantiated, which is silent and systematic rather than project-specific.**
+  `verify_ledger.py reach` printed `NOT reached: game/selection_marker.gd` for a script
+  whose `_draw_brackets()` ran on every frame of the session, because the only live node
+  running it was a `PlacementPreview`. `reach_aliases` fixes it per-pair by hand, but
+  that is a config declaration — the tool's own docs say an alias is "the project's
+  claim, not this run's observation" — being used to paper over something the tool could
+  observe on its own.
+  - [plant-tower-defense:G-015] status: fixed | fixed-in: 0.21.0 | seen: 1 | harness: 0.19.0 | source: plant-tower-defense 2026-08-15
+  - Improvement: walk the `extends` chain. For every `script` path in the scene-tree
+    snapshot, parse its `extends` (a `class_name` or a `res://` path) and credit the
+    whole ancestry as reached, in a distinct `reached_base` bucket so it stays
+    distinguishable from a directly-observed hit. That is a static read of files the tool
+    is already opening, and it would have credited `selection_marker.gd` with no config
+    at all.
+
+- Gap: **`step-time` cannot isolate a short-lived state, because the wall clock keeps
+  running between bus round trips — and nothing says so.** Observing a 4.5s husk expire
+  while a 10s one survives means sampling inside a 5.5s window, but each
+  `step-time` + read pair costs unbounded real game-time on top of the seconds
+  requested. The reply is honest about what *it* advanced
+  (`process_seconds: 1.008`) and silent about the ~0.5s of ambient time that elapsed
+  around it, so the numbers look exact while the experiment is not.
+  The workaround that did work is worth writing down:
+  `set-state --node /root --property paused --value true`, then
+  `run-method --node <the node> --method _process --args "[5.0]"` — the bridge answers
+  while paused, so the system under test can be stepped by hand with zero ambient
+  drift.
+  - [plant-tower-defense:G-016] status: open | seen: 1 | harness: 0.19.0 | source: plant-tower-defense 2026-08-15
+  - Improvement: give `step-time` a `--paused` flag that pauses the tree, advances by
+    calling the loop by hand, and restores the previous pause state — and have the reply
+    include `wall_seconds_elapsed` alongside `process_seconds` either way, so the gap
+    between "what I advanced" and "what actually passed" is visible instead of inferred.
+
+- Gap: **a clipped Label silently hides its own overflow, and only `validate-ui` can
+  tell you — but its finding for that case is indistinguishable from the false positive
+  in [G-014].** Both arrive as `ui_text_overflow`. One meant "your readout is being
+  ellipsised away, fix it" and the other meant "this Label is multiline, ignore me", and
+  they were in the same run's output four lines apart. Triage was by eye.
+  - [plant-tower-defense:G-017] status: fixed | fixed-in: 0.21.0 | seen: 1 | harness: 0.19.0 | source: plant-tower-defense 2026-08-15
+  - Improvement: split the rule. When `clip_text` is true or
+    `text_overrun_behavior != OVERRUN_NO_TRIMMING`, the text is not overflowing its box,
+    it is being *trimmed* — report it as `ui_text_trimmed` with the trimmed rendering
+    quoted, since the consequence (the player cannot read it) and the fix (make room or
+    shorten the string) are both different from an untrimmed overflow. Combined with the
+    multiline fix already proposed in [G-014], `ui_text_overflow` would then mean exactly
+    one thing.
+
+## 2026-08-15 - Upstreamed 1 open gap(s) from harness-test-1 (harness 0.20.0)
+
+Pooled by `tools/upstream_gaps.py` from `C:\Users\gotmi\Documents\GitHub\harness-test-1\log-devtools.md`. Gap text is the project's,
+verbatim; only the id line is rewritten (qualified with the project name so
+ids from two projects cannot collide, plus a `source:` back-pointer).
+
+- Gap: **`ui_reachable` has no baseline mechanism, unlike `ui_layout`** — a shop list taller than the viewport (a `ScrollContainer`, by design) permanently reports its lower rows as `is interactive but cannot be hit: off screen`, and `findings --baseline-write` accepts `ui_layout` findings but leaves these 5 gating on every run (`By check: ... ui_reachable=5`, exit 1) with no way to mark them as "reachable via scroll, accepted".
+  - [harness-test-1:G-001] status: fixed | fixed-in: 0.21.0 | seen: 1 | harness: 0.20.0 | source: harness-test-1 2026-08-15
+  - Improvement: either teach `ui_reachable` to recognize a `ScrollContainer` ancestor and treat a scrollable-but-off-screen control as reachable-via-scroll rather than unreachable, or extend the same NEW/PRE baseline mechanism `validate-ui` already has to the `ui_reachable` check.
+  - Filed upstream: https://github.com/SeveralHerr/godot-selftest-harness/issues/16
+
+## 2026-08-15 — Keeping the tool useful: gh#11–#16 and two project logs, ranked and shipped (0.21.0)
+
+Asked to read the newest GitHub issues (#11–#16, all filed today from `/verify` runs on
+`plant-tower-defense` and a fresh `harness-test-1`) and the project logs, pick the ten
+things most worth doing to keep the harness *useful* — not treat them as a feature
+queue — and ship. Ranking principle, carried over from the 0.20.0 reflection: **trust
+defects first** (a verb answering a well-formed reply to a different question), then
+whatever the logs show sessions paying for repeatedly (`plant:G-009` seen 5 times in one
+day), then docs. Every `Value:` verdict across six project logs was tallied first: 13 of
+90 are `overkill`, all on renames or pure-logic diffs, and the rest `warranted` — the
+harness is earning its keep where it is used, so nothing here removes capability; the
+work is in making what exists answer honestly.
+
+Shipped, each with the defect planted as a gate:
+
+1. **`find-nodes --class` matches a script `class_name`, subclasses included** (gh#15.2,
+   `plant:G-013`). `is_class()` knows only engine classes; six live `Pest` nodes reported
+   `type: Node2D` and matched nothing, and the empty result then diagnosed the `--where`
+   predicate — sending the reader after a property name that was right. Now the script
+   chain is walked by `get_global_name()`, an unknown class **fails** naming the project's
+   classes, and an empty selector says the predicate was never evaluated. `clear_nodes`
+   shares the matcher and the refusal. Stage 5 plants Critter/Elite; the mutation (chain
+   walk off) printed `matched [], expected the base AND the subclass`.
+2. **`validate-ui` measures a Label per line** (gh#15.1, `plant:G-014`) — a two-line
+   banner rendering perfectly measured 1052px against 896px because `get_string_size()`
+   lays `\n` out on one line. And, from `plant:G-017` pooled this turn: a `clip_text` /
+   overrun Label is **trimmed**, not overflowing — a different defect with a different
+   fix — so it is `ui_text_trimmed` now. Stage 5 plants both a TwoLines Label (must not
+   fire) and a clipped one (must fire, as trimmed); the mutation (joined measure) fired.
+3. **`ui_reachable` knows a `ScrollContainer`** (gh#16, `harness-test-1:G-001`). A row past
+   the fold that lies within the scrolled content is `scroll_reachable` — counted and
+   printed by `findings`, never a finding — and a row clipped by its container no longer
+   reads as hittable. Chose (a) over the issue's suggested (b) baseline: a baseline would
+   have accepted the rows and *also* hidden a genuine later unreachability behind them.
+   Stage 5 plants a six-row shop across the bottom edge and asserts rows 1–2 hittable,
+   3–6 scroll-reachable, count 4, zero gated, and the genuinely-off-screen `ScaledOutside`
+   still flagged; the mutation (no ancestor walk) printed `on_screen Shop rows were
+   ['Row1', 'Row2', 'Row3']`.
+4. **The orphan scan runs by default and prints a denominator** (gh#11, `plant:G-007`):
+   `Orphans: N of M public function(s) across S script(s) have no live reference`.
+   Advisory, never gates, `--no-orphans` to skip. **The real-project run changed the
+   design**: on `plant-tower-defense` it printed 31 lines and 13 were the harness talking
+   about itself (`run_tests.gd`'s `assert_*` "referenced only from tests" — their job). An
+   always-on scan that leads with the tool is one readers learn to skip, so `addons/`,
+   `tools/` and `devtools_ext/` are excluded as *declarers* (still callers). Stage 4
+   plants `game/harness_check_orphan.gd`; a first control keyed on the fixture's `ramp()`
+   failed organically — `ramp` appears in `dev_tools.gd`'s curve docs and the scan is an
+   identifier heuristic, which is exactly why it is advisory.
+5. **`quit`/`launch` see every process this project launched, not just the owner**
+   (gh#12, gh#14.1, `plant:G-009` ×5, `plant:G-012`). Mechanism, confirmed on this
+   machine while writing this: a `_console.exe` launch is two OS processes (wrapper +
+   engine child; `Get-CimInstance` showed pid 3616 console + 22156 engine for the plant
+   worktree, identical start), and `launch.json`/the owner file each name one pid, so a
+   game abandoned two launches ago fell out of both. Now `.devtools/launched.jsonl`
+   records launcher and engine pids; `quit` sweeps it after the owner exits and
+   `launch` warns before starting; **liveness is start-time verified**
+   (`GetProcessTimes` / `/proc/<pid>/stat`) so a recycled pid is never named or killed;
+   `quit --kill` / `launch --kill-survivors` terminate exactly those — never by image
+   name ([H-056]). The Windows hint prints **both** `Stop-Process -Force -Id` and
+   `taskkill /F /PID`, naming the MSYS symptom (`Invalid argument/option - 'F:/'`).
+   Seven engine-free unit tests in `tools/test_devtools_client.py` plant a live child, a
+   dead one, a recycled-pid record and an exclude+kill. What this does *not* do: explain
+   why `get_tree().quit()` failed to exit those engines in the first place — that needs a
+   repro on the project, and the report itself is ambiguous about the pids it killed.
+6. **`list-commands` prints each verb's arg keys** (gh#14.2, `plant:G-011`, `G-008`):
+   `place_plant  args: plant, x, y`, online and `--offline`, scanned from the handler
+   body's `args.get/has/[]`. First cut attributed `reset_baseline` to `run_method` — the
+   doc block *above* the next handler sits inside the previous body span; comment lines
+   are dropped now, and the unit test carries that trap. Online `--json` shape changed
+   (list → `{actions, args}`), documented.
+7. **Reach credits base classes** (gh#15.3, `plant:G-015`): a node reports only the
+   script attached to it, so a base whose only live instances were subclasses scored
+   NOT reached while its `_draw()` ran every frame — in every project. `reached_base` /
+   `reached_base_via`, credited by a static walk of each observed script's `extends`
+   (path or `class_name`, via the class cache or a `class_name` scan). Stage 1.5 plants
+   Marker ← Bracket (by name) ← Fancy (by path), observes only Fancy, and asserts both
+   ancestors credited and a decoy base left unreached.
+8. **Docs that would have saved a session**: `CLAUDE.harness.md` now says to `--import`
+   after adding a `class_name` file *before* the next lint (gh#13, `plant:G-010` ×2 —
+   lint's own hint names it only after the cascade), and to read the `Orphans:` line for
+   a method the diff added.
+9. **`full` mints `.uid`s for `devtools_ext/` and the test seed** (`plant:G-002`) — they
+   land outside `uid_check_ignore`, so a fresh install failed its own step-12 smoke check
+   with three warnings; unit test asserts the three sidecars, idempotency test still
+   byte-stable. The slash-command fallback steps mint them too.
+10. **`PURPOSE.md` gains a commitment — "Coverage is reported, not implied"** — the
+    principle behind items 1, 3, 4 and 7 stated once: every pass names what it looked
+    at, an advisory check runs by default and reports, and a verb that cannot answer the
+    question asked says which. And a paragraph under *How to tell it's working*: it is
+    also working when it declines (13 of 90 verdicts are `overkill`, all sessions that
+    could tell).
+
+- Value: **warranted** — three checks failed for reasons the reports did not predict.
+  - Expected: ten point fixes from six well-written issues.
+  - Got: the real-project lint run changed a design (harness self-noise, item 4); the
+    orphan control's first anchor was itself a heuristic false negative; the arg-key
+    scanner's first cut bled a neighbour's doc comment; and one gate run *appeared* to
+    pass under mutation because the Bash tool's heredoc rewrites `\t`/`\n` escapes so the
+    mutation script silently asserted-out — the checks were passing against unmutated
+    code. Caught only because a later foreground run showed the traceback.
+  - Cheaper: the 40-second real-project lint (item 4) and the 90-second unit test
+    for the scanner. Neither needed the engine.
+
+- Gap (working practice): **a mutation run whose mutation did not apply reads exactly
+  like a passing control.** The recipe in the `harness-release` skill says "one-line
+  edit … then run"; nothing in it asserts the edit landed. Here the edit was written
+  through a shell heredoc that mangled escapes, the script raised, and the following
+  `check_templates.py` ran the pristine file and printed every new check green.
+  - [H-057] status: fixed | fixed-in: 0.21.0 | seen: 1 | harness: 0.21.0
+  - Improvement (shipped in the same release, `harness-release` SKILL.md): require `git diff --stat` (or a
+    `grep` for the mutated line) **between** the edit and the run, and quote it in the log
+    beside the FAIL line — a mutation is evidence only if it is shown to exist.
+
+- Gap: **Godot invocations on this machine exited `0xFFFFFFFF` in three of seven gate
+  runs today** — `--import` once (so the class cache never built and everything after
+  cascaded), the windowed `capture.gd` once, and the bridge game inside `step_time`
+  twice — while two other sessions' games were live. Each passed on re-run; nothing
+  captures the crashing invocation's stderr, so the cause is unknown.
+  - [H-058] status: open | seen: 3 | harness: 0.21.0
+  - Improvement: `check_templates.py` should keep stderr for the `--import` and capture
+    invocations and print the tail on a non-zero exit (it already does for the game), and
+    the `note: --import exited …` line should be a FAIL when the class cache is then
+    absent — the cascade that followed was reported as three unrelated stage failures.
+
+- Not done, deliberately: `plant:G-005` (`find-nodes --call METHOD`) — `run-method` on
+  the returned path is one more call and the auto-name churn it worries about is
+  real but was not re-hit; `plant:G-016` (`step-time --paused` and `wall_seconds`) and
+  `moving-in:G-039` (step-time rate discrepancy) — the verb already reports both clocks
+  and the discrepancy needs the project to reproduce; the (b) baseline for
+  `ui_reachable` from gh#16 — superseded by (a) for the reason in item 3. `plant:G-001`,
+  `G-003`, `G-004`, `G-006` were already fixed in 0.20.0 (gh#7 / gh#10) and are marked so
+  below.
+
+**Validation run this turn:** `python tools/check_templates.py` — OK, new lines: `stage
+1.5 reach: … base classes credited through an observed subclass by name and by path
+(decoy stays unreached)`, `stage 4 lint: orphans 1 of 1 public function(s) across 12
+script(s) (advisory, exit still 0; never_called_anywhere() named)`, `… --no-orphans
+prints no Orphans line`, `stage 5 bridge: find_nodes --class matches a script class_name
+(base finds the subclass too), refuses a typo naming the known classes, and an empty
+selector does not blame the --where predicate`, `stage 5 bridge: TwoLines Label not
+flagged while Overflowing is, as ui_text_trimmed (per-line measure; clip_text =
+trimmed); Shop rows 1-2 hittable, 3-6 scroll-reachable (4 counted, 0 gated),
+ScaledOutside still off-screen`. Confirmed to FAIL under mutation, each naming itself:
+`find_nodes --class HarnessCheckCritter matched []`, `validate_ui flagged the two-line
+Label 'TwoLines'`, `reachable_ui: on_screen Shop rows were ['Row1', 'Row2', 'Row3']`,
+and the orphan control `0 of 0` before the game-side fixture existed. Real project:
+`lint_project.gd` 0.21.0 on `plant-tower-defense` — exit 0, `Orphans: 31 of 110` before
+the harness-path exclusion (13 self-noise), 18 game findings after, 4 of them methods
+with no reference anywhere. `python -m unittest discover -s tools` — 31 tests OK (was
+24). `python tools/record_version.py --record` then `--check` — OK at `0.21.0`, 13
+shipped files, 48 bus verbs + 50 CLI commands documented.

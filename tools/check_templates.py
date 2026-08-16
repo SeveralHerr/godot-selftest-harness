@@ -229,9 +229,43 @@ def stage_reach():
                         "read identically (%r) - a reader cannot tell them apart"
                         % (line_unavailable,))
 
+        # gh#15.3: a base class whose only live instance is a subclass. Three
+        # planted scripts - Marker (class_name) <- Bracket (extends Marker by
+        # NAME) <- Fancy (extends Bracket by res:// PATH). Only Fancy is observed;
+        # both ancestors must land in reached_base, credited via Fancy, and a
+        # decoy that nothing extends must stay unreached, or the walk is crediting
+        # everything and the bucket proves nothing.
+        for rel, text in (
+                ("game/marker.gd", "class_name HarnessMarker\nextends Node2D\n"),
+                ("game/bracket.gd", "extends HarnessMarker\n"),
+                ("game/fancy.gd", 'extends "res://game/bracket.gd"\n'),
+                ("game/decoy_base.gd", "class_name HarnessDecoy\nextends Node2D\n")):
+            (tmp / rel).parent.mkdir(parents=True, exist_ok=True)
+            (tmp / rel).write_text(text, encoding="utf-8")
+        chain = VL.split_reach(
+            {"game/marker.gd", "game/bracket.gd", "game/fancy.gd", "game/decoy_base.gd"},
+            {"game/fancy.gd"}, set(), tmp, {})
+        if sorted(chain.get("reached_base") or []) != ["game/bracket.gd", "game/marker.gd"]:
+            return fail("stage 1.5 reach: reached_base was %r, expected marker+bracket "
+                        "credited through the observed subclass (gh#15.3)"
+                        % (chain.get("reached_base"),))
+        if (chain.get("reached_base_via") or {}).get("game/marker.gd") != "game/fancy.gd":
+            return fail("stage 1.5 reach: reached_base_via does not name the observed "
+                        "descendant: %r" % (chain.get("reached_base_via"),))
+        if chain.get("unreached") != ["game/decoy_base.gd"]:
+            return fail("stage 1.5 reach: unreached was %r - the decoy base nothing "
+                        "extends must stay unreached, or the extends walk credits "
+                        "everything" % (chain.get("unreached"),))
+        if "game/marker.gd" in (chain.get("reached") or []):
+            return fail("stage 1.5 reach: a base-class credit was folded into reached")
+        if "as base class" not in VL._reach_line(VL._sub_reach(chain)):
+            return fail("stage 1.5 reach: the reach line does not name the base-class "
+                        "credit: %r" % (VL._reach_line(VL._sub_reach(chain)),))
+
         print("stage 1.5 reach: buckets correct (%d headless, %d test, %d deleted, "
               "%d unreached), toolsy/ not excused, opt-out works, legacy rows parse, "
-              "no-VCS distinct from a real zero"
+              "no-VCS distinct from a real zero, base classes credited through an "
+              "observed subclass by name and by path (decoy stays unreached)"
               % (len(s["headless_tools"]), len(s["test_scripts"]),
                  len(s["deleted"]), len(s["unreached"])))
         return True
@@ -536,6 +570,54 @@ def stage_assemble(scratch, user_dir_name):
         '\tlamp.name = "PropLamp"',
         "\tlamp.omni_range = 5.0",
         "\tprop.add_child(lamp)",
+        "\t# gh#15.2: nodes whose CLASS is a script class_name, not an engine class.",
+        "\t# Both report type Node2D; only a matcher that walks the script chain",
+        "\t# finds them, and --class HarnessCheckCritter must find the Elite too.",
+        "\tvar critter := Node2D.new()",
+        '\tcritter.name = "Critter"',
+        '\tcritter.set_script(load("res://tools/harness_check_critter.gd"))',
+        "\tadd_child(critter)",
+        "\tvar elite := Node2D.new()",
+        '\telite.name = "Elite"',
+        '\telite.set_script(load("res://tools/harness_check_elite.gd"))',
+        "\tadd_child(elite)",
+        "\t# gh#15.1: a two-line Label that fits its box line by line. Its size",
+        "\t# is the widest LINE (that is what Label's minimum size measures), so a",
+        "\t# check that measures the joined string flags it - the planted false",
+        "\t# positive. 'Overflowing' beside it is the positive control: clip_text",
+        "\t# lets its size drop below the text, so a working check must fire there.",
+        "\tvar two := Label.new()",
+        '\ttwo.name = "TwoLines"',
+        '\ttwo.text = "The garden is eaten\\nSeeds grown: 0  (best 721)"',
+        "\ttwo.position = Vector2(700, 100)",
+        "\tadd_child(two)",
+        "\tvar over := Label.new()",
+        '\tover.name = "Overflowing"',
+        '\tover.text = "this single line is far wider than forty pixels"',
+        "\tover.clip_text = true",
+        "\tover.position = Vector2(700, 160)",
+        "\tover.size = Vector2(40, 20)",
+        "\tadd_child(over)",
+        "\t# gh#16: a shop list inside a ScrollContainer at the bottom of the screen.",
+        "\t# Container y 560..640 on a 648-high viewport; six 40px rows run to 800.",
+        "\t# Rows 1-2 are hittable now; row 3 is inside the viewport but clipped by",
+        "\t# the container; rows 4-6 are past the viewport. All of 3-6 are reachable",
+        "\t# by scrolling and must NOT be findings; the count must be exactly 4.",
+        "\tvar shop := ScrollContainer.new()",
+        '\tshop.name = "Shop"',
+        "\tshop.position = Vector2(700, 560)",
+        "\tshop.size = Vector2(200, 80)",
+        "\tadd_child(shop)",
+        "\tvar rows := VBoxContainer.new()",
+        '\trows.name = "Rows"',
+        '\trows.add_theme_constant_override("separation", 0)',
+        "\tshop.add_child(rows)",
+        "\tfor i: int in 6:",
+        "\t\tvar row := Button.new()",
+        '\t\trow.name = "Row%d" % (i + 1)',
+        '\t\trow.text = "Buy %d" % (i + 1)',
+        "\t\trow.custom_minimum_size = Vector2(160, 40)",
+        "\t\trows.add_child(row)",
         "",
         "",
         "## Lets check_paused_bridge() pause the tree over the bus, so the",
@@ -563,6 +645,17 @@ def stage_assemble(scratch, user_dir_name):
         "\tpass",
         "",
     ]), encoding="utf-8")
+
+    # gh#15.2 fixtures: a class_name base and a subclass, under tools/ for the
+    # uid exemption. Written before --import so the class cache knows them.
+    (scratch / "tools" / "harness_check_critter.gd").write_text(
+        "class_name HarnessCheckCritter\nextends Node2D\n\n"
+        "## gh#15.2 fixture: a script class, matched by name and as a base.\n"
+        "var hunger: int = 3\n", encoding="utf-8")
+    (scratch / "tools" / "harness_check_elite.gd").write_text(
+        "class_name HarnessCheckElite\nextends HarnessCheckCritter\n\n"
+        "## gh#15.2 fixture: a subclass; --class HarnessCheckCritter must find it.\n"
+        "var crown: bool = true\n", encoding="utf-8")
 
     (scratch / "main.tscn").write_text(
         "\n".join([
@@ -621,6 +714,15 @@ def stage_assemble(scratch, user_dir_name):
     rc = scaffold_install.install_full(REPO_ROOT, scratch, {}, hook=False)
     if rc != 0:
         return fail("scaffold_install.py full returned %d on the scratch project" % rc)
+    # gh#11 positive control for the orphan scan: a GAME script (tools/ and
+    # addons/ are excluded as declarers, by design) with a public method nothing
+    # calls. Minted a .uid so it does not also trip the missing-sidecar warning.
+    orphan = scratch / "game" / "harness_check_orphan.gd"
+    orphan.parent.mkdir(parents=True, exist_ok=True)
+    orphan.write_text(
+        "extends Node\n\n## gh#11 fixture: a public method with no caller anywhere.\n\n"
+        "func never_called_anywhere() -> int:\n\treturn 1\n", encoding="utf-8")
+    scaffold_install.ensure_uid_sidecars(REPO_ROOT, scratch, [orphan])
     project_text = (scratch / "project.godot").read_text(encoding="utf-8")
     if project_text.count(scaffold_install.AUTOLOAD_LINE) != 1:
         return fail("full did not wire the DevTools autoload exactly once:\n" + project_text)
@@ -820,6 +922,7 @@ def stage_runners(godot, scratch):
                 ok = check_test_denominators(proc.stdout, scratch) and ok
             if name == "lint":
                 ok = check_shader_denominator(proc.stdout) and ok
+                ok = check_orphan_denominator(proc.stdout) and ok
     if ok:
         ok = stage_vacuous_control(godot, scratch) and ok
         ok = stage_runner_controls(godot, scratch) and ok
@@ -852,6 +955,39 @@ def check_shader_denominator(out):
                     "an include file it silently passed would be a false green")
     print("stage 4 lint: shaders %d of %d compiled (%d file, %d embedded), include skipped"
           % (passed, total, files, embedded))
+    return True
+
+
+def check_orphan_denominator(out):
+    """The orphan scan runs by default and names what it looked at (gh#11).
+
+    stage_assemble plants game/harness_check_orphan.gd whose public
+    `never_called_anywhere()` has no caller - the positive control: a run that
+    prints `Orphans: 0 of N` here is a scan that did not look. Harness-owned and
+    tools/ scripts are excluded as DECLARERS by design (13 of 31 lines on a real
+    project were the harness's own assert_* helpers, "referenced only from
+    tests", which is their job), so the fixture under tools/ cannot serve - and
+    a run that names one of its methods here would mean the exclusion is gone.
+    Advisory, so exit stays 0.
+    """
+    m = re.search(r"Orphans: (\d+) of (\d+) public function\(s\) across (\d+) script\(s\)", out)
+    if not m:
+        return fail("lint printed no `Orphans: N of M public function(s) across S script(s)` "
+                    "line - the orphan scan is not running by default, or prints no "
+                    "denominator (gh#11)\n%s" % out)
+    found, checked, scripts = (int(g) for g in m.groups())
+    if found < 1 or checked < 1 or scripts < 1:
+        return fail("orphan scan reports %d of %d across %d - the fixture's bus-only "
+                    "game/harness_check_orphan.gd should read as an orphan; a zero here is a "
+                    "scan that looked at nothing" % (found, checked, scripts))
+    if "returns_nothing()" in out:
+        return fail("orphan scan named a res://tools/ script's method - the harness/tools "
+                    "exclusion is not in effect, and a real project's report leads with "
+                    "the harness's own helpers")
+    if "never_called_anywhere()" not in out:
+        return fail("orphan scan did not name never_called_anywhere() in a WARN line\n%s" % out)
+    print("stage 4 lint: orphans %d of %d public function(s) across %d script(s) "
+          "(advisory, exit still 0; never_called_anywhere() named)" % (found, checked, scripts))
     return True
 
 
@@ -888,8 +1024,14 @@ def stage_shader_control(godot, scratch):
                         "the flag does not skip the pass\n%s" % (off.returncode, off.stdout))
         if "Shaders:" in off.stdout:
             return fail("--no-shaders still printed a `Shaders:` line")
+        # gh#11: --no-orphans must actually turn the scan off (same argument as
+        # --no-shaders: a flag that changes nothing is decoration).
+        no_orph = run_godot(godot, scratch, ["--script", "res://tools/lint_project.gd",
+                                             "--", "--no-orphans"])
+        if "Orphans:" in no_orph.stdout or "never_called_anywhere()" in no_orph.stdout:
+            return fail("--no-orphans still ran the orphan scan\n%s" % no_orph.stdout)
         print("stage 4 lint: shader control fired (exit 1 naming the planted file; "
-              "--no-shaders exits 0 and prints nothing)")
+              "--no-shaders exits 0 and prints nothing; --no-orphans prints no Orphans line)")
         return True
     finally:
         planted.unlink(missing_ok=True)
@@ -1652,6 +1794,123 @@ def check_find_nodes_denominator(client, scratch):
     return True
 
 
+def check_find_nodes_script_class(client, scratch):
+    """`--class` must match a script `class_name`, subclasses included, refuse an
+    unknown class, and never diagnose a --where predicate it did not run (gh#15.2).
+
+    stage_assemble plants Critter (class_name HarnessCheckCritter) and Elite
+    (extends it); both report type Node2D. The four assertions each fail against
+    the previous matcher: the base name matched 0 (not 2), the subclass name
+    matched 0 (not 1), a typo matched 0 with success (not a refusal), and an
+    empty selector plus a --where said "no candidate exposes" about a predicate
+    that never ran.
+    """
+    base = client.send_command(scratch, "find_nodes", {"class": "HarnessCheckCritter"}, timeout=15.0)
+    names = sorted(n.get("name") for n in ((base.get("data") or {}).get("nodes") or []))
+    if names != ["Critter", "Elite"]:
+        return fail("find_nodes --class HarnessCheckCritter matched %r, expected the base "
+                    "AND the subclass (Critter, Elite). is_class() knows only engine "
+                    "classes; the script chain must be walked (gh#15.2). message: %r"
+                    % (names, base.get("message")))
+    sub = client.send_command(scratch, "find_nodes", {"class": "HarnessCheckElite"}, timeout=15.0)
+    sub_names = [n.get("name") for n in ((sub.get("data") or {}).get("nodes") or [])]
+    if sub_names != ["Elite"]:
+        return fail("find_nodes --class HarnessCheckElite matched %r, expected [Elite]" % sub_names)
+    typo = client.send_command(scratch, "find_nodes", {"class": "HarnessCheckCriter"}, timeout=15.0)
+    if typo.get("success") or "Unknown class" not in str(typo.get("message", "")):
+        return fail("find_nodes --class <typo> did not refuse: %r. A class that names "
+                    "nothing must fail, not return a clean zero-match" % (typo,))
+    if "HarnessCheckCritter" not in str(typo.get("message", "")):
+        return fail("the unknown-class refusal does not list the project's script classes: %r"
+                    % typo.get("message"))
+    empty_sel = client.send_command(
+        scratch, "find_nodes",
+        {"group": "harness_no_such_group", "where": {"mouse_filter": 0}}, timeout=15.0)
+    msg = str(empty_sel.get("message", ""))
+    if "no candidate exposes" in msg or "not evaluated" not in msg:
+        return fail("find_nodes with a selector matching nothing plus a --where said %r. "
+                    "It must say the predicate was not evaluated, and must NOT diagnose "
+                    "the property name - that sent a reader chasing a correct name" % msg)
+    clr = client.send_command(scratch, "clear_nodes", {"class": "HarnessCheckCriter"}, timeout=15.0)
+    if clr.get("success"):
+        return fail("clear_nodes --class <typo> reported success: %r" % clr)
+    print("stage 5 bridge: find_nodes --class matches a script class_name (base finds "
+          "the subclass too), refuses a typo naming the known classes, and an empty "
+          "selector does not blame the --where predicate")
+    return True
+
+
+def check_label_lines_and_scroll(client, scratch):
+    """validate_ui measures a Label per line (gh#15.1) and reachable_ui knows a
+    ScrollContainer (gh#16) - each with the false positive planted AND a positive
+    control, so a check that stopped measuring cannot pass either half.
+    """
+    ui = client.send_command(scratch, "validate_ui", {"use_baseline": False}, timeout=20.0)
+    issues = (ui.get("data") or {}).get("issues") or []
+    overflow = {str(i.get("path", "")).rsplit("/", 1)[-1]: i for i in issues
+                if i.get("code") in ("ui_text_overflow", "ui_text_trimmed")}
+    if "TwoLines" in overflow:
+        return fail("validate_ui flagged the two-line Label 'TwoLines' as overflowing: %r. "
+                    "It fits line by line; the check is measuring the joined string "
+                    "(gh#15.1)" % overflow["TwoLines"].get("message"))
+    if "Overflowing" not in overflow:
+        return fail("validate_ui did NOT flag the planted 'Overflowing' Label (clip_text, "
+                    "40px box, long text) - the overflow check is not running, so the "
+                    "TwoLines assertion above proves nothing. codes seen: %r"
+                    % sorted({i.get("code") for i in issues}))
+    # plant:G-017: 'Overflowing' has clip_text, so it is TRIMMED, not overflowing,
+    # and the two must not share a code.
+    if overflow["Overflowing"].get("code") != "ui_text_trimmed":
+        return fail("the clip_text Label 'Overflowing' was reported as %r, expected "
+                    "ui_text_trimmed - a trimmed readout and a spilling one are different "
+                    "defects with different fixes (plant:G-017)" % overflow["Overflowing"].get("code"))
+
+    reach = client.send_command(scratch, "reachable_ui", {}, timeout=15.0)
+    rdata = reach.get("data") or {}
+    rows = {c["path"].rsplit("/", 1)[-1]: c for c in rdata.get("controls", [])
+            if "/Shop/" in str(c.get("path", ""))}
+    if len(rows) != 6:
+        return fail("reachable_ui saw %d Shop rows, expected 6: %r" % (len(rows), sorted(rows)))
+    hittable = sorted(n for n, c in rows.items() if c.get("on_screen"))
+    scrollable = sorted(n for n, c in rows.items() if c.get("scroll_reachable"))
+    if hittable != ["Row1", "Row2"]:
+        return fail("reachable_ui: on_screen Shop rows were %r, expected Row1+Row2 only. "
+                    "Row3 sits inside the viewport but is clipped by its ScrollContainer, "
+                    "and must not read as hittable (gh#16)" % hittable)
+    if scrollable != ["Row3", "Row4", "Row5", "Row6"]:
+        return fail("reachable_ui: scroll_reachable rows were %r, expected Row3-Row6" % scrollable)
+    if int(rdata.get("scroll_reachable", -1)) != 4:
+        return fail("reachable_ui data.scroll_reachable=%r, expected 4" % rdata.get("scroll_reachable"))
+    if not all(str(c.get("scroll_container", "")).endswith("/Shop") for c in rows.values()):
+        return fail("reachable_ui: a Shop row does not name its ScrollContainer: %r"
+                    % [c.get("scroll_container") for c in rows.values()])
+    # The genuine off-screen control (ScaledOutside, no ScrollContainer) must
+    # still read OFF-SCREEN and not scroll-reachable, or the fix excused everything.
+    outside = next((c for c in rdata.get("controls", []) if str(c.get("path", "")).endswith("ScaledOutside")), None)
+    if outside is None or outside.get("on_screen") or outside.get("scroll_reachable"):
+        return fail("reachable_ui: the planted genuinely-off-screen ScaledOutside reads %r; "
+                    "it must stay off_screen and NOT scroll_reachable" % (outside,))
+
+    findings = client.send_command(scratch, "findings", {"scenes": False, "use_baseline": False}, timeout=60.0)
+    fdata = findings.get("data") or {}
+    shop_hits = [f for f in fdata.get("findings", [])
+                 if f.get("source") == "ui_reachable" and "/Shop/" in str(f.get("path", ""))]
+    if shop_hits:
+        return fail("findings still gates on %d ScrollContainer row(s): %r (gh#16)"
+                    % (len(shop_hits), [f.get("path") for f in shop_hits]))
+    if int(fdata.get("scroll_reachable", -1)) != 4:
+        return fail("findings data.scroll_reachable=%r, expected 4 - the count must be "
+                    "reported, not silently dropped" % fdata.get("scroll_reachable"))
+    if not any(f.get("source") == "ui_reachable" and "ScaledOutside" in str(f.get("path", ""))
+               for f in fdata.get("findings", [])):
+        return fail("findings no longer reports the genuinely off-screen ScaledOutside as "
+                    "unreachable - the ScrollContainer fix is excusing too much")
+    print("stage 5 bridge: TwoLines Label not flagged while Overflowing is, as "
+          "ui_text_trimmed (per-line measure; clip_text = trimmed); Shop rows 1-2 "
+          "hittable, 3-6 scroll-reachable (4 counted, 0 gated), ScaledOutside still off-screen")
+    return True
+
+
 def check_aabb_excludes_lights(client, scratch):
     """`aabb` must measure geometry, not light range (moving-in:G-002/G-006).
 
@@ -2003,6 +2262,8 @@ def stage_bridge(godot, scratch, full):
         ok = check_canvas_layer_space(client, scratch) and ok
         ok = check_aabb_excludes_lights(client, scratch) and ok
         ok = check_find_nodes_denominator(client, scratch) and ok
+        ok = check_find_nodes_script_class(client, scratch) and ok
+        ok = check_label_lines_and_scroll(client, scratch) and ok
         ok = check_set_state_dotted(client, scratch) and ok
         # Before check_ui_baseline for the same reason: it writes a baseline that
         # moves the planted UI findings to pre-existing, and this check needs them

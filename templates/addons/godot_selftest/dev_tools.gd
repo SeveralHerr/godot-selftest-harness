@@ -14,14 +14,14 @@ extends Node
 ## extension loads AFTER the generic handlers, a project may override a generic
 ## verb by registering the same action string (last-writer-wins).
 
-# harness-version: 0.20.0
+# harness-version: 0.21.0
 # --- Constants ---
 
 ## Version of the godot-selftest-harness these files were copied from. Reported by the
 ## `harness_version` verb and stamped into every copied tool script, so a gap logged
 ## against a project can name the version it was seen on, and a refresh can tell a
 ## stale file from a customized one. Bump with .claude-plugin/plugin.json.
-const HARNESS_VERSION: String = "0.20.0"
+const HARNESS_VERSION: String = "0.21.0"
 
 ## Default bus filenames. With a session id (see _resolve_session) the id is spliced in
 ## before the extension, so two instances can each own a bus in the same user:// dir.
@@ -1848,6 +1848,11 @@ func _cmd_clear_nodes(args: Dictionary) -> Dictionary:
 			"success": false,
 			"message": "No selector provided. Supply exactly one of: group, method, or class (refusing to free the whole tree).",
 		}
+	if not cls.is_empty() and not _class_is_known(cls):
+		return {
+			"success": false,
+			"message": "Unknown class '%s': not an engine class and no script declares class_name %s - cleared nothing" % [cls, cls],
+		}
 
 	var matches: Array[Node] = []
 	_collect_matching_nodes(scene, group, method, cls, matches)
@@ -1909,8 +1914,38 @@ func _node_matches(node: Node, group: String, method: String, cls: String) -> bo
 		return true
 	if not method.is_empty() and node.has_method(method):
 		return true
-	if not cls.is_empty() and (node.is_class(cls) or node.get_class() == cls):
+	if not cls.is_empty() and _node_is_class(node, cls):
 		return true
+	return false
+
+
+## `is_class()` and `get_class()` know only engine classes, so `--class Pest`
+## against six live nodes whose script declares `class_name Pest` matched
+## nothing -- they report `type: Node2D` -- and the empty result then blamed the
+## `--where` predicate (gh#15.2). A script class is matched by walking the
+## node's script and its base-script chain comparing `get_global_name()`, so
+## `--class Plant` also finds every subclass, which is the natural reading.
+func _node_is_class(node: Node, cls: String) -> bool:
+	if node.is_class(cls) or node.get_class() == cls:
+		return true
+	var script: Variant = node.get_script()
+	while script is Script:
+		var sc: Script = script as Script
+		if String(sc.get_global_name()) == cls:
+			return true
+		script = sc.get_base_script()
+	return false
+
+
+## Whether `cls` names anything at all: an engine class or a script that
+## declares `class_name cls`. A `--class` value that names neither is a typo,
+## and must be reported as one rather than as a clean zero-match.
+func _class_is_known(cls: String) -> bool:
+	if ClassDB.class_exists(cls):
+		return true
+	for entry: Dictionary in ProjectSettings.get_global_class_list():
+		if String(entry.get("class", "")) == cls:
+			return true
 	return false
 
 
@@ -3112,19 +3147,46 @@ func _validate_ui_recursive(node: Node, vp: Vector2, issues: Array, interactive_
 				var font_size: int = control.get_theme_font_size("font_size")
 				if font_size <= 0:
 					font_size = control.get_theme_default_font_size()
-				var text_width: float = font.get_string_size(control.text, HORIZONTAL_ALIGNMENT_LEFT, -1, font_size).x
+				# Per line, not the whole string: get_string_size() lays a string
+				# holding "\n" out as ONE line, so a two-line banner that renders
+				# perfectly inside its box measured 1052px against 896px and gated a
+				# run (gh#15.1). A Label breaks on "\n" whether or not it autowraps,
+				# so the widest single line is what the box actually has to hold.
+				var lines: PackedStringArray = control.text.split("\n")
+				var text_width: float = 0.0
+				for line: String in lines:
+					text_width = maxf(text_width, font.get_string_size(line, HORIZONTAL_ALIGNMENT_LEFT, -1, font_size).x)
 				if text_width > control.size.x and control.size.x > 0.0:
-					var display_text: String = control.text
+					var display_text: String = control.text.replace("\n", "\\n")
 					if display_text.length() > 50:
 						display_text = display_text.substr(0, 47) + "..."
-					issues.append({
-						"path": str(control.get_path()),
-						"severity": "warning",
-						"code": "ui_text_overflow",
-						"message": "%s '%s' text '%s' exceeds width (text: %.0fpx, label: %.0fpx)" % [
-							control.get_class(), control.name, display_text, text_width, control.size.x,
-						],
-					})
+					var line_note: String = " (widest of %d lines)" % lines.size() if lines.size() > 1 else ""
+					# Two different facts used to share one code (plant:G-017): a Label
+					# with clip_text or an overrun behaviour is not spilling past its
+					# box, it is TRIMMING the string - the player reads a cut readout,
+					# and the fix is room or a shorter string. Reported apart so a
+					# reader does not triage the two by eye.
+					var trimmed: bool = control.clip_text \
+						or control.text_overrun_behavior != TextServer.OVERRUN_NO_TRIMMING
+					if trimmed:
+						issues.append({
+							"path": str(control.get_path()),
+							"severity": "warning",
+							"code": "ui_text_trimmed",
+							"message": "%s '%s' text '%s' is trimmed by its box (text: %.0fpx%s, label: %.0fpx; %s) - the player sees a cut string" % [
+								control.get_class(), control.name, display_text, text_width, line_note, control.size.x,
+								"clip_text" if control.clip_text else "text_overrun_behavior",
+							],
+						})
+					else:
+						issues.append({
+							"path": str(control.get_path()),
+							"severity": "warning",
+							"code": "ui_text_overflow",
+							"message": "%s '%s' text '%s' exceeds width (text: %.0fpx%s, label: %.0fpx)" % [
+								control.get_class(), control.name, display_text, text_width, line_note, control.size.x,
+							],
+						})
 
 		# Check 5: Negative position
 		if not world_space and (rect.position.x < 0.0 or rect.position.y < 0.0):
@@ -4065,7 +4127,9 @@ func _cmd_scripts_seen(_args: Dictionary) -> Dictionary:
 ## 404'd (gather:G-109). clear_nodes already does exactly this matching internally
 ## in order to FREE nodes; exposing the same predicate as a read costs little.
 ##
-## args: { "class": String, "group": String, "method": String,
+## args: { "class": String (an engine class OR a script `class_name`, subclasses
+##                  included; a name that is neither fails rather than matching nothing),
+##         "group": String, "method": String,
 ##         "where": Dictionary (property -> expected value, dotted paths allowed),
 ##         "properties": Array[String] (extra properties to report per hit),
 ##         "root": String (subtree to search, default the whole tree),
@@ -4086,6 +4150,20 @@ func _cmd_find_nodes(args: Dictionary) -> Dictionary:
 	var where: Dictionary = args.get("where", {}) if args.get("where") is Dictionary else {}
 	var report: Array = args.get("properties", []) if args.get("properties") is Array else []
 	var limit: int = int(args.get("limit", 200))
+
+	# A class that names nothing is a typo, not an absence (gh#15.2). Refusing
+	# it here is what stops the empty result below from diagnosing the --where
+	# predicate when the candidate set was empty before the predicate ran.
+	if not cls.is_empty() and not _class_is_known(cls):
+		var known: PackedStringArray = PackedStringArray()
+		for entry: Dictionary in ProjectSettings.get_global_class_list():
+			known.append(String(entry.get("class", "")))
+		known.sort()
+		return {
+			"success": false,
+			"message": "Unknown class '%s': not an engine class and no script declares class_name %s (script classes in this project: %s)" % [
+				cls, cls, ", ".join(known) if not known.is_empty() else "none"],
+		}
 
 	var candidates: Array[Node] = []
 	if cls.is_empty() and group.is_empty() and method.is_empty():
@@ -4123,7 +4201,21 @@ func _cmd_find_nodes(args: Dictionary) -> Dictionary:
 	# the fault it had (moving-in:G-011). Same failure the test runner's
 	# `Selected: N of M` line exists to prevent.
 	var message: String = "%d node(s) matched" % hits.size()
-	if hits.is_empty() and not where.is_empty():
+	if hits.is_empty() and candidates.is_empty() and not (cls.is_empty() and group.is_empty() and method.is_empty()):
+		# The selector itself matched nothing, so the --where predicate never
+		# ran; a "no candidate exposes 'x'" line here would send the reader
+		# chasing a property name that was right all along (gh#15.2).
+		var selector: PackedStringArray = PackedStringArray()
+		if not cls.is_empty():
+			selector.append("class %s" % cls)
+		if not group.is_empty():
+			selector.append("group %s" % group)
+		if not method.is_empty():
+			selector.append("method %s" % method)
+		message += " -- no node in the tree matched %s%s" % [
+			" / ".join(selector),
+			"; the --where predicate was not evaluated" if not where.is_empty() else ""]
+	elif hits.is_empty() and not where.is_empty():
 		var parts: PackedStringArray = PackedStringArray()
 		for key: Variant in where:
 			var exposed: int = int(where_seen.get(str(key), 0))
@@ -4540,8 +4632,9 @@ func _cmd_curve(args: Dictionary) -> Dictionary:
 ## whose own rect covers this one's centre and which stops input -- the
 ## full-rect MOUSE_FILTER_STOP overlay that silently eats a button.
 ##
-## data keys: controls (Array of {path, type, text, rect, on_screen, blocked_by,
-## kind}), count, reachable, viewport {w, h}.
+## data keys: controls (Array of {path, type, text, rect, on_screen, scroll_reachable,
+## scroll_container, blocked_by, kind}), count, reachable, scroll_reachable (int: hittable
+## only after scrolling a ScrollContainer -- reported, never a finding), viewport {w, h}.
 func _cmd_reachable_ui(_args: Dictionary) -> Dictionary:
 	var vp: Vector2 = _screen_reference_rect().size
 	var found: Array = []
@@ -4563,22 +4656,29 @@ func _cmd_reachable_ui(_args: Dictionary) -> Dictionary:
 
 	var out: Array = []
 	var reachable: int = 0
+	var scroll_only: int = 0
 	for entry: Dictionary in found:
 		var clean: Dictionary = entry.duplicate()
 		clean.erase("_rect")
 		clean.erase("_stops_input")
 		if clean["on_screen"] and clean["blocked_by"].is_empty():
 			reachable += 1
+		elif bool(clean.get("scroll_reachable", false)) and clean["blocked_by"].is_empty():
+			scroll_only += 1
 		out.append(clean)
 
+	var message: String = "%d of %d interactive control(s) are actually reachable at %dx%d" % [
+		reachable, out.size(), int(vp.x), int(vp.y)]
+	if scroll_only > 0:
+		message += " (+%d reachable only by scrolling a ScrollContainer)" % scroll_only
 	return {
 		"success": true,
-		"message": "%d of %d interactive control(s) are actually reachable at %dx%d" % [
-			reachable, out.size(), int(vp.x), int(vp.y)],
+		"message": message,
 		"data": {
 			"controls": out,
 			"count": out.size(),
 			"reachable": reachable,
+			"scroll_reachable": scroll_only,
 			"viewport": {"w": vp.x, "h": vp.y},
 			"geometry_trustworthy": _geometry_caveat().is_empty(),
 			"geometry_caveat": _geometry_caveat(),
@@ -4602,13 +4702,37 @@ func _collect_reachable(node: Node, vp: Vector2, out: Array) -> void:
 			# OFF-SCREEN (gh#2).
 			var rect: Rect2 = _screen_rect_of(control)
 			if rect.size.x > 0.0 and rect.size.y > 0.0:
+				var screen: Rect2 = Rect2(Vector2.ZERO, vp)
+				var on_screen: bool = screen.intersects(rect)
+				# A row inside a ScrollContainer is hittable only where the
+				# container's own rect shows it, and a row past the fold is
+				# reachable by scrolling, not unreachable (gh#16). Without this the
+				# lower rows of every shop list gated `findings` forever, and a row
+				# clipped by its container -- inside the viewport, invisible -- read
+				# as hittable. Nearest ScrollContainer ancestor wins.
+				var scroll_reachable: bool = false
+				var scroller_path: String = ""
+				var scroller: ScrollContainer = _nearest_scroll_container(control)
+				if scroller != null:
+					scroller_path = str(scroller.get_path())
+					var window: Rect2 = _screen_rect_of(scroller).intersection(screen)
+					on_screen = window.has_area() and window.intersects(rect)
+					if not on_screen and window.has_area():
+						# Reachable by scrolling iff the row lies within the scrolled
+						# content's extent (the container's first Control child).
+						for child: Node in scroller.get_children():
+							if child is Control:
+								scroll_reachable = _screen_rect_of(child as Control).intersects(rect)
+								break
 				out.append({
 					"path": str(control.get_path()),
 					"type": control.get_class(),
 					"text": _get_control_text(control),
 					"rect": {"x": rect.position.x, "y": rect.position.y,
 						"w": rect.size.x, "h": rect.size.y},
-					"on_screen": Rect2(Vector2.ZERO, vp).intersects(rect),
+					"on_screen": on_screen,
+					"scroll_reachable": scroll_reachable,
+					"scroll_container": scroller_path,
 					"blocked_by": "",
 					"kind": kind,
 					"_rect": rect,
@@ -4616,6 +4740,15 @@ func _collect_reachable(node: Node, vp: Vector2, out: Array) -> void:
 				})
 	for child: Node in node.get_children():
 		_collect_reachable(child, vp, out)
+
+
+func _nearest_scroll_container(control: Control) -> ScrollContainer:
+	var parent: Node = control.get_parent()
+	while parent != null:
+		if parent is ScrollContainer:
+			return parent as ScrollContainer
+		parent = parent.get_parent()
+	return null
 
 
 ## Every check the harness can run against a live game, in one call, normalized
@@ -4650,6 +4783,7 @@ func _collect_reachable(node: Node, vp: Vector2, out: Array) -> void:
 ## geometry finding measured headless also carries caveat), counts (source ->
 ## int), checks_run (Array[String]), checks_skipped (Array of {check, reason}),
 ## viewport {w, h}, baseline_in_use, new_count, pre_existing_count,
+## scroll_reachable (controls hittable only after scrolling -- reported, not findings),
 ## geometry_trustworthy, geometry_caveat.
 func _cmd_findings(args: Dictionary) -> Dictionary:
 	var include_scenes: bool = bool(args.get("scenes", true))
@@ -4668,6 +4802,7 @@ func _cmd_findings(args: Dictionary) -> Dictionary:
 	var baseline_in_use: bool = false
 	var new_count: int = 0
 	var pre_existing_count: int = 0
+	var scroll_reachable: int = 0
 
 	var scene: Node = get_tree().current_scene
 
@@ -4713,10 +4848,15 @@ func _cmd_findings(args: Dictionary) -> Dictionary:
 	else:
 		var reach: Dictionary = _cmd_reachable_ui({})
 		var reach_data: Dictionary = reach.get("data", {})
+		scroll_reachable = int(reach_data.get("scroll_reachable", 0))
 		for control: Dictionary in reach_data.get("controls", []):
 			var blocked: String = str(control.get("blocked_by", ""))
 			var on_screen: bool = bool(control.get("on_screen", true))
 			if on_screen and blocked.is_empty():
+				continue
+			# A row past the fold of an on-screen ScrollContainer is reachable by
+			# scrolling (gh#16): counted in scroll_reachable, not a finding.
+			if not on_screen and bool(control.get("scroll_reachable", false)) and blocked.is_empty():
 				continue
 			var rect: Dictionary = control.get("rect", {})
 			var label: String = str(control.get("text", ""))
@@ -4823,6 +4963,7 @@ func _cmd_findings(args: Dictionary) -> Dictionary:
 			"baseline_in_use": baseline_in_use,
 			"new_count": new_count,
 			"pre_existing_count": pre_existing_count,
+			"scroll_reachable": scroll_reachable,
 			"geometry_trustworthy": caveat.is_empty(),
 			"geometry_caveat": caveat,
 		},

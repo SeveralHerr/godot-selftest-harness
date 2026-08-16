@@ -448,6 +448,12 @@ class FullInstallCase(unittest.TestCase):
         self.assertTrue((self.project / "test" / "unit" / "test_selftest.gd").is_file())
         self.assertTrue((self.project / "test" / "sequences" / "smoke.json").is_file())
         self.assertTrue((self.project / "log-devtools.md").is_file())
+        # plant:G-002: the ext stub, the example and the test seed land OUTSIDE
+        # lint's default uid_check_ignore, so they need sidecars or the install's
+        # own smoke check reports three missing ones on day one.
+        for rel in ("devtools_ext/commands.gd.uid", "devtools_ext/commands.example.gd.uid",
+                    "test/unit/test_selftest.gd.uid"):
+            self.assertTrue((self.project / rel).is_file(), "%s not minted" % rel)
         claude = (self.project / "CLAUDE.md").read_text(encoding="utf-8")
         self.assertIn(scaffold_install.CLAUDE_BEGIN, claude)
         settings = json.loads((self.project / ".claude" / "settings.json").read_text(encoding="utf-8"))
