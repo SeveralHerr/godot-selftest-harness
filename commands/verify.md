@@ -612,6 +612,12 @@ EOF
   --run .devtools/run.json
 ```
 
+**Fan-out session? Pass `--about`.** With several subagents editing disjoint files at
+once, reach's default denominator is the whole dirty tree — a run gets graded on a
+sibling's still-uncommitted file (a false `NOT reached`) or silently credited for one it
+never touched. Add `--about <file> [<file> ...]` naming only the file(s) *this* run set
+out to verify; reach narrows to that set intersected with what actually changed.
+
 **`found` is required, and `[]` is a real answer.** It is the list of things this run caught that reading the diff would not have — one entry each, `{"what": ..., "phase": "import"|"lint"|"tests"|"runtime"|"other", "static_would_have_caught": true|false}`. Every other field in the row describes the run's *end state*, so a defect you found at minute four and fixed at minute six is invisible everywhere else: the checks get written green, the runners re-run clean, and the row is indistinguishable from one where nothing was ever wrong. Write `"found": []` when the run genuinely confirmed what you already knew — that is the honest answer and it is what `overkill` means. Omitting the key entirely records `null` (unrecorded) and draws a warning; it is not a synonym for empty.
 
 `value` is `warranted`, `overkill`, `insufficient`, or `inconclusive` — the same verdict Phase 6 writes up in prose, recorded here as an enum so it is countable. `record` downgrades a self-reported `warranted` on two grounds, and says so on stderr: one whose changed files were never loaded becomes `insufficient`, and one whose `found` is empty becomes **`overkill`** — a run that caught nothing confirmed what was already known, whatever it felt like at the time. Do not pad `found` to keep the verdict: an `overkill` row is a useful row, and the pattern across many of them is the only thing that can tell you to run `/verify` less often. Leaving `cheaper_alternative` blank also draws a warning: it is the field that can say the harness was the wrong tool, and therefore the easiest one to skip.

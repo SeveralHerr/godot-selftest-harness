@@ -144,8 +144,8 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
-# harness-version: 0.23.0
-HARNESS_VERSION = "0.23.0"
+# harness-version: 0.24.0
+HARNESS_VERSION = "0.24.0"
 
 LEDGER_PATH = Path(".devtools") / "verify-runs.jsonl"
 
@@ -874,6 +874,33 @@ def _observed(args):
     return (snapshot or set()) | (scripts or set())
 
 
+def _about_set(args):
+    """Normalized `--about` paths, or None when the flag was not given.
+
+    gh#20.2: reach's denominator is `git status`'s whole dirty set, which is right for
+    a solo session and wrong for a fan-out one - a run graded on a sibling agent's
+    still-uncommitted file, or (the inverse, and more dangerous) silently credited for
+    one it never touched. `--about` lets a caller name what THIS run was actually about;
+    the denominator becomes that set intersected with what actually changed, so a file
+    outside it is neither reached nor unreached - it just isn't this run's business.
+    """
+    about = getattr(args, "about", None)
+    if not about:
+        return None
+    return {_norm(p) for p in about}
+
+
+def _restrict_to_about(changed, about):
+    """Intersect a changed-set with `--about`; pass through unchanged otherwise.
+
+    `None` passes straight through - a `None` changed-set already means "no VCS", which
+    `--about` cannot supply an answer for either.
+    """
+    if not about or changed is None:
+        return changed
+    return changed & about
+
+
 def cmd_record(args, root):
     run = _load_run(args)
     if run is None:
@@ -888,6 +915,18 @@ def cmd_record(args, root):
     # into split_reach as None rather than coerced to set(), which is what used to write
     # `reached: 0, total: 0` into the permanent record (moving-in:G-003).
     union = _union_changed(worktree, branch_set)
+
+    about = _about_set(args)
+    if about:
+        stray = sorted(about - (union or set()))
+        if stray:
+            print("verify_ledger: --about names %d path(s) not in the changed set - "
+                  "typo, or a file that has not been saved: %s"
+                  % (len(stray), ", ".join(stray)), file=sys.stderr)
+        worktree = _restrict_to_about(worktree, about)
+        branch_set = _restrict_to_about(branch_set, about)
+        union = _restrict_to_about(union, about)
+
     cfg = load_config(root)
     implicit = implicit_scripts(root, cfg)
 
@@ -912,6 +951,11 @@ def cmd_record(args, root):
         reach_obj = _sub_reach(u)
         reach_obj["worktree"] = _sub_reach(w)
         reach_obj["branch"] = _sub_reach(b)
+        if about:
+            # Auditable, not just applied: a reader of the row can see the denominator
+            # was narrowed on purpose, and to what, rather than mistaking it for a
+            # small diff.
+            reach_obj["about"] = sorted(about)
 
     sha = _git(root, "rev-parse", "--short", "HEAD")
     branch = _git(root, "rev-parse", "--abbrev-ref", "HEAD")
@@ -1072,6 +1116,18 @@ def cmd_reach(args, root):
     worktree = changed_worktree(root)
     branch_set = changed_branch(root)
     union = _union_changed(worktree, branch_set)
+
+    about = _about_set(args)
+    if about:
+        stray = sorted(about - (union or set()))
+        if stray:
+            print("verify_ledger: --about names %d path(s) not in the changed set - "
+                  "typo, or a file that has not been saved: %s"
+                  % (len(stray), ", ".join(stray)), file=sys.stderr)
+        worktree = _restrict_to_about(worktree, about)
+        branch_set = _restrict_to_about(branch_set, about)
+        union = _restrict_to_about(union, about)
+
     cfg = load_config(root)
     implicit = implicit_scripts(root, cfg)
     observed = _observed(args)
@@ -1080,6 +1136,9 @@ def cmd_reach(args, root):
     w = split_reach(worktree, observed, implicit, root, cfg)
     b = split_reach(branch_set, observed, implicit, root, cfg)
 
+    if about:
+        print("--about: denominator narrowed to %d path(s): %s"
+              % (len(about), ", ".join(sorted(about))))
     print("worktree (this session's edits - the honest number): " + _reach_line(w))
     print("branch   (all commits since base - dilutes as the branch grows): "
           + _reach_line(b))
@@ -1408,6 +1467,12 @@ def main():
                    help="Record reach as null ON PURPOSE (aborted runs: the game "
                         "never came up). Without this flag, record refuses to write "
                         "a row when no capture is readable.")
+    p.add_argument("--about", metavar="PATH", action="append",
+                   help="Restrict the reach denominator to these path(s), intersected "
+                        "with what actually changed (gh#20.2). For a fan-out session: "
+                        "name only the file(s) THIS run set out to verify, so a "
+                        "sibling agent's still-uncommitted file is neither a false "
+                        "miss nor a silent free credit. Repeatable.")
     p.add_argument("--run", metavar="FILE",
                    help="JSON object of this run's results. Default: read stdin.")
     p.set_defaults(func=cmd_record)
@@ -1417,6 +1482,9 @@ def main():
                    help="A `devtools.py scene-tree` capture. Repeatable.")
     p.add_argument("--scripts-seen", metavar="FILE", action="append",
                    help="A `devtools.py --json scripts-seen` capture. Repeatable.")
+    p.add_argument("--about", metavar="PATH", action="append",
+                   help="Restrict the reach denominator to these path(s), intersected "
+                        "with what actually changed. Repeatable. See `record --about`.")
     p.set_defaults(func=cmd_reach)
 
     p = sub.add_parser("stats", help="Aggregate the ledger")

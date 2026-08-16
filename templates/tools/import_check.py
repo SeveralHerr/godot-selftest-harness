@@ -50,8 +50,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-# harness-version: 0.23.0
-HARNESS_VERSION = "0.23.0"
+# harness-version: 0.24.0
+HARNESS_VERSION = "0.24.0"
 
 # Substrings that mean the import did not leave a parseable project behind. Every one
 # of these is taken from real captured output, not from guesswork:
@@ -247,8 +247,13 @@ def main():
         sys.exit(2)
 
     line_count = len(captured.splitlines())
-    print(f"Import OK: godot --import ran (exit 0) and its {line_count} line(s) of output "
-          "contain no SCRIPT ERROR, Parse Error, Failed to load script or Compilation failed.")
+    print(f"Import OK: the class cache regenerated and godot --import's {line_count} line(s) "
+          "of output contain no SCRIPT ERROR, Parse Error, Failed to load script or "
+          "Compilation failed.")
+    print("NOT COVERED: --import registers global class names; it does not compile function "
+          "or const bodies. A const whose initializer is not a constant expression, and "
+          "anything else that fails only at compile time, passes this gate. "
+          "lint_project.gd runs the compile pass.")
     print(f"Full import log: {log_path}")
     sys.exit(0)
 

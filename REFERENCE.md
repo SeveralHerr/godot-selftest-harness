@@ -1286,6 +1286,15 @@ asks this every run":
 | `COVERED (session)` | Seen only in `.devtools/verify-runs.jsonl` or a `devtools_log*.jsonl`. Printed with its timestamp, because a past run is an observation, not a standing check. |
 | `UNCHECKED` | Nothing exercises it. |
 
+**A filesystem sweep counts as strong evidence for `scene_validation`, distinct from a
+literal (gh#21).** `load("res://x.tscn")` was the only strong token; a test that walks
+`res://`, filters on `.tscn`, and loads whatever it finds scored UNCHECKED, even though
+it is stronger than any hardcoded literal — it can't go stale and it covers scenes
+added after it was written. Recognized by `ends_with(".tscn")` / `match("*.tscn")`
+alongside a `load(`/`ResourceLoader.load(` call in the same file, and reported with its
+own evidence line ("sweeps res:// for .tscn and loads what it finds") so it reads as a
+distinct, stronger claim rather than a disguised literal.
+
 **Weak evidence never promotes a class.** `ui.size` without `instantiate_ui` (a Control
 outside a tree reports `0x0`, so that assertion asserts the failure mode itself),
 `PackedScene` without a `res://….tscn` literal (the shipped example test packs one in
@@ -1340,6 +1349,16 @@ output contains parse/load errors, `2` couldn't run at all (no binary, no
 `project.godot`, no captured output, a crash, or a timeout). Binary resolution matches
 `devtools.py launch`: `--godot` → `$GODOT_BIN` → the config's `godot_bin`. Flags:
 `-p/--project`, `--godot`, `--json`.
+
+**`Import OK` is a narrower claim than it reads (gh#23).** `--import` only registers
+global class names; it never evaluates a function or `const` body, so a `const`
+initializer that calls a method (not a constant expression) passes `--import` clean and
+is only caught by `lint_project.gd`'s real compile. The success line now says exactly
+that — `Import OK: the class cache regenerated and godot --import's N line(s) of output
+contain no [...]` followed by a `NOT COVERED:` line naming what `--import` structurally
+cannot see — rather than reading as a compile verdict it isn't. `/verify` still runs
+lint alongside import in every tier that reaches Phase 1, so nothing ships broken on
+this gap; the fix is honesty about which gate actually caught it.
 
 ### Standalone runners: `tools/eval.gd` and `tools/capture.gd`
 
@@ -1416,6 +1435,17 @@ python tools/verify_ledger.py reach  --scene-tree tree.json   # dry run, writes 
 python tools/verify_ledger.py record --scene-tree tree.json --run run.json
 python tools/verify_ledger.py stats
 ```
+
+**`--about PATH` narrows the denominator for a fan-out session (gh#20.2).** Reach's
+default denominator is the whole dirty tree (`git status`), which is right for a solo
+session and wrong once several subagents edit disjoint files at once: a run gets
+graded on a sibling's still-uncommitted file (a false miss), or — the inverse, and more
+dangerous — silently credited for one it never touched. Pass `--about` (repeatable)
+naming the file(s) *this* run actually set out to verify; the denominator becomes that
+set intersected with what actually changed, and anything outside it is neither reached
+nor unreached — it isn't this run's business. A path named that never shows up in the
+changed set prints a warning (typo, or a file that was never saved) rather than
+silently doing nothing.
 
 `record` derives everything it can — timestamp, sha, branch, changed files — and takes
 only runner exit codes, Phase 4 check results, and duration from the caller. The split
@@ -1575,6 +1605,14 @@ may now `await`; synchronous tests are unaffected.
 This makes layout, anchors, and container sorting assertable. It does **not** make
 pixels assertable — nothing is rendered. Visual regressions still need a running game
 and a screenshot.
+
+`_T.text_width(label: Label) -> float` (gh#20 / plant-tower-defense:G-033) measures the
+widest line of a Label's text under its own resolved theme font. Use it, not
+`get_minimum_size()`, when a test asks "does this text fit its box" — `get_minimum_size()`
+returns ~1px on any Label with `clip_text` or a non-default `text_overrun_behavior`, so
+the obvious width assertion passes unconditionally on exactly the labels worth checking.
+Same measurement `dev_tools.gd`'s `ui_text_trimmed` finding already does internally,
+exposed here so a test can do it too.
 
 The test runner's flags (pass after `--`):
 

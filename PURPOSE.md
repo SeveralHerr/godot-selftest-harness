@@ -61,6 +61,17 @@ nothing* rather than *it's clean*, and the status provider that rides on every r
 A check that can't tell "broken" from "fine" is worse than no check, because it is
 believed.
 
+**A pass's claim must match its actual reach — no narrower, no wider.** Two failure
+directions, same fix. Overclaiming: `import_check.py` printed `Import OK` when `--import`
+had only registered class names and never evaluated a function or `const` body, reading
+as a compile verdict it wasn't. Underclaiming: `coverage_check.py` scored a directory
+sweep that loads every scene on disk as UNCHECKED because it isn't a `res://x.tscn`
+literal, while a *weaker* hardcoded load flipped it to COVERED — the incentive pointed at
+the worse implementation. Both were caught by a session reading its own tool's source
+after it said something the session already knew wasn't quite right (0.24.0, gh#21/#23).
+A check's prose is a claim like any other verb's answer, and it is wrong the same two
+ways: saying more than was verified, or crediting less than was actually observed.
+
 **Coverage is reported, not implied.** Every pass names what it looked at — `Shaders: N
 of M`, `Assertions: N executed`, `Orphans: N of M public function(s)`, `reached N/M` —
 so "checked, found nothing" and "never looked" cannot print the same line. The corollary
