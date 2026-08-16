@@ -86,8 +86,8 @@ from bisect import bisect_right
 from datetime import datetime, timezone
 from pathlib import Path
 
-# harness-version: 0.30.0
-HARNESS_VERSION = "0.30.0"
+# harness-version: 0.31.0
+HARNESS_VERSION = "0.31.0"
 
 EXIT_OK = 0
 EXIT_FINDINGS = 1
@@ -301,6 +301,18 @@ RE_STRING_REF = re.compile(
     r"\b(has_method|has_signal|emit_signal|call|call_deferred|connect|"
     r"disconnect|is_connected)[ \t]*\([ \t]*([\"'])")
 
+# `x as Type == y` / `!= y` with no parentheses (moving-in:G-053). GDScript's `as`
+# binds LOOSER than `==`, so `shape as ConcavePolygonShape3D == null` parses as
+# `shape as (ConcavePolygonShape3D == null)` - a cast to a bool - and the whole
+# surrounding expression is a hard parse error that took a real suite from green
+# to 48 failures. The parenthesised form `(x as T) == y` is never wrong, so flagging
+# the bare one costs nothing and the construct (`hit.get("collider") as X`) is
+# common. Anchored on `as` followed by a Type-shaped identifier followed by a
+# comparison; a `(` right after the type means the type is being called, not
+# compared, and is skipped by the character class.
+RE_AS_PRECEDENCE = re.compile(
+    r"\bas[ \t]+([A-Z][\w.]*)[ \t]*(==|!=)[ \t]*")
+
 
 def _match_paren(code, open_pos):
     """Index just past the `)` closing the `(` at open_pos, or -1.
@@ -389,6 +401,7 @@ class GDFile:
         self.root_refs = []               # (line, root_identifier, member or None)
         self.path_refs = []               # (line, kind, res_path)
         self.string_refs = []             # (line, verb, name)
+        self.as_precedence_refs = []      # (line, snippet) - `x as T == y` unparenthesised
         self.parse_error = None
 
     @property
@@ -584,6 +597,19 @@ def _collect_literal_refs(gd, src, code):
                   if src.line_of(other.start()) == line)
         if idx < len(candidates):
             gd.string_refs.append((line, m.group(1), candidates[idx]))
+
+    for m in RE_AS_PRECEDENCE.finditer(code):
+        # Skip when the `as` is already the last token inside a paren group -
+        # `(x as T) == null` puts a `)` between the type and the `==`, which the
+        # regex's [ \t]* cannot cross, so it never matches. What CAN match falsely
+        # is a type name that is really a call: `foo as Bar(...)` never happens in
+        # GDScript, so no guard is needed for it. Line-local: the whole `as ... ==`
+        # is one expression on one line in every real instance seen.
+        line = src.line_of(m.start())
+        line_start = code.rfind("\n", 0, m.start()) + 1
+        line_end = code.find("\n", m.end())
+        snippet = code[line_start:(line_end if line_end != -1 else len(code))].strip()
+        gd.as_precedence_refs.append((line, snippet))
 
 
 # ---------------------------------------------------------------------------
@@ -1393,6 +1419,26 @@ class Checker:
                             str(required) if required == total
                             else "%d to %d" % (required, total)))
 
+    def check_as_precedence(self):
+        """`x as Type == y` with no parentheses is a hard parse error (moving-in:G-053).
+
+        GDScript's `as` binds looser than `==`, so this parses as a cast to a bool
+        and takes down the whole expression - a real suite went green -> 48 failures
+        on one such line. name_check's own NOT COVERED line already warns it does
+        not compile; this is one specific, common, cheap-to-spot instance of that gap
+        that a regex CAN see, since it is a shape and not a type question. Only
+        fires when the thing after `as` looks like a Type (PascalCase); a bare
+        `x as y == z` with lowercase y is left alone rather than guessed at.
+        """
+        for gd in self.project.files:
+            if gd.vendored:
+                continue
+            for line, snippet in gd.as_precedence_refs:
+                self.add(gd.res_path, line, "as_precedence", SEVERITY_ERROR, snippet,
+                         "`as` binds looser than `==`/`!=`, so this parses as a cast "
+                         "to a bool and is a hard parse error - parenthesise the cast: "
+                         "`(x as Type) == y`. Line: %s" % snippet)
+
     def check_class_cache(self):
         """Warn when `.godot/` and the source disagree -- without touching `.godot/`."""
         cached = _read_class_cache(self.project.root)
@@ -1417,6 +1463,7 @@ class Checker:
         if self.options.get("strings", True):
             self.check_string_refs()
         self.check_virtual_signatures()
+        self.check_as_precedence()
         self.check_class_cache()
         return self.findings
 

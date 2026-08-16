@@ -6010,7 +6010,7 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   - Workaround: `grep -c "SCRIPT ERROR"` on the redirected output, by hand, every run.
     The full suite has had 2 for at least this whole cycle and nobody noticed
     (`moving-in-mgr`).
-  - [moving-in:G-050] status: fixed | fixed-in: 0.27.0 | seen: 2 | harness: 0.21.0 | source: moving-in 2026-08-16 | dup-of: gh#27 (same defect, filed as a GitHub issue and fixed the same day this project-log copy was pooled)
+  - [moving-in:G-050] status: fixed | fixed-in: 0.27.0 | seen: 3 | harness: 0.21.0 | source: moving-in 2026-08-16 | dup-of: gh#27 (same defect, filed as a GitHub issue and fixed the same day this project-log copy was pooled)
   - Improvement: count errors emitted between a test method's start and end, attribute
     them to that method, and mark it `[ABORTED]` rather than `[PASS]`. Failing that,
     a single summary line — `Errors: N emitted during the suite` — next to
@@ -6036,7 +6036,7 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   in a failure message.
   - Workaround: `_T.assert_true(false, "DBG %s" % dbg)` inside a temporary copy of a
     test, then `grep -o "DBG.*"`.
-  - [moving-in:G-052] status: open | seen: 2 | harness: 0.21.0 | source: moving-in 2026-08-16
+  - [moving-in:G-052] status: open | seen: 3 | harness: 0.21.0 | source: moving-in 2026-08-16
   - Improvement: a `collider-planes --node PATH` verb reporting each shape's type and,
     for a mesh shape, its up-facing planes as `{y, rect}` — the placement question in
     one call. Generic: every 3D game that rests things on things needs it, and the
@@ -6409,3 +6409,145 @@ regardless of outcome. Mutation-tested both mechanisms separately (the
 `_start_entry_hook()` call site, and the `fire_entry_point` registration) -
 each failure correctly named the specific assertion it broke, confirmed
 against a byte-identical restore both times.
+
+## 2026-08-16 - Upstreamed 1 open gap(s) from plant-tower-defense (harness 0.18.0, 0.19.0, 0.21.0, 0.23.0, 0.24.0, 0.25.0)
+
+Pooled by `tools/upstream_gaps.py` from `C:\Users\gotmi\Documents\GitHub\plant-tower-defense\log-devtools.md`. Gap text is the project's,
+verbatim; only the id line is rewritten (qualified with the project name so
+ids from two projects cannot collide, plus a `source:` back-pointer).
+
+- Gap: `launch --isolated --kill-survivors` hung at the classic "bus never
+  answered a ping within 20s" symptom the local `godot-devtools-concurrent-launch`
+  skill describes — but this was a *different* cause than the one that skill
+  documents, and the symptom is indistinguishable from the ping side: the process
+  was alive, `MainWindowHandle` was 0, one thread, 0.015s CPU, exactly like the
+  skill's malformed-cmdline signature. The actual cause was a plain, silent
+  Godot OS.alert() dialog titled "ALERT!" blocking the main thread on "Main
+  scene's path could not be resolved from UID. Make sure the project is
+  imported first." — after a `godot --headless --path . --import` had already
+  been run and appeared to finish (printed reimport steps through "[ DONE ]",
+  no visible error). `.godot/uid_cache.bin` was in fact absent after that first
+  import and present only after a second, identical `--import` call. `ping`'s
+  20s timeout gives zero signal that a blocking native dialog is the reason —
+  distinguishing "malformed cmdline hang" from "modal alert dialog hang" from
+  "still loading" currently requires reading `MainWindowTitle` via PowerShell
+  and, since the alert box draws no child controls `EnumChildWindows` can read,
+  screen-scraping it with `PrintWindow` into a PNG to read the message at all.
+  - [plant-tower-defense:G-045] status: fixed | fixed-in: 0.31.0 | seen: 1 | harness: 0.25.0 | source: plant-tower-defense 2026-08-16 | dup-of: gh#31 (fix 2 shipped - ping timeout now reads both launch logs; fix 1 deferred, see 0.31.0 entry)
+  - Improvement: two independent fixes would each have closed this faster.
+    (1) `--import` exiting non-zero (or printing a distinguishable warning)
+    when it does not end up writing `uid_cache.bin`, rather than looking
+    identical to a clean run — this is the same shape as the already-logged
+    G-044 (`--import` segfault-then-clean-retry) and G-036-ish concurrent-import
+    races, but here the first run didn't even error, it just quietly didn't
+    finish the one file that matters for the next launch. (2) `ping`'s timeout
+    message reading the launched process's own stdout/stderr tail (already
+    captured to `.devtools/launch_stdout.log` / `launch_stderr.log` by
+    `cmd_launch`) and surfacing a line like "the game already logged: ERROR:
+    Main scene's path could not be resolved from UID" instead of a bare
+    "never answered a ping" — since that exact diagnostic was sitting in the
+    log file the whole time from the FIRST launch attempt, and would have
+    named the fix immediately instead of sending the session toward the
+    concurrent-launch skill's (correct, but irrelevant here) troubleshooting
+    path.
+
+## 2026-08-16 - Upstreamed 2 open gap(s) from moving-in (harness 0.11.0, 0.16.0, 0.19.0, 0.21.0)
+
+Pooled by `tools/upstream_gaps.py` from `C:\Users\gotmi\Documents\GitHub\moving-in\log-devtools.md`. Gap text is the project's,
+verbatim; only the id line is rewritten (qualified with the project name so
+ids from two projects cannot collide, plus a `source:` back-pointer).
+
+- Gap: **`name_check` reported `errors: 0` on a hard parse error**, and the suite went
+  from green to 48 failures with 119 `SCRIPT ERROR`s. The line was
+  `shape_node == null or shape_node.shape as ConcavePolygonShape3D == null` — the `as`
+  swallows the whole surrounding `or` and tries to cast a bool. This is not a defect in
+  `name_check`: its own `NOT COVERED:` line says a clean run resolves names and does not
+  compile, and names `:=` type inference as the example. This is that warning met for
+  real, with a different construct.
+  - Workaround: none needed — the test suite caught it immediately and loudly, which is
+    the system working. The cost was one confused minute reading 119 errors.
+  - [moving-in:G-053] status: fixed | fixed-in: 0.31.0 | seen: 1 | harness: 0.21.0 | source: moving-in 2026-08-16
+  - Improvement: `name_check --refresh-api` already downloads the engine's class list,
+    so it knows `ConcavePolygonShape3D` is a type. A cheap targeted rule — flag
+    `X as Type == null` and `X as Type != null` without parentheses, since the
+    precedence is a trap and the parenthesised form is never wrong — would catch this
+    exact shape without attempting a compile. Worth it because the construct is common
+    in this project (`hit.get("collider") as CollisionObject3D` appears throughout) and
+    the failure is total rather than local.
+
+- Gap: **[G-054] — the runner does not know how many assertions a test METHOD contains.**
+  It prints the suite total, and the `[VACUOUS]` check already scans a method's source
+  for `_T.assert_*` calls to decide whether to expect any. It therefore has, in the same
+  pass, the number it would need to say "this method contains 6 assert calls and
+  executed 3". That comparison is the abort detector #27 asks for, available without
+  attributing stderr to a method at all.
+  - [moving-in:G-054] status: fixed | fixed-in: 0.28.0 | seen: 1 | harness: 0.21.0 | source: moving-in 2026-08-16 | dup-of: gh#27 / moving-in:G-050 (same abort-detection ask; shipped as run_tests.py's stderr-scan wrapper rather than the per-method assertion-count heuristic proposed here - the wrapper is exact where the count is advisory, and it was already in 0.28.0 before this copy was pooled)
+  - Improvement: reuse the `[VACUOUS]` source scan to count `_T.assert_*` occurrences per
+    method, and report `[PARTIAL] method (3 of 6 assertions executed)` when a passing
+    method runs fewer than it contains. Imperfect — loops and early returns legitimately
+    skip assertions — so it should be advisory like the orphan check, not a gate. But it
+    would have caught all three aborts this session, and it needs no new plumbing.
+
+## 2026-08-16 — 0.31.0: a timeout that names its cause, and a precedence trap
+
+One fresh GitHub issue (#31), pooling surfaced one duplicate of it, one
+duplicate of gh#27, and one genuinely new small rule.
+
+**[gh#31 / plant-tower-defense:G-045] `launch`'s ping timeout now leads with
+the game's own `ERROR:` line, from EITHER captured log.** The reported case:
+`--import` had printed a clean-looking completion but never wrote
+`uid_cache.bin`; the next launch blocked on a native `OS.alert()` dialog
+("Main scene's path could not be resolved from UID... Aborting") and `launch`
+reported only "the bus never answered a ping within 20s" - reading identically
+to gh#28's unrelated missing-separator hang. The exact diagnostic was sitting
+in `launch_stdout.log` the whole time; the old code tailed only stderr.
+Extracted a `launch_log_errors()` helper that scans both logs (a pure function
+of the paths, so it is testable without a real launch) and wired it into the
+timeout path. Shipped the reporter's fix 2; **fix 1 (make an incomplete
+`--import` observable by asserting `uid_cache.bin` got written) deliberately
+deferred** - the reporter themselves flagged the mechanism as unconfirmed
+("plausibly a race... the exact mechanism isn't confirmed"), the file's
+presence is version-dependent, and fix 2 alone turns the same failure from a
+screen-scrape into a one-line read, which was the actual cost. Logged as
+follow-up, not silently dropped.
+
+**A real Windows finding while building its test, worth recording:** the first
+draft drove the timeout path with a stand-in "godot" `.bat` that never answers
+the bus. It failed - and reproducing it with a direct `Popen` probe showed
+**a `.bat` launched with `DETACHED_PROCESS` (which `cmd_launch` correctly
+uses for a real Godot `.exe`) does not even execute its body on Windows**:
+exit 1, nothing written, not a redirected-handle problem but a no-console
+problem. A real `.exe` is unaffected (every launch this session proves it),
+and `python.exe` cannot stand in because `cmd_launch`'s own `--path` is
+python's first arg, which it rejects. So the control drives the extracted
+helper directly with the reporter's exact log shape (the ERROR: line in stdout,
+benign noise in stderr, plus a missing-logs tolerance case) - and since the
+wiring into `cmd_launch` is one line, testing the helper IS testing the fix.
+Mutation-tested: forcing the scan to find nothing failed the control naming
+the exact assertion.
+
+**[moving-in:G-053] `name_check.py` gains an `as_precedence` rule.** `x as
+Type == y` with no parentheses is a hard parse error - GDScript's `as` binds
+looser than `==`, so it casts to a bool - and one such line took a real suite
+from green to 48 failures. `name_check`'s own `NOT COVERED` line already says
+it does not compile; this is one specific, common, cheap instance of that gap
+that a regex CAN see, because it is a shape and not a type question. Only
+fires on a PascalCase operand after `as`; the parenthesised form is never
+flagged. Planted the reporter's verbatim line into stage 2.5's bad-names
+control alongside a parenthesised negative control on the very next func, and
+asserted exactly one hit. **Zero false positives across `plant-tower-defense`,
+`moving-in`, and `findmyballs`** - measured, per this repo's rule for any
+static-analysis change (H-030), not assumed. Mutation-tested (rule un-dispatched
+-> `as_precedence` missing from the expected set, control fails).
+
+**Two duplicates reconciled by pooling:** `plant-tower-defense:G-045` = gh#31
+(fixed above), `moving-in:G-054` = gh#27 (0.28.0's `run_tests.py`; the
+per-method assertion-count heuristic proposed here is a weaker, advisory
+version of the exact stderr scan already shipped).
+
+**Validation run this turn:** `python tools/record_version.py --record` then
+`--check` — OK at 0.31.0, 14 shipped files (no new bus verb; `launch_log_errors`
+is a Python helper and `as_precedence` a name_check rule). `python -m unittest
+discover -s tools` — 35 tests OK. `python tools/check_templates.py` — OK, all
+stages, two new controls each mutation-tested. Real-project false-positive
+sweep for the new static rule: 0/0/0.

@@ -89,11 +89,11 @@ from pathlib import Path
 from typing import Optional  # noqa: F401
 
 
-# harness-version: 0.30.0
+# harness-version: 0.31.0
 # Version of the godot-selftest-harness this client was copied from. Compared against
 # the running game's own stamp by the `harness-version` verb, so a half-refreshed
 # install (new client, old autoload) is visible instead of mysterious.
-HARNESS_VERSION = "0.30.0"
+HARNESS_VERSION = "0.31.0"
 
 COMMANDS_FILE = "devtools_commands.json"
 RESULTS_FILE = "devtools_results.json"
@@ -3094,6 +3094,32 @@ def cmd_aabb(args, project_path: Path):
 # ==================== LAUNCH / TILEMAP / SCRIPT CENSUS ====================
 
 
+def launch_log_errors(*logs) -> list:
+    """Every `ERROR:` line across the given launch logs, tagged with its file (gh#31).
+
+    Read from BOTH launch_stdout.log and launch_stderr.log, not stderr alone: Godot's
+    destination for a startup-abort message - "Main scene's path could not be
+    resolved from UID... Aborting", from an --import that had printed what looked
+    like a clean completion but never wrote uid_cache.bin - is not reliably stderr.
+    import_check.py already learned this for the identical reason and combines both
+    streams. Before this, a ping timeout tailed only stderr, so that ERROR: line sat
+    unread in the other log while the generic timeout read identically to gh#28's
+    unrelated missing-`--`-separator bug, and diagnosing it took a PowerShell
+    screen-scrape of a native alert dialog. A pure function of the log paths so it
+    can be tested without a real launch.
+    """
+    found = []
+    for log in logs:
+        try:
+            text = Path(log).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for line in text.splitlines():
+            if "ERROR:" in line:
+                found.append(f"{Path(log).name}: {line.strip()}")
+    return found
+
+
 def _await_bus(project_path: Path, session: str, bus_dir: str, seconds: float = 20.0):
     """Poll `ping` on the freshly launched instance's own bus. Reply dict or None.
 
@@ -3347,6 +3373,11 @@ def cmd_launch(args, project_path: Path):
     if reply is None:
         print("\nERROR: launched, but the bus never answered a ping within 20s.",
               file=sys.stderr)
+        error_lines = launch_log_errors(out_log, err_log)
+        if error_lines:
+            print("The game's own log names the problem:", file=sys.stderr)
+            for line in error_lines[-10:]:
+                print(f"  {line}", file=sys.stderr)
         tail = ""
         try:
             tail = err_log.read_text(encoding="utf-8").strip()[-800:]
