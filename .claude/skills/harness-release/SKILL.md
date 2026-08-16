@@ -12,7 +12,9 @@ This is the exact sequence, in order. Do not skip a step because the change felt
 
 ## 0a. Confirm you are looking at the current HEAD
 
-**Do this before reading a single source file.** The `gitStatus` block in a session's
+**Do this before reading a single source file.** Also `gh issue list --state open
+--limit 5` — a parallel session can file an issue mid-turn (gh#17 arrived while 0.22.0
+was being built and was addressed in the same release). The `gitStatus` block in a session's
 context is a snapshot taken when the session started, and this repo can move under a long
 session — a merged PR, a parallel session, a `pull --ff-only` between turns.
 
@@ -145,7 +147,16 @@ FAIL line in the log. In 0.21.0 a mutation written through a shell heredoc had i
 ` escapes rewritten by the tool, the script asserted-out, and the run that followed
 printed every new check green against the pristine file — a mutation that did not
 apply reads exactly like a passing control ([H-057]). Write the mutation script with the
-file-write tool, not a heredoc, and check `s.count(anchor) == 1` inside it.
+file-write tool, not a heredoc, and check `s.count(anchor) == 1` inside it. (The same
+heredoc rewriting bites *every* Python edit script that carries a `\n` or `\t` — in
+0.22.0 three template edits silently failed their anchor for that reason before the
+pattern was recognised. Any edit script with a backslash goes through the file-write tool.)
+
+**Batch the mutations.** One run of `check_templates.py` costs ~5 minutes and every
+check names itself in its FAIL line, so one run can carry every mutation whose checks
+are independent — 0.22.0 proved eight in one run plus one follow-up. Restore from a
+copy you took *before* mutating and prove it with `cmp` against that copy; never
+restore a template with `git checkout --` (the file also holds the release's real edits).
 
 **Do not edit the mutated file while the run is in flight** — the restore overwrites
 whatever is on disk. Do other work (docs, log) for the five minutes, and quote the FAIL
