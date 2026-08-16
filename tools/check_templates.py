@@ -992,7 +992,77 @@ def stage_names(scratch, godot, cache):
         planted.unlink(missing_ok=True)
 
     ok = check_engine_skew(scratch, cache) and ok
+    ok = check_require_compile(scratch, godot, cache) and ok
     return ok
+
+
+def check_require_compile(scratch, godot, cache):
+    """`--require-compile` catches what static name resolution structurally cannot,
+    and does it without writing to `.godot/` (gh#20.1 / plant-tower-defense:G-025).
+
+    The planted defect is deliberately NOT an unknown name - `OS.get_ticks_msec()`
+    resolves cleanly, so a plain `name_check` run reports 0 findings for this file.
+    It is a `const` whose initializer calls a method, which is not a constant
+    expression: invisible to static resolution, and exactly the class of error
+    gh#23 showed `import_check.py`'s `--import` also cannot see. Only a real
+    compile catches it, which is the entire point of the flag.
+    """
+    if godot is None:
+        print("stage 2.5 names: --require-compile SKIPPED (no Godot binary for this stage)")
+        return True
+
+    good = scratch / "tools" / "harness_check_require_compile_good.gd"
+    bad = scratch / "tools" / "harness_check_require_compile_bad.gd"
+    good.write_text("extends RefCounted\nfunc ok() -> int:\n\treturn 1\n", encoding="utf-8")
+    bad.write_text(
+        "extends RefCounted\n"
+        "const NOT_A_CONSTANT := OS.get_ticks_msec()\n",
+        encoding="utf-8")
+    try:
+        before = sorted((scratch / ".godot").rglob("*")) if (scratch / ".godot").is_dir() else []
+        before_stat = [(p, p.stat().st_mtime_ns) for p in before if p.is_file()]
+
+        # Negative control: static resolution alone must NOT catch this - both
+        # names are real, and the only thing wrong is a runtime call in a
+        # compile-time slot.
+        plain = _run_name_check(scratch, cache, ["--only", "tools/harness_check_require_compile_bad.gd"],
+                                godot=godot)
+        if plain.returncode != 0 or "No findings" not in plain.stdout:
+            return fail("stage 2.5 names: negative control failed - plain name_check "
+                        "should report 0 findings for a const-calls-a-real-method file "
+                        "(both names resolve; only a real compile sees the problem). "
+                        "Got exit %d:\n%s" % (plain.returncode, plain.stdout.strip()))
+
+        proc = _run_name_check(scratch, cache,
+                               ["--require-compile",
+                                "tools/harness_check_require_compile_good.gd",
+                                "tools/harness_check_require_compile_bad.gd"],
+                               godot=godot)
+        if proc.returncode != 1:
+            return fail("stage 2.5 names: --require-compile with one good, one uncompilable "
+                        "file must exit 1, got %d:\n%s" % (proc.returncode, proc.stdout.strip()))
+        if "compiled OK: tools/harness_check_require_compile_good.gd" not in proc.stdout:
+            return fail("stage 2.5 names: --require-compile must report the good file as "
+                        "compiled OK:\n%s" % proc.stdout.strip())
+        if "compile_error" not in proc.stdout or "NOT_A_CONSTANT" not in proc.stdout:
+            return fail("stage 2.5 names: --require-compile must name the const error "
+                        "in a compile_error finding:\n%s" % proc.stdout.strip())
+
+        after = sorted((scratch / ".godot").rglob("*")) if (scratch / ".godot").is_dir() else []
+        after_stat = [(p, p.stat().st_mtime_ns) for p in after if p.is_file()]
+        if before_stat != after_stat:
+            return fail("stage 2.5 names: --require-compile touched .godot/ (%d file(s) "
+                        "before, %d after) - it must be read-only against the import "
+                        "cache, or it is not safe for N agents to run at once"
+                        % (len(before_stat), len(after_stat)))
+    finally:
+        good.unlink(missing_ok=True)
+        bad.unlink(missing_ok=True)
+
+    print("stage 2.5 names: --require-compile catches a const-calls-a-method error "
+          "static resolution alone misses (negative control: plain name_check reports "
+          "0 findings for the same file), touches nothing under .godot/")
+    return True
 
 
 def check_engine_skew(scratch, cache):

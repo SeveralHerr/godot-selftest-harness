@@ -1247,6 +1247,22 @@ allowed to run: two agents in one real session shipped code that did not compile
 clean `name_check` (`moving-in:G-009`). The line is suppressed when there are errors to
 report, so it never buries a real finding.
 
+**`--require-compile FILE [FILE ...]` closes the type-inference gap for named files,
+without giving up parallelism (0.26.0, gh#20.1 / plant-tower-defense:G-025).** The only
+way this tool ever launches Godot, and only for the files named: one
+`godot --check-only --script res://…` per file, which does compile function and const
+bodies. Verified read-only against `.godot/` — no import, no cache write, single or
+concurrent — so a fan-out agent can check its own changed file(s) alongside siblings
+still mid-task, `import_check.py`, or a running game, without contending for the same
+lock everything else in this project shares. Findings land as `compile_error` next to
+the static ones; a file that compiles clean is named in `compiled OK:` rather than
+silently passing. **One real cost:** `--check-only` reads the *existing* class cache to
+resolve a `class_name` from another file — it does not build one — so on a project that
+has never been imported at all, a file referencing a sibling's `class_name` false-
+positives `Could not find type`. Needs one prior `--import` or launch (this project's
+own, or any earlier one in the same checkout); after that, the cache is shared
+read-only and every agent's `--require-compile` sees it.
+
 Exit codes follow the harness convention: `0` clean, `1` findings that count (errors,
 plus warnings under `--strict`), `2` could not run. Flags: `-p/--project`, `--json`,
 `--strict`, `--only <prefix>` (repeatable — filters the *report* while still scanning
@@ -1254,7 +1270,7 @@ the whole project, so cross-file names still resolve; this is what a fan-out age
 wants), `--no-strings`, `--baseline-write <p>` / `--baseline <p>` (same
 `file|rule|subject` key format as `lint_project.gd`, so only NEW findings gate on a
 project with a backlog), `--refresh-api`, `--force-refresh`, `--api <path>`,
-`--require-api`, `--godot`.
+`--require-api`, `--require-compile <file...>`, `--godot`.
 
 **Two config keys, both empty by default.** `name_check_extra_types` whitelists types a
 GDExtension registers at runtime, which the dump cannot see; `name_check_ignore`
