@@ -89,11 +89,11 @@ from pathlib import Path
 from typing import Optional  # noqa: F401
 
 
-# harness-version: 0.35.0
+# harness-version: 0.36.0
 # Version of the godot-selftest-harness this client was copied from. Compared against
 # the running game's own stamp by the `harness-version` verb, so a half-refreshed
 # install (new client, old autoload) is visible instead of mysterious.
-HARNESS_VERSION = "0.35.0"
+HARNESS_VERSION = "0.36.0"
 
 COMMANDS_FILE = "devtools_commands.json"
 RESULTS_FILE = "devtools_results.json"
@@ -1746,6 +1746,84 @@ def cmd_ping(args, project_path: Path):
 # next `launch`, so the developer's state is never more than one launch away.
 
 USERSTATE_DIR = "userstate_snapshot"
+USERSTATE_STAT = "userstate_stat.json"
+
+
+def userstate_stat_take(project_path: Path, user_dir: Path) -> int:
+    """Record (size, mtime) of every top-level user:// file at launch (gh#33 a).
+
+    Cheap and always on: `quit` diffs against it and NAMES what a live pass wrote,
+    so a save mutated by a verification run is a reported event, not a mystery
+    that resurfaces as failing headless tests two runs later.
+    """
+    stat = {}
+    try:
+        for f in sorted(user_dir.iterdir()):
+            if f.is_file():
+                st = f.stat()
+                stat[f.name] = [st.st_size, st.st_mtime]
+    except OSError:
+        return 0
+    out = project_path / ".devtools" / USERSTATE_STAT
+    out.parent.mkdir(exist_ok=True)
+    out.write_text(json.dumps({"user_dir": str(user_dir), "files": stat,
+                               "taken_unix": time.time()}), encoding="utf-8")
+    return len(stat)
+
+
+# The bridge's own files churn every run and are not the developer's state.
+_USERSTATE_OWN = {"devtools_owner.json", "devtools_command.json", "devtools_results.json",
+                  "devtools_log.jsonl", "findings_last.json", "ui_baseline.json"}
+
+
+def userstate_stat_diff(project_path: Path):
+    """(changed, created, deleted, user_dir) since userstate_stat_take, consuming the
+    record; None when there is no record. Pure bookkeeping, no printing."""
+    path = project_path / ".devtools" / USERSTATE_STAT
+    if not path.is_file():
+        return None
+    try:
+        rec = json.loads(path.read_text(encoding="utf-8"))
+        user_dir = Path(rec["user_dir"])
+        before = rec["files"]
+    except (OSError, ValueError, KeyError):
+        path.unlink(missing_ok=True)
+        return None
+    path.unlink(missing_ok=True)
+    if not user_dir.is_dir():
+        return None
+    now = {}
+    for f in user_dir.iterdir():
+        if f.is_file():
+            st = f.stat()
+            now[f.name] = [st.st_size, st.st_mtime]
+    own = _USERSTATE_OWN
+    changed = sorted(n for n in now if n in before and now[n] != before[n] and n not in own)
+    created = sorted(n for n in now if n not in before and n not in own)
+    deleted = sorted(n for n in before if n not in now and n not in own)
+    return changed, created, deleted, user_dir
+
+
+def userstate_stat_report(project_path: Path) -> None:
+    """Print which user:// files a run changed, created or deleted (gh#33)."""
+    diff = userstate_stat_diff(project_path)
+    if diff is None:
+        return
+    changed, created, deleted, user_dir = diff
+    if not (changed or created or deleted):
+        print(f"user://: no file changed during this run ({user_dir})")
+        return
+    parts = []
+    if changed:
+        parts.append("changed: " + ", ".join(changed))
+    if created:
+        parts.append("created: " + ", ".join(created))
+    if deleted:
+        parts.append("deleted: " + ", ".join(deleted))
+    print(f"user://: this run wrote the developer's REAL user data in {user_dir} -- "
+          + "; ".join(parts) + ". A save changed here is loaded by the game's next start, "
+          "including the headless test suite, and reads there as an unrelated failure. "
+          "`launch --snapshot-userstate` restores such files on quit.", file=sys.stderr)
 USERSTATE_MANIFEST = "manifest.json"
 USERSTATE_DEFAULT_GLOB = "*.save"
 
@@ -1854,6 +1932,7 @@ def cmd_quit(args, project_path: Path):
     if not isinstance(pid, int):
         print("  (no owner file, so there is no pid to confirm the exit against)")
         _quit_sweep(args, project_path, exclude=())
+        userstate_stat_report(project_path)
         userstate_restore(project_path, "quit")
         return
 
@@ -1862,6 +1941,7 @@ def cmd_quit(args, project_path: Path):
         if not pid_alive(pid):
             print(f"  pid {pid} exited")
             _quit_sweep(args, project_path, exclude=(pid,))
+            userstate_stat_report(project_path)
             userstate_restore(project_path, "quit")
             return
         time.sleep(0.2)
@@ -1880,6 +1960,7 @@ def cmd_quit(args, project_path: Path):
             print(f"  pid {pid} exited (slower than the {args.wait:g}s --wait, but it is gone; "
                   f"pass --wait {int(args.wait) + int(grace) + 2} to stop seeing this)")
             _quit_sweep(args, project_path, exclude=(pid,))
+            userstate_stat_report(project_path)
             userstate_restore(project_path, "quit")
             return
         time.sleep(0.2)
@@ -3555,6 +3636,10 @@ def cmd_launch(args, project_path: Path):
     # plant-tower-defense:G-047: a snapshot left behind by a game that died is put
     # back before anything else starts; then, if asked, take a fresh one.
     userstate_restore(project_path, "previous launch never quit cleanly")
+    try:
+        userstate_stat_take(project_path, get_user_data_path(project_path))
+    except FileNotFoundError:
+        pass  # no user:// yet (first ever launch); nothing to diff against
     snapshot_patterns = getattr(args, "snapshot_userstate", None)
     if snapshot_patterns is not None:
         try:
@@ -3635,8 +3720,10 @@ def cmd_launch(args, project_path: Path):
         print("  Subsequent calls: python tools/devtools.py <verb>")
     if bus_dir:
         print(f"  bus dir:  {data.get('bus_dir', bus_dir)}   (isolated)")
-        print(f"  user://:  {data.get('user_dir', '?')}   (SHARED - saves, "
-              "screenshots and UI baselines are not isolated)")
+        print(f"  user://:  {data.get('user_dir', '?')}   (SHARED - a pass that "
+              "exercises a persisted setting writes your real save, and an autoload "
+              "that reads it at startup carries that into your next headless test run; "
+              "`quit` names what changed, --snapshot-userstate puts it back)")
 
 
 def rect_arg(value: str):

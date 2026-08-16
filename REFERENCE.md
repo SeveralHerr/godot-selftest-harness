@@ -441,6 +441,20 @@ Notable behaviors:
   scale of 0 stops the game while the bus keeps answering well-formed stale values;
   `0.04` used to echo as `1.0 -> 0.0` from a 1-dp print. The reply names the floor;
   the client prints three decimals.
+- **`quit` names every `user://` file the run changed, created or deleted** (0.36.0,
+  gh#33) — always on, no flag: `launch` records size+mtime of the top-level `user://`
+  files, `quit` diffs and prints `user://: this run wrote the developer's REAL user
+  data … changed: highscore.save`, or `no file changed`. The bridge's own files are
+  excluded. This is the half of gh#33 that turns a silent mutation into a named one; a
+  save a live pass altered had leaked into the *headless* suite two runs later and read
+  as an unrelated failure. `--snapshot-userstate` (below) is the half that puts it back.
+  The `--isolated` launch line now says the failure, not the fact.
+- **`_T.assert_margin(values, threshold, margin, recorded, context)`** (0.36.0,
+  moving-in:G-057) — the threshold-margin gate a project had hand-rolled three times:
+  sweep a corpus, one number per item; fail on any item newly within `margin` of the
+  threshold, any recorded near-the-line value that moved, and any stale record. Returns
+  every violation on one line. Stage 4 plants a passing recorded set and a new
+  near-the-line item that must be refused.
 - **`launch --snapshot-userstate [GLOB ...]` / `quit` restore** (0.35.0,
   plant-tower-defense:G-047). `--isolated` isolates the bus and only the bus, so a
   live check that presses a key whose handler calls `_save()` writes the developer's

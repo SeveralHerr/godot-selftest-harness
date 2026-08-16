@@ -91,10 +91,10 @@ extends SceneTree
 ## (res://addons/godot_selftest/devtools_config.json key "test_dir", default
 ## "res://test/unit") for files named test_*.gd.
 
-# harness-version: 0.35.0
+# harness-version: 0.36.0
 ## Harness revision these files were copied from. See lint_project.gd / the
 ## `harness_version` bus verb; bump with .claude-plugin/plugin.json.
-const HARNESS_VERSION: String = "0.35.0"
+const HARNESS_VERSION: String = "0.36.0"
 
 const CONFIG_PATH: String = "res://addons/godot_selftest/devtools_config.json"
 const DEFAULT_TEST_DIR: String = "res://test/unit"
@@ -742,6 +742,43 @@ static func assert_gte(actual: Variant, threshold: Variant, context: String = ""
 	if actual >= threshold:
 		return ""
 	var msg: String = "Expected %s >= %s" % [str(actual), str(threshold)]
+	if context != "":
+		msg = "%s: %s" % [context, msg]
+	return msg
+
+
+## Threshold-margin gate (moving-in:G-057). A constant like MIN_SOLIDITY = 0.6 is
+## only as safe as the corpus items sitting near it: sweep the corpus, compute one
+## number per item, and fail when anyone NEW lands within `margin` of the threshold
+## or when a RECORDED near-the-line value moves. `values` is {name: measured},
+## `recorded` is {name: value_when_recorded} for the items already known to sit
+## within the margin. The same gate had been hand-rolled three times in one project
+## before it was lifted here. Returns "" on pass, else every violation on one line.
+static func assert_margin(values: Dictionary, threshold: float, margin: float,
+		recorded: Dictionary = {}, context: String = "", tolerance: float = 0.0001) -> String:
+	_assertions_run += 1
+	var problems: PackedStringArray = PackedStringArray()
+	var near_now: Dictionary = {}
+	for name: Variant in values:
+		var v: float = float(values[name])
+		if absf(v - threshold) <= margin:
+			near_now[str(name)] = v
+	for name: String in near_now:
+		if not recorded.has(name):
+			problems.append("%s=%.4f is within %.4f of threshold %.4f and is not in the recorded set (new near-the-line item)" % [
+				name, near_now[name], margin, threshold])
+		elif absf(float(recorded[name]) - near_now[name]) > tolerance:
+			problems.append("%s moved: recorded %.4f, now %.4f (threshold %.4f)" % [
+				name, float(recorded[name]), near_now[name], threshold])
+	for name: Variant in recorded:
+		if not values.has(name):
+			problems.append("%s is recorded near the line but absent from the values swept" % str(name))
+		elif not near_now.has(str(name)):
+			problems.append("%s=%.4f is recorded near the line but is now more than %.4f from threshold %.4f (stale record)" % [
+				str(name), float(values[name]), margin, threshold])
+	if problems.is_empty():
+		return ""
+	var msg: String = "; ".join(problems)
 	if context != "":
 		msg = "%s: %s" % [context, msg]
 	return msg

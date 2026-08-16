@@ -7010,3 +7010,53 @@ self-report API is the answer and the project now runs 0.32.0.
 `check_templates.py` — OK, all stages (client-side changes only; no bus verb touched,
 so the default run is the right gate and `--full` was run for 0.34.0 an hour ago on
 an identical `dev_tools.gd`).
+
+## 2026-08-16 - Upstreamed 1 open gap(s) from moving-in (harness 0.11.0, 0.16.0, 0.19.0, 0.21.0, 0.31.0, 0.33.0 (cache) / 0.31.0 (vendored))
+
+Pooled by `tools/upstream_gaps.py` from `C:\Users\gotmi\Documents\GitHub\moving-in\log-devtools.md`. Gap text is the project's,
+verbatim; only the id line is rewritten (qualified with the project name so
+ids from two projects cannot collide, plus a `source:` back-pointer).
+
+- Gap: **[G-057] — nothing measures a constant's MARGIN, and it keeps having to be
+  hand-rolled.** Three thresholds in this project now have bespoke edge-case gates:
+  `MIN_CEILING_AREA`, `MIN_SOLIDITY` (`test_shelf_finder.gd:293`), and now
+  `MIN_PLANES_FOR_SHELVES` — each a hand-written sweep plus a recorded table of the
+  models sitting near the line. `MAX_FRONT_COVER` still has none and cannot get one,
+  because `_front_cover()` is private. The shape is identical every time: sweep a
+  corpus, compute one number per item, record who is within epsilon of the threshold,
+  fail on anyone new joining or any recorded value moving.
+  - [moving-in:G-057] status: fixed | fixed-in: 0.36.0 | seen: 1 | harness: 0.33.0 (cache) / 0.31.0 (vendored) | source: moving-in 2026-08-16
+  - Improvement: a `_T.assert_margin(values: Dictionary, threshold: float,
+    margin: float, recorded: Dictionary) -> String` helper in the test harness would
+    collapse all three to one call and make the fourth cheap enough to write. The
+    pattern has now recurred three times in this project alone, which is the bar for
+    lifting it out of the project and into the harness.
+
+## 2026-08-16 — 0.36.0: loop tick four — gh#33 (the report half of the user:// problem) and a lifted test helper
+
+One new issue (gh#33), one new gap (moving-in:G-057). gh#33 is the consequence half
+of what 0.35.0's `--snapshot-userstate` guards against, filed by a session running
+0.33.0: a live pass altered the developer's real save, an autoload read it at the next
+start, and three headless tests went red for a reason nothing in the output pointed at.
+The reporter's fix (a) — stat `user://` at launch and name what changed at quit — is
+better than the opt-in flag alone, because it costs nothing and turns a silent mutation
+into a named one every time; shipped always-on. Fix (b) — the launch line says the
+failure, not the fact — shipped as written.
+
+- **[gh#33 — fixed] `quit` names every `user://` file the run changed / created /
+  deleted** (bridge files excluded), or says `no file changed`; `launch --isolated`'s
+  `user://` line now names the failure mode. Unit-tested (changed/created/deleted +
+  bridge-file exclusion; untouched run reports nothing). Together with 0.35.0's
+  `--snapshot-userstate` this closes both halves of the issue.
+- **[moving-in:G-057 — fixed] `_T.assert_margin(values, threshold, margin, recorded)`**
+  — the threshold-margin gate one project had hand-rolled three times. Stage 4 plants
+  a recorded set that passes and a new near-the-line item that must be refused; the
+  second planted test PASSES only when the helper FAILS, so a helper that always
+  returns "" fails the stage by construction.
+
+- Gap: no new gap this turn.
+
+**Validation run this turn:** `record_version.py --record` then `--check` OK at 0.36.0
+(14 files, 56 verbs + 58 CLI). `unittest discover -s tools` — 51 OK (2 new).
+`check_templates.py` — OK, all stages, stage 4 line quoting the assert_margin control
+(no bus verb touched; `--full` last ran clean on 0.34.0's identical `dev_tools.gd`).

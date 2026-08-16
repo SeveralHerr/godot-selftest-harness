@@ -1639,6 +1639,36 @@ def check_run_tests_py(godot, scratch):
     finally:
         planted.unlink(missing_ok=True)
 
+    # moving-in:G-057 (0.36.0): _T.assert_margin. One passing test (the recorded
+    # set matches) and one that must FAIL on a new near-the-line item; the FAIL
+    # is the positive control - a helper that always returns "" passes the first.
+    margin_test = scratch / "test" / "unit" / "test_margin_control.gd"
+    margin_test.write_text(
+        "extends RefCounted"                                                       + chr(10) +
+        "var _T"                                                                   + chr(10) +
+        ""                                                                         + chr(10) +
+        "func test_margin_recorded_set_passes() -> String:"                        + chr(10) +
+        BT + "return _T.assert_margin({" + BQ + "a" + BQ + ": 0.62, " + BQ + "b" + BQ + ": 0.9, " + BQ + "c" + BQ + ": 0.58}, 0.6, 0.05, {" + BQ + "a" + BQ + ": 0.62, " + BQ + "c" + BQ + ": 0.58}, " + BQ + "solidity" + BQ + ")" + chr(10) +
+        ""                                                                         + chr(10) +
+        "func test_margin_new_near_the_line_item_fails() -> String:"               + chr(10) +
+        BT + "var err: String = _T.assert_margin({" + BQ + "a" + BQ + ": 0.62, " + BQ + "d" + BQ + ": 0.61}, 0.6, 0.05, {" + BQ + "a" + BQ + ": 0.62})" + chr(10) +
+        BT + "if err == " + BQ + BQ + ":" + chr(10) +
+        BT + BT + "return " + BQ + "assert_margin passed a NEW near-the-line item d=0.61" + BQ + chr(10) +
+        BT + "if not err.contains(" + BQ + "d=0.6100" + BQ + ") or not err.contains(" + BQ + "not in the recorded set" + BQ + "):" + chr(10) +
+        BT + BT + "return " + BQ + "assert_margin failed for the wrong reason: " + BQ + " + err" + chr(10) +
+        BT + "return " + BQ + BQ + chr(10),
+        encoding="utf-8")
+    try:
+        margin_run = run_godot(godot, scratch,
+                               ["--script", "res://tools/run_tests.gd", "--", "--file", "test_margin_control"])
+        if margin_run.returncode != 0 or "[PASS] test_margin_recorded_set_passes" not in margin_run.stdout \
+                or "[PASS] test_margin_new_near_the_line_item_fails" not in margin_run.stdout:
+            return fail("assert_margin control: expected both planted tests to PASS (the "
+                        "second passes only when the helper FAILS a new near-the-line item); got exit %d:\n%s"
+                        % (margin_run.returncode, margin_run.stdout[-1500:]))
+    finally:
+        margin_test.unlink(missing_ok=True)
+
     # Clean-suite control: no planted defect -> the wrapper must not cry wolf.
     clean = subprocess.run(
         [sys.executable, str(scratch / "tools" / "run_tests.py"),
@@ -1653,7 +1683,8 @@ def check_run_tests_py(godot, scratch):
     print("stage 4 tests: run_tests.py catches a test that aborts AFTER a real "
           "assertion already ran (invisible to both the return value and [VACUOUS]) "
           "-- run_tests.gd itself reports it clean; the wrapper does not; unfiltered it "
-          "printed %r and said nothing under --filter" % declared_line)
+          "printed %r and said nothing under --filter; assert_margin passed the recorded "
+          "set and refused a new near-the-line item" % declared_line)
     return True
 
 
