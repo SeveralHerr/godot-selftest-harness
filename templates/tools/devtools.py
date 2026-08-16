@@ -89,11 +89,11 @@ from pathlib import Path
 from typing import Optional  # noqa: F401
 
 
-# harness-version: 0.22.0
+# harness-version: 0.23.0
 # Version of the godot-selftest-harness this client was copied from. Compared against
 # the running game's own stamp by the `harness-version` verb, so a half-refreshed
 # install (new client, old autoload) is visible instead of mysterious.
-HARNESS_VERSION = "0.22.0"
+HARNESS_VERSION = "0.23.0"
 
 COMMANDS_FILE = "devtools_commands.json"
 RESULTS_FILE = "devtools_results.json"
@@ -1313,8 +1313,9 @@ def cmd_performance(args, project_path: Path):
     """Get performance metrics.
 
     Data keys read: fps (mean over the window since 0.22.0), fps_instant, fps_min,
-    fps_max, fps_samples, fps_window_sec, fps_settling, fps_first_half,
-    fps_second_half, nodes, node_baseline, node_growth, node_types_delta.
+    fps_max, fps_max_trustworthy, fps_max_caveat, fps_samples, fps_window_sec,
+    fps_settling, fps_first_half, fps_second_half, nodes, node_baseline,
+    node_growth, node_types_delta.
     """
     cmd_args = {}
     if getattr(args, "reset_baseline", False):
@@ -1347,6 +1348,11 @@ def cmd_performance(args, project_path: Path):
             print(f"FPS:              mean {data['fps']:.1f}  min {float(data.get('fps_min', 0)):.1f}  "
                   f"max {float(data.get('fps_max', 0)):.1f}  n={samples} frames "
                   f"({float(data.get('fps_window_sec', 0)):.2f}s){settling}")
+            # H-060: headless fps_max reads five figures and looks broken rather
+            # than merely uninformative - say which number not to trust, same as
+            # the geometry_caveat convention.
+            if data.get("fps_max_caveat"):
+                print(f"                  fps_max NOT trustworthy: {data['fps_max_caveat']}")
         elif "fps_samples" in data:
             print(f"FPS:              {data['fps']:.1f}  (single instantaneous read; pass --frames N for a measured window)")
         else:
@@ -3481,6 +3487,44 @@ def cmd_reachable_ui(args, project_path: Path):
     print_geometry_caveat(data, "reachable-ui", only_if_suspect=True)
 
 
+def cmd_first_frame(args, project_path: Path):
+    """What a player would see right now, in one call (bus verb: first_frame,
+    H-059). Data keys read: tree_paused, cursor_mode, visible_canvas_layers,
+    topmost_control, viewport, geometry_trustworthy, geometry_caveat.
+
+    Answers a narrower question than findings/reachable-ui do: not "is anything
+    wrong" or "can a finger hit this ONE control", but "what IS on screen" -
+    which CanvasLayers are visible and in what paint order, which single Control
+    everything else is drawn under, whether the tree is paused, what the cursor
+    is doing. The thing a human reads off a screenshot in half a second.
+    """
+    result = send_command(project_path, "first_frame", {})
+    if not result["success"]:
+        print(f"Failed: {result['message']}", file=sys.stderr)
+        sys.exit(1)
+    data = result.get("data") or {}
+    if "visible_canvas_layers" not in data:
+        print(f"first-frame: the reply carried no 'visible_canvas_layers' key. "
+              f"Keys: {sorted(data)}", file=sys.stderr)
+        sys.exit(1)
+    print(result.get("message", ""))
+    if data.get("tree_paused"):
+        print("  TREE IS PAUSED")
+    print(f"  cursor: {data.get('cursor_mode', 'UNKNOWN')}")
+    print("  CanvasLayers (paint order, back to front):")
+    for cl in data["visible_canvas_layers"]:
+        print(f"    layer {cl.get('layer')}  {cl.get('path')}")
+    top = data.get("topmost_control") or {}
+    if top:
+        r = top.get("rect") or {}
+        label = f' "{_printable(top["text"])}"' if top.get("text") else ""
+        print(f"  topmost: {top.get('path')}{label}  [{top.get('type')}] "
+              f"{r.get('x'):.0f},{r.get('y'):.0f} {r.get('w'):.0f}x{r.get('h'):.0f}")
+    else:
+        print("  topmost: (no on-screen Control found)")
+    print_geometry_caveat(data, "first-frame", only_if_suspect=True)
+
+
 def cmd_find_nodes(args, project_path: Path):
     """Find nodes by class/group/method and property predicates (bus verb:
     find_nodes, gather:G-109). Data keys read: nodes, count, truncated."""
@@ -3973,6 +4017,13 @@ def main():
         help="Every Control a finger or cursor could actually hit this frame "
              "(off-screen and input-blocked ones are named, not omitted)")
     p.set_defaults(func=cmd_reachable_ui)
+
+    # first-frame
+    p = subparsers.add_parser(
+        "first-frame",
+        help="What a player would see right now: visible CanvasLayers, the "
+             "topmost Control, paused state, cursor mode")
+    p.set_defaults(func=cmd_first_frame)
 
     # sample-pixels
     p = subparsers.add_parser(

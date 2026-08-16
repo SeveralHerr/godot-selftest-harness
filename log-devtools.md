@@ -5093,11 +5093,17 @@ pair of concurrent sessions.
   - Improvement: `upstream_gaps.py` should detect a duplicate id in the *source* log and
     append both, suffixing the second (`G-027b`) and saying so, rather than pooling the
     first and dropping the second. Then build `first-frame`.
+  - Update (0.23.0): **the lost idea half is shipped** — `first_frame` is built
+    (`dev_tools.gd` `_cmd_first_frame` / `devtools.py first-frame`). The pooling bug
+    itself is not: `upstream_gaps.py` still drops the second of two source entries
+    sharing one id, silently. This gap stays `open` for that half; do not read the
+    verb's existence as the id-collision bug being fixed too — the earlier version of
+    this line claimed exactly that, and it was wrong.
 
 - Gap: **`performance`'s `fps_max` is meaningless headless** — 58823 fps from a 17 µs
   frame, because a headless frame does no work and waits for nothing. Harmless (min and
   mean are the numbers a gate reads) but the line reads as broken.
-  - [H-060] status: open | seen: 1 | harness: 0.22.0
+  - [H-060] status: fixed | fixed-in: 0.23.0 | seen: 1 | harness: 0.22.0
   - Improvement: cap or annotate `fps_max` when `DisplayServer.get_name() == "headless"`,
     the way geometry findings already carry the headless caveat.
 
@@ -5107,3 +5113,201 @@ Confirmed to FAIL under mutation - eight one-line mutations in one run (mutation
 `python -m unittest discover -s tools` — 35 tests OK. Real-project `name_check.py`
 runs as in item 9. `python tools/record_version.py --record` then `--check` — OK at
 `0.22.0`.
+
+## 2026-08-15 - Upstreamed 4 open gap(s) from plant-tower-defense (harness 0.18.0, 0.19.0, 0.21.0)
+
+Pooled by `tools/upstream_gaps.py` from `C:\Users\gotmi\Documents\GitHub\plant-tower-defense\log-devtools.md`. Gap text is the project's,
+verbatim; only the id line is rewritten (qualified with the project name so
+ids from two projects cannot collide, plus a `source:` back-pointer).
+
+- Gap: **a confirm window measured in seconds is shorter than a handful of bus
+  round-trips, and nothing in the reply says the state expired** — the window is
+  `Game.UPROOT_CONFIRM_SECONDS = 4.0`. Arming it with `press` and then reading the
+  button took two calls at ~1s each, so `run-method --method has_theme_color_override`
+  returned `Result: false` and `get-state --property text` returned `Uproot (+6)`,
+  both well-formed answers describing a state that had already lapsed. A second
+  attempt read `_uproot_left: 0.0` *after* a press, which looked like the press had
+  failed when in fact it had committed an arming left over from the previous block.
+  Workaround that worked: `python tools/devtools.py set-game-speed 0.02` (clamped to
+  `Game speed: 1.0 -> 0.0`), which freezes the countdown while the bridge keeps
+  answering, then `set-game-speed 1.0` to watch the expiry land.
+  - [plant-tower-defense:G-022] status: fixed | fixed-in: 0.23.0 | seen: 1 | harness: 0.19.0 | source: plant-tower-defense 2026-08-15
+  - Improvement: a `with-time-frozen` flag on `press`/`run-method` that pins
+    `time_scale` to 0 for the duration of the call, or — cheaper — document
+    `set-game-speed 0` as the standard technique for observing any state with a
+    lifetime shorter than a few seconds. `step-time` already exists for advancing
+    time deterministically; the inverse (hold it still while I look) is the missing
+    half, and every short-lived cue — a combo window, a hitstop, an i-frame, this
+    confirm — hits it.
+
+- Gap: **`scaffold_install.py detect_main_scene()` does not resolve a `uid://` main scene**
+  — `project.godot` here holds `run/main_scene="uid://ce2dtga2f08e"` (what the Godot 4.4+
+  editor writes by default). The installer's regex returns that string verbatim, so
+  `full` printed `[full] detected: main_scene=uid://ce2dtga2f08e` and would have written a
+  `uid://` into `devtools_config.json` on a **fresh** install. This project only escaped it
+  because `main_scene` was already project-owned as `res://game/title.tscn`. The scaffold
+  doc compounds it: step 7 tells the agent to "open the main scene" to detect
+  `hud_layer_name`, which cannot be done from a uid without the same resolution step.
+  - [plant-tower-defense:G-024] status: fixed | fixed-in: 0.23.0 | seen: 1 | harness: 0.21.0 | source: plant-tower-defense 2026-08-15
+  - Improvement: in `detect_main_scene()`, when the value starts with `uid://`, grep the
+    project's `*.tscn` headers (`uid="uid://…"`) and `*.uid` sidecars for the id and return
+    the owning `res://` path; fall back to the raw uid only if nothing matches, and say so.
+
+- Gap: **a subagent has no parallel-safe way to compile what it writes** — the one
+  gate documented as concurrency-safe is `name_check.py`, and it says of itself
+  `NOT COVERED: a clean name_check resolves names, it does not compile the file`.
+  So the agent implementing `project_identity` shipped a handler and four test
+  methods that had never been parsed by the engine and never executed; it reported
+  this honestly and worked around it by porting `_git_identity` line-for-line to
+  Python and running that against the repo instead. That workaround happened to be
+  sound, and is not one the next agent should have to invent.
+  - [plant-tower-defense:G-025] status: open | seen: 1 | harness: 0.21.0 | source: plant-tower-defense 2026-08-15
+  - Improvement: a `--project-copy` mode on `lint_project.gd` / `run_tests.gd` that
+    imports into a private `.godot/` under a temp dir, so N agents can type-check
+    and run tests concurrently. Failing that, `name_check --require-compile` that
+    shells one `godot --check-only` per changed file — slower than a full lint but
+    parallel-safe, and it would turn "names resolve" into "this file builds".
+
+- Gap: **the bus cannot pass `null` to a typed Object parameter, so a losing path a
+  unit test drives directly is unreachable from the bridge** —
+  `run-method --node /root/Game --method _on_pest_escaped --args "[null]"` answered
+  `Failed: Argument 0 of /root/Game._on_pest_escaped(): cannot convert Nil (null) to
+  Object`. That signature takes `_pest: Pest` and is deliberately called with null by
+  both `test_lane_pressure_is_committed_even_when_the_last_life_is_lost_mid_wave` and
+  the game's own losing branch, so GDScript accepts it and only the bus does not.
+  Workaround: `set-state game_over true` then `run-method _end_run '["..."]'`, which
+  reaches the same UI but skips the life-loss bookkeeping the real path performs —
+  i.e. the workaround verifies less than the call it replaces, quietly.
+  - [plant-tower-defense:G-026] status: fixed | fixed-in: 0.23.0 | seen: 1 | harness: 0.21.0 | source: plant-tower-defense 2026-08-15
+  - Improvement: marshal a JSON `null` to the parameter's own nil-able default rather
+    than to a bare `Nil` Variant — GDScript permits `null` for any Object-typed
+    parameter, so the bridge is stricter than the language it drives. Failing that,
+    say so in the error: "the bus cannot type a null Object argument; call a wrapper
+    or set the state directly" would have saved the guessing.
+
+## 2026-08-15 - Upstreamed 1 open gap(s) from plant-tower-defense (harness 0.18.0, 0.19.0, 0.21.0)
+
+Pooled by `tools/upstream_gaps.py` from `C:\Users\gotmi\Documents\GitHub\plant-tower-defense\log-devtools.md`. Gap text is the project's,
+verbatim; only the id line is rewritten (qualified with the project name so
+ids from two projects cannot collide, plus a `source:` back-pointer).
+
+- Gap: **in a fan-out, `reach` grades a run against the whole repo's dirty set, so
+  a run that fully verified its own slice is downgraded for someone else's** —
+  `verify_ledger record` answered
+  `downgraded warranted -> insufficient: no changed file was loaded at runtime
+  (game/corn_cobbler.gd, game/pest.gd)`. Both of those belong to two subagents
+  still mid-task; my own three items were committed moments earlier, so by record
+  time the working tree's changed set was entirely other people's work. The run
+  did load and exercise `game/hud.gd` and `game/game.gd` — it simply got no credit,
+  because reach is computed from `git status` rather than from what the run
+  claimed to be about. The inverse error is the dangerous one and it is equally
+  available: had I committed nothing, an agent's untouched files would have been
+  silently counted as *my* denominator.
+  - [plant-tower-defense:G-027] status: open | seen: 1 | harness: 0.21.0 | source: plant-tower-defense 2026-08-15
+  - Improvement: let `record` take `--about PATH...` (or read it from the run.json)
+    naming the files this run set out to verify, and compute reach against that
+    intersected with the changed set. Absent that, `reach` should at least report
+    the two numbers separately — "reached 2/2 of the files this run named, 0/2 of
+    the rest of the dirty tree" — instead of collapsing them into one verdict that
+    is wrong in both directions depending on commit timing.
+
+## 2026-08-15 — 0.23.0: closing the loop — 7 stale-closed issues, 6 real fixes, and a live collision
+
+Asked (`/loop`, self-paced) to read this repo's open GitHub issues plus the harness's own
+and `plant-tower-defense`'s gaps logs, rank the top ten, and ship. Pooled 4 new gaps from
+`plant-tower-defense` (`G-022`, `G-024`..`G-026`; `G-023`/a duplicate `G-024` were
+`status: fixed` in the source and correctly skipped) and confirmed `harness-test-1` had
+nothing new. Reading the nine open `gh#` issues against `main` first (0a) found **seven
+were already fixed** — `gh#11`–`#17`, closed in 0.21.0/0.22.0 and tagged by id in the
+source, just never closed on the tracker. That is now `PURPOSE.md`'s newest commitment:
+closing the report is part of the fix.
+
+Shipped, ranked:
+
+1. **`gh#19.1` / `plant:G-024` — `detect_main_scene()` resolves `uid://`.** Godot 4.4+
+   writes `run/main_scene` as a uid by default; the installer returned it verbatim, which
+   only read as fine on `plant-tower-defense` because `main_scene` was already
+   project-owned there. Now resolved against every `.tscn`'s `uid=` header and every
+   `.uid` sidecar, falling back to the raw uid (loudly) only if nothing claims it.
+   Verified directly against `plant-tower-defense`'s real `project.godot`
+   (`uid://ce2dtga2f08e` → `res://game/title.tscn`, matching the value the issue said
+   only survived by luck).
+2. **`gh#18` / `gh#19.3` — `ensure_uid_sidecars()` says "none needed".** The
+   nothing-to-mint path was the one silent exit in a function that names every other
+   outcome. Verified against `plant-tower-defense`'s `game/*.gd` (all already sidecared):
+   prints `= .uid sidecars: none needed (5 installed .gd file(s) already had one)`.
+3. **`gh#19.2` — step 7's `hud_layer_name` detection covers a runtime-built HUD.** Falls
+   back to the first `CanvasLayer` found anywhere under `scan_root`, not just the main
+   scene, before defaulting to `"HUD"` — the case the original doc's only fallback got
+   right by luck.
+4. **`gh#19.4` — `templates/CLAUDE.harness.md` regains its lint-flags line**, updated for
+   the 0.21.0 orphan-scan flip (`--no-orphans` in, `--find-orphans` out).
+5. **`plant:G-026` — the bus accepts `null` for an Object-typed `run-method` arg.**
+   GDScript itself permits `null` for any Object-typed parameter; `_coerce_arg` did not,
+   so a losing path called by both a unit test and the game's own code
+   (`_on_pest_escaped(_pest: Pest)`) was unreachable from the bridge. One early-return in
+   `_coerce_arg` before the match block.
+6. **`H-059` — the `first_frame` verb**, rebuilt after moving-in's second `G-027` was lost
+   to the id-collision `upstream_gaps.py` still has (that bug itself stays open, filed as
+   `H-059` originally — fixing the idea did not fix the pooling bug that ate it).
+   `{tree_paused, cursor_mode, visible_canvas_layers, topmost_control, viewport}` in one
+   call. `topmost_control` needs no z-index math — Godot paints children after parents and
+   later siblings after earlier ones, so the last visible on-screen Control a depth-first
+   walk finds is the last one painted, by construction.
+7. **`H-060` — `performance`'s `fps_max` carries a headless caveat**, same
+   `*_trustworthy`/`*_caveat` convention as `geometry_trustworthy`.
+8. **`plant:G-022` — documented, not built.** `set-game-speed 0` as the standard technique
+   for reading a state with a lifetime shorter than a few round-trips is now next to
+   `step_time` in `REFERENCE.md`: freeze, read, unfreeze. No code needed; the capability
+   already existed and only the pointer was missing.
+9. **Bookkeeping — closed `gh#11`–`#16` on the tracker**, each comment naming the fix's
+   location and version so a reader does not have to re-derive it.
+10. **`PURPOSE.md`** gains the closing-the-loop commitment (above).
+
+- Not done, deliberately: **`plant:G-025`** (a parallel-safe compile check — `.godot/` per
+  worktree, or `name_check.py --require-compile` shelling one `godot --check-only` per
+  changed file) is a real structural gap but a session of its own, not a rider on nine
+  other changes; left open rather than rushed. `gh#17`'s fix is real but only on
+  `release/0.22.0`, unmerged to `master` — this turn does not land it.
+
+- Value: **warranted, with a caveat the session did not expect.** `detect_main_scene`'s
+  fix was verified against the real project that reported it before being trusted, per
+  [H-033] — cheap (one Python call, no engine) and decisive (produced exactly the value
+  the issue said only survived by luck). But the same check on `ensure_uid_sidecars`
+  surfaced something outside the plan entirely (below).
+
+- Gap: **`plant-tower-defense`'s installed harness was already refreshed to a `0.23.0`
+  build — content-identical (byte-for-byte modulo CRLF) to this session's own
+  independently-written `dev_tools.gd`, including the exact `_cmd_first_frame` helper
+  name and the exact H-060/G-026 code-comment wording — and `log-devtools.md` gained a
+  new pooled entry (`G-027`, an unrelated `reach` gap) mid-session, written by a process
+  that was not this one.** This session never scaffolded `plant-tower-defense`, never
+  wrote to its `addons/`, and ran `upstream_gaps.py` against it exactly once, before
+  `G-027` existed in its source log. The only explanation consistent with all of that is
+  a second, live session working the *same `git status` on this exact checkout* at the
+  same time, converging on the same fixes from the same public inputs (this log, the
+  GitHub issues) closely enough to be indistinguishable from a shared source — which
+  `PURPOSE.md`'s "It shares the machine" commitment was written for buses, not for a
+  working tree, and evidently needed to be. No file conflict resulted (every edit this
+  session made landed as a clean, isolated hunk), but committing here without checking
+  first would have been exactly the risk gh#17 named for a *dirty* tree, one level up: a
+  release built by reading a snapshot that moved under it.
+  - [H-061] status: open | seen: 1 | harness: 0.23.0
+  - Improvement: the same discipline 0a already prescribes for a stale HEAD — re-run
+    `git status`/`git log` immediately before commit, not just at the start — should be
+    stated for the working tree generally, not only for the sha. Whether two sessions
+    should ever share one checkout at all (vs. one `git worktree` each) is a question for
+    the user, not something a gaps-log entry can resolve on its own.
+
+**Validation run this turn:** `python .claude/skills/harness-release/bump_version.py
+0.22.0 0.23.0` — all 13 shipped files + `plugin.json` `stamp=1 const=1`.
+`python tools/record_version.py --record` then `--check` — OK at `0.23.0`, 13 shipped
+files, 51 bus verbs + 53 CLI commands documented (first catching two undocumented-verb
+misses on `first-frame`'s hyphenated CLI form, fixed before the second `--check`).
+`python tools/check_templates.py` — OK, all five stages, no new FAIL; the new verbs
+(`first_frame`, the null-Object coercion, the `fps_max` caveat) are not yet exercised by
+a dedicated `check_templates.py` stage — validated instead against real state
+(`detect_main_scene` and `ensure_uid_sidecars` against `plant-tower-defense`'s actual
+files, above) and by the source-level correctness of the fix; adding contract-table
+coverage for them is follow-up work, not done this turn. `python -m unittest discover -s
+tools` — 35 tests OK.

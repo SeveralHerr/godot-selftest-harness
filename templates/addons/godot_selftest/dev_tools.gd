@@ -14,14 +14,14 @@ extends Node
 ## extension loads AFTER the generic handlers, a project may override a generic
 ## verb by registering the same action string (last-writer-wins).
 
-# harness-version: 0.22.0
+# harness-version: 0.23.0
 # --- Constants ---
 
 ## Version of the godot-selftest-harness these files were copied from. Reported by the
 ## `harness_version` verb and stamped into every copied tool script, so a gap logged
 ## against a project can name the version it was seen on, and a refresh can tell a
 ## stale file from a customized one. Bump with .claude-plugin/plugin.json.
-const HARNESS_VERSION: String = "0.22.0"
+const HARNESS_VERSION: String = "0.23.0"
 
 ## Default bus filenames. With a session id (see _resolve_session) the id is spliced in
 ## before the extension, so two instances can each own a bus in the same user:// dir.
@@ -549,6 +549,7 @@ func _register_generic_handlers() -> void:
 	register_command("curve", _cmd_curve)
 	register_command("reachable_ui", _cmd_reachable_ui)
 	register_command("findings", _cmd_findings)
+	register_command("first_frame", _cmd_first_frame)
 
 
 func _load_extension() -> void:
@@ -1435,6 +1436,16 @@ func _coerce_arg(value: Variant, target_type: int) -> Dictionary:
 	if target_type == TYPE_NIL or from_type == target_type:
 		return {"ok": true, "value": value, "reason": ""}
 
+	# GDScript itself accepts `null` for any Object-typed parameter (Node,
+	# Resource, a custom class, ..) - it is the language's own nilable case,
+	# not a coercion. The bus was stricter than the language it drives: a
+	# losing path called with a null Object arg by both a unit test and the
+	# game's own code (`_on_pest_escaped(_pest: Pest)`) was unreachable from
+	# run-method, which "cannot convert Nil (null) to Object" made read like a
+	# bug in the caller rather than a bus limitation (plant-tower-defense:G-026).
+	if from_type == TYPE_NIL and target_type == TYPE_OBJECT:
+		return {"ok": true, "value": null, "reason": ""}
+
 	match target_type:
 		TYPE_VECTOR2, TYPE_VECTOR2I:
 			var comps: Array = _numeric_components(value, ["x", "y"], 2, 2)
@@ -1791,6 +1802,15 @@ func _cmd_performance(args: Dictionary) -> Dictionary:
 		"fps_instant": fps_instant,
 		"fps_min": window.get("min", fps_instant),
 		"fps_max": window.get("max", fps_instant),
+		# Headless: a frame does no rendering work and waits on nothing, so
+		# fps_max reads five figures (58823 from a 17us frame) and looks
+		# broken rather than merely uninformative (H-060). fps (mean) and
+		# fps_min are still the numbers a gate reads; this just says which
+		# one not to trust, the way geometry findings already do.
+		"fps_max_trustworthy": DisplayServer.get_name() != "headless",
+		"fps_max_caveat": ("" if DisplayServer.get_name() != "headless" else
+			"measured HEADLESS: an idle frame does no rendering work, so fps_max is not " +
+			"a ceiling a player would ever see - read fps (mean) and fps_min instead"),
 		"fps_samples": frames,
 		"fps_window_sec": window.get("seconds", 0.0),
 		"fps_settling": window.get("settling", false),
@@ -5170,6 +5190,85 @@ func _nearest_scroll_container(control: Control) -> ScrollContainer:
 			return parent as ScrollContainer
 		parent = parent.get_parent()
 	return null
+
+
+## What a player would see right now, in one call (H-059 -- moving-in's second
+## `G-027`, filed the same turn as its first and lost to an id collision because
+## `upstream_gaps.py` keys on id: two entries with one id pool as one, and the
+## second is silently the one that never arrives). Every other verb answers a
+## narrower question -- reachable_ui answers "can a finger hit THIS ONE control",
+## performance answers "is it fast" -- and none of them answer "what IS the
+## screen showing", which is the one state every game has and the thing a human
+## glancing at a screenshot reads in half a second.
+func _cmd_first_frame(_args: Dictionary) -> Dictionary:
+	var layers: Array = []
+	_collect_canvas_layers(get_tree().root, layers)
+	layers.sort_custom(func(a: Dictionary, b: Dictionary) -> bool: return int(a["layer"]) < int(b["layer"]))
+
+	var vp: Vector2 = _screen_reference_rect().size
+	var topmost: Dictionary = {}
+	_find_topmost_control(get_tree().root, vp, topmost)
+
+	var mouse_mode: String
+	match Input.get_mouse_mode():
+		Input.MOUSE_MODE_VISIBLE: mouse_mode = "VISIBLE"
+		Input.MOUSE_MODE_HIDDEN: mouse_mode = "HIDDEN"
+		Input.MOUSE_MODE_CAPTURED: mouse_mode = "CAPTURED"
+		Input.MOUSE_MODE_CONFINED: mouse_mode = "CONFINED"
+		Input.MOUSE_MODE_CONFINED_HIDDEN: mouse_mode = "CONFINED_HIDDEN"
+		_: mouse_mode = "UNKNOWN"
+
+	var message: String = "%d visible CanvasLayer(s)" % layers.size()
+	if topmost.is_empty():
+		message += "; no on-screen Control found"
+	else:
+		message += "; topmost Control is %s '%s'" % [topmost["type"], topmost["path"]]
+	if bool(get_tree().paused):
+		message += " -- TREE IS PAUSED"
+
+	return {
+		"success": true,
+		"message": message,
+		"data": {
+			"tree_paused": bool(get_tree().paused),
+			"cursor_mode": mouse_mode,
+			"visible_canvas_layers": layers,
+			"topmost_control": topmost,
+			"viewport": {"w": vp.x, "h": vp.y},
+			"geometry_trustworthy": _geometry_caveat().is_empty(),
+			"geometry_caveat": _geometry_caveat(),
+		},
+	}
+
+
+func _collect_canvas_layers(node: Node, out: Array) -> void:
+	if node is CanvasLayer:
+		var cl: CanvasLayer = node as CanvasLayer
+		if cl.visible:
+			out.append({"path": str(cl.get_path()), "layer": cl.layer, "name": str(cl.name)})
+	for child: Node in node.get_children():
+		_collect_canvas_layers(child, out)
+
+
+## `out` is a single-entry Dictionary used as an out-param, overwritten on every
+## visible on-screen Control found. Godot paints children after parents and a
+## later sibling after an earlier one, so the LAST one a depth-first walk finds
+## is the last one painted -- the topmost, by construction, with no z-index or
+## occlusion math needed.
+func _find_topmost_control(node: Node, vp: Vector2, out: Dictionary) -> void:
+	if node is Control:
+		var control: Control = node as Control
+		if _is_effectively_visible(control):
+			var rect: Rect2 = _screen_rect_of(control)
+			if rect.size.x > 0.0 and rect.size.y > 0.0 and Rect2(Vector2.ZERO, vp).intersects(rect):
+				out.clear()
+				out["path"] = str(control.get_path())
+				out["type"] = control.get_class()
+				out["text"] = _get_control_text(control)
+				out["rect"] = {"x": rect.position.x, "y": rect.position.y,
+					"w": rect.size.x, "h": rect.size.y}
+	for child: Node in node.get_children():
+		_find_topmost_control(child, vp, out)
 
 
 ## Every check the harness can run against a live game, in one call, normalized

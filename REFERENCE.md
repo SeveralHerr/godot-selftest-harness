@@ -382,7 +382,7 @@ get_ui_snapshot, get_node_bounds, save_ui_baseline, ui_snapshot_diff,
 list_commands, touch_press, touch_release, touch_drag, touch_clear, touch_list,
 set_feature, tilemap_cells, tilemap_region, scripts_seen, canvas_scale,
 set_resolution, harness_version, find_nodes, press, raycast, sample_pixels,
-reachable_ui, findings, mouse_move, reload
+reachable_ui, findings, mouse_move, reload, first_frame
 ```
 
 Notable behaviors:
@@ -403,6 +403,12 @@ Notable behaviors:
   that change" looks like from inside one window. A single `get_frames_per_second()`
   read straight after a quality-preset switch produced `HIGH 110 / MEDIUM 50 / LOW 105`
   and nearly reported the slowest preset as the fastest. `findings` uses the window too.
+- **`performance`'s `fps_max` carries a headless caveat** (H-060). A headless frame does
+  no rendering work and waits on nothing, so `fps_max` reads five figures (58823 from a
+  17µs frame) — real, but not a ceiling a player would ever see. `fps_max_trustworthy` /
+  `fps_max_caveat` name it, the same convention as `geometry_trustworthy` /
+  `geometry_caveat`; `fps` (mean) and `fps_min` are unaffected and remain the numbers a
+  gate reads.
 - **`performance` reports in-tree node growth** (0.22.0, moving-in:G-030). A node
   parented under a live node is never an orphan, so a UI that adds a layer per visit
   reports orphan growth `+0` forever. `node_baseline` / `node_growth` are sampled and
@@ -556,6 +562,13 @@ Notable behaviors:
   to a literal per-segment descent, so any path the harness printed resolves.
 - **`step_time`** advances the running game by roughly N game-seconds with
   `Engine.time_scale` pinned to 1.0. Read the sharp edge below before trusting it.
+- **To observe a state with a lifetime shorter than a few bus round-trips — a confirm
+  window, a combo timer, an i-frame, a hitstop — freeze it first with
+  `set-game-speed 0` (clamped to `0.0`), then read it, then `set-game-speed 1.0`**
+  (plant-tower-defense:G-022). A 4-second confirm window read as already-expired
+  twice across two ~1s calls; freezing first is the standard technique, and it is the
+  inverse of `step_time`: that one advances time deterministically, this one holds it
+  still while you look.
 - **`touch_press` / `touch_release` / `touch_drag` / `touch_clear` / `touch_list`**
   dispatch real `InputEventScreenTouch` / `InputEventScreenDrag` events, so multi-touch
   paths are exercisable. Malformed positions are rejected rather than read as the
@@ -689,6 +702,17 @@ Notable behaviors:
   panel is not a layout fault, so it correctly reported 0 issues for a feature that had a
   key binding, a desktop button, a passing suite and no way in on a phone. Diff this verb
   between `set-feature --touchscreen true` and `false` and that class of bug names itself.
+- **`first_frame`** (CLI: `first-frame`; 0.23.0, H-059) answers "what IS the screen showing", which none of
+  the other checks do — `findings` asks "is anything wrong", `reachable_ui` asks "can a
+  finger hit this ONE control". Returns `{tree_paused, cursor_mode,
+  visible_canvas_layers: [{path, layer, name}] (paint order, back to front, hidden ones
+  excluded), topmost_control: {path, type, text, rect} (the single Control everything
+  else is drawn under — an empty dict if none is on screen), viewport, geometry_trustworthy,
+  geometry_caveat}`. `topmost_control` needs no z-index or occlusion math: Godot paints
+  children after parents and a later sibling after an earlier one, so the last visible,
+  on-screen Control a depth-first walk finds is the last one painted, by construction.
+  `cursor_mode` is `Input.get_mouse_mode()` by name (`VISIBLE` / `HIDDEN` / `CAPTURED` /
+  `CONFINED` / `CONFINED_HIDDEN`).
 - **`screenshot`** takes `region: [x,y,w,h]`, `hide: [node paths]` and
   `hide_group: [group names]`, and reports the applied `region` and the `hidden` paths.
   The crop and the hiding happen game-side inside one command, so a store capture is
@@ -819,7 +843,7 @@ set-game-speed, wait-frames, clear-nodes, validate-ui, ui-snapshot,
 node-bounds, save-ui-baseline, ui-snapshot-diff, tilemap-cells,
 tilemap-region, scripts-seen, canvas-scale, set-resolution,
 find-nodes, press, raycast, sample-pixels, reachable-ui, aabb, new-uid,
-mouse-move, reload
+mouse-move, reload, first-frame
 ```
 
 `new-uid` is the one subcommand that never touches the bus — see below.

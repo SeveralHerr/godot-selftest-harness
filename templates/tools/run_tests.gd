@@ -91,10 +91,10 @@ extends SceneTree
 ## (res://addons/godot_selftest/devtools_config.json key "test_dir", default
 ## "res://test/unit") for files named test_*.gd.
 
-# harness-version: 0.22.0
+# harness-version: 0.23.0
 ## Harness revision these files were copied from. See lint_project.gd / the
 ## `harness_version` bus verb; bump with .claude-plugin/plugin.json.
-const HARNESS_VERSION: String = "0.22.0"
+const HARNESS_VERSION: String = "0.23.0"
 
 const CONFIG_PATH: String = "res://addons/godot_selftest/devtools_config.json"
 const DEFAULT_TEST_DIR: String = "res://test/unit"

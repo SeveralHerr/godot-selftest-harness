@@ -77,6 +77,12 @@ godot --headless --path . --script res://tools/run_tests.gd      # unit tests (t
 godot --path . --script res://tools/capture.gd -- --scene res://ui/hud.tscn --out shot.png
 ```
 
+**Lint flags** (after `--`): `--strict` (warnings fail the run), `--baseline-write PATH` /
+`--baseline PATH` (split findings into `NEW` vs `PRE-EXISTING` against a saved snapshot —
+the number that means "this change" rather than "all repo debt"), `--no-orphans` (skip the
+advisory unreferenced-function pass, on by default since 0.21.0), `--no-shaders` (skip
+compiling every `.gdshader` and embedded `Shader`).
+
 **After adding a new `class_name` file (or a new `.tscn`/`.tres`), run
 `godot --headless --path . --import` once before the next lint/test pass.** The
 class cache is built by import; until it is, every script that references the new
@@ -149,6 +155,8 @@ listed is silently ignored; `--offline` parses the scripts statically with no ga
 Worth knowing exists, reach for `REFERENCE.md` when you need them — `validate-ui`,
 `reachable-ui`, `performance`, `validate --scene`, `validate-all` (all folded into
 `findings`, and worth calling alone only to re-check one thing after a fix);
+`first-frame` (visible `CanvasLayer`s in paint order, the topmost on-screen Control,
+paused state, cursor mode — "what IS the screen showing", not "is anything wrong");
 `save-ui-baseline`, `ui-snapshot`, `ui-snapshot-diff` (structured UI state vs baseline);
 `aabb` (3D world-space bounds, `top_y`/`bottom_y`), `node-bounds`' 3D counterpart;
 `step-time`, `set-game-speed` (refuses a scale below 0.01 — that is a freeze, not a

@@ -191,6 +191,12 @@ def ensure_uid_sidecars(plugin_root, project, gd_paths):
     """
     wanted = [p for p in gd_paths if not Path(str(p) + ".uid").exists()]
     if not wanted:
+        # Not silence (gh#18/gh#19.3): step 13 asks the caller to say "none
+        # needed" versus "installer said nothing", and lint's UIDs: OK covers
+        # both cases identically (uid_check_ignore excludes addons/ and tools/,
+        # exactly where scaffold writes) - so this print is the only witness.
+        print("  = .uid sidecars: none needed (%d installed .gd file(s) already had one)"
+              % len(gd_paths))
         return []
 
     # .uid sidecars arrived in Godot 4.4; older projects have no importer for them
@@ -616,15 +622,46 @@ def wire_autoload(project):
 
 
 _MAIN_SCENE_RE = re.compile(r'^run/main_scene\s*=\s*"([^"]*)"', re.M)
+_TSCN_UID_RE = re.compile(r'\buid="([^"]+)"')
 
 
 def detect_main_scene(project):
+    """`res://...` for every consumer downstream, never a raw `uid://` (gh#19.1).
+
+    Godot 4.4+ writes `run/main_scene` as a uid by default. Every reader of
+    `devtools_config.json`'s `main_scene` (the CLI, the docs, step 7's own
+    hud_layer_name detection) expects a `res://` path, so resolve it here once
+    rather than let a uid leak into config and confuse every consumer after it.
+    """
     try:
         text = (project / "project.godot").read_text(encoding="utf-8", errors="replace")
     except OSError:
         return ""
     m = _MAIN_SCENE_RE.search(text)
-    return m.group(1) if m else ""
+    if not m:
+        return ""
+    value = m.group(1)
+    if not value.startswith("uid://"):
+        return value
+    # A .tscn carries its own id in the gd_scene header's uid= attribute; a .gd
+    # (main scene can be a script) carries it in a .uid sidecar instead.
+    for scene in project.rglob("*.tscn"):
+        try:
+            head = scene.open(encoding="utf-8", errors="replace").readline()
+        except OSError:
+            continue
+        um = _TSCN_UID_RE.search(head)
+        if um and um.group(1) == value:
+            return "res://" + scene.relative_to(project).as_posix()
+    for sidecar in project.rglob("*.uid"):
+        try:
+            if sidecar.read_text(encoding="utf-8").strip() == value:
+                return "res://" + sidecar.with_suffix("").relative_to(project).as_posix()
+        except OSError:
+            continue
+    print("  ! run/main_scene is %s and no .tscn or .uid sidecar in the project claims "
+          "that id; recording it unresolved" % value)
+    return value
 
 
 def install_full(plugin_root, project, overrides, *, hook=True, hook_python=None):

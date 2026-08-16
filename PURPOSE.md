@@ -104,6 +104,15 @@ couldn't do it. That evidence is perishable: once a workaround is found, the fri
 forced it is forgotten by the next turn. Entries that quote real output become features;
 "it was awkward" doesn't.
 
+**A fixed report gets closed the same turn it's fixed, not just marked fixed in this
+log.** Seven of nine open `skill-feedback` issues on this repo's tracker turned out to
+already be fixed in `main` — some for two releases — because closing this log's own
+`H-`/`gh#` line was treated as the whole job and the upstream issue was left open. A
+stranger reading the tracker to decide whether the tool is worth trying sees nine open
+defects where two are real; that is the same failure this project fixes everywhere
+else — a reader who cannot tell "fixed" from "still broken" from the outside. Closing
+the loop is part of the fix, not a follow-up.
+
 ## Non-goals
 
 - **Not a test framework.** `run_tests.gd` is deliberately small. GUT and friends exist.
