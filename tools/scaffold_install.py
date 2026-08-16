@@ -122,6 +122,72 @@ def load_json(path, default):
         return default
 
 
+def _vtuple(text):
+    try:
+        return tuple(int(x) for x in str(text).strip().split("."))
+    except ValueError:
+        return ()
+
+
+_STAMP_RE = re.compile(r"^#\s*harness-version:\s*(\d+\.\d+\.\d+)", re.M)
+
+
+def vendored_version(project):
+    """The harness version the PROJECT currently runs, or None on a fresh install.
+
+    Read from `_scaffold_defaults.harness_version` in devtools_config.json (written
+    by every config pass since 0.9.0); an older install without that record falls
+    back to the `# harness-version:` stamp on the installed dev_tools.gd.
+    """
+    cfg = load_json(project / CONFIG_REL, {}) or {}
+    record = cfg.get(SCAFFOLD_DEFAULTS_KEY)
+    if isinstance(record, dict) and _vtuple(record.get("harness_version")):
+        return str(record["harness_version"])
+    for rel in ("addons/godot_selftest/dev_tools.gd", "tools/devtools.py"):
+        try:
+            m = _STAMP_RE.search((project / rel).read_text(encoding="utf-8", errors="replace"))
+        except OSError:
+            continue
+        if m:
+            return m.group(1)
+    return None
+
+
+def version_transition(plugin_root, project, allow_downgrade=False):
+    """Say what this install IS before touching anything (gh#32).
+
+    The skill loads from a plugin cache pinned at one version and every path in it
+    is interpolated from that root, so "refresh" against a project already at that
+    version reinstalls X over X and reports a clean success, and against a NEWER
+    project it downgrades - silently by construction, because a file matching
+    harness_history.json is pristine and overwritten without a .bak. Both used to
+    print exactly like an upgrade. Returns (label, plugin_ver, project_ver, refused).
+    """
+    plugin_ver = plugin_version(plugin_root)
+    project_ver = vendored_version(project)
+    if project_ver is None:
+        label = "fresh install of %s" % plugin_ver
+    elif _vtuple(plugin_ver) == _vtuple(project_ver):
+        label = ("already at %s - this is a same-version refresh, not an upgrade "
+                 "(the plugin root you are installing from is pinned at %s; a newer "
+                 "release needs `/plugin marketplace update` + `/plugin update`, or "
+                 "--plugin-root pointed at a newer clone)" % (plugin_ver, plugin_ver))
+    elif _vtuple(plugin_ver) > _vtuple(project_ver):
+        label = "upgrade %s -> %s" % (project_ver, plugin_ver)
+    else:
+        label = "DOWNGRADE %s -> %s" % (project_ver, plugin_ver)
+    refused = label.startswith("DOWNGRADE") and not allow_downgrade
+    print("[version] %s" % label)
+    if refused:
+        print("[version] refusing: the project runs %s and this plugin root holds %s. A "
+              "backwards refresh overwrites pristine files with no .bak and leaves no "
+              "trace. Update the plugin (`/plugin marketplace update godot-selftest-harness`, "
+              "`/plugin update godot-selftest-harness`) or pass --plugin-root <newer clone>; "
+              "--allow-downgrade overrides if the downgrade is intended."
+              % (project_ver, plugin_ver), file=sys.stderr)
+    return label, plugin_ver, project_ver, refused
+
+
 def known_hashes(plugin_root, rel):
     """Every sha256 this file has had in a released version."""
     history = load_json(plugin_root / "harness_history.json", {})
@@ -665,8 +731,12 @@ def detect_main_scene(project):
     return value
 
 
-def install_full(plugin_root, project, overrides, *, hook=True, hook_python=None):
+def install_full(plugin_root, project, overrides, *, hook=True, hook_python=None,
+                 allow_downgrade=False):
     """Everything a working install needs, in the order the slash command does it."""
+    transition, _, _, refused = version_transition(plugin_root, project, allow_downgrade)
+    if refused:
+        return 2
     steps = [
         ("files", lambda: install_files(plugin_root, project, SHIPPED_FILES)),
     ]
@@ -701,6 +771,8 @@ def install_full(plugin_root, project, overrides, *, hook=True, hook_python=None
     print("[full] not done here: hud_layer_name detection, Godot binary (step 11), --import "
           "+ lint smoke check (step 12). Pass --set for the first; run `config --set` for the "
           "second.")
+    # gh#32: the one line a reader wants and the per-file output never gives.
+    print("[full] harness: %s" % transition.split(" (")[0])
     return worst
 
 
@@ -741,6 +813,9 @@ def main():
                     help="config/full mode: a detected value, e.g. --set main_scene=res://main.tscn")
     ap.add_argument("--no-hook", action="store_true",
                     help="full mode: do not wire the Stop hook into .claude/settings.json")
+    ap.add_argument("--allow-downgrade", action="store_true",
+                    help="full/files mode: install an OLDER harness over a newer vendored one "
+                         "(refused by default - a backwards refresh leaves no .bak, gh#32)")
     ap.add_argument("--hook-python", default=None, metavar="NAME",
                     help="full mode: interpreter name the Stop hook runs (default: python on "
                          "Windows, python3 elsewhere). Use the name that EXECUTES on this "
@@ -755,11 +830,15 @@ def main():
 
     if args.mode == "full":
         return install_full(plugin_root, project, parse_set(args.sets),
-                            hook=not args.no_hook, hook_python=args.hook_python)
+                            hook=not args.no_hook, hook_python=args.hook_python,
+                            allow_downgrade=args.allow_downgrade)
     if args.mode == "files":
         if not args.rels:
             print("error: name at least one file to install", file=sys.stderr)
             return 1
+        _, _, _, refused = version_transition(plugin_root, project, args.allow_downgrade)
+        if refused:
+            return 2
         return install_files(plugin_root, project, args.rels)
     if args.mode == "format-block":
         return refresh_format_block(plugin_root, project)

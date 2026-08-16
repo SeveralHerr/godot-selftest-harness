@@ -182,6 +182,21 @@ probe), not the Store alias.
   --set hud_layer_name=<detected>
 ```
 
+**Its first line is `[version] ...`, and it is the one line to read before anything
+else (gh#32).** The installer compares the plugin root's version with the version the
+project already runs (`_scaffold_defaults.harness_version`, or the installed
+`# harness-version:` stamp on an older install) and says which of four things this
+call is: `fresh install of X`, `already at X - this is a same-version refresh, not an
+upgrade`, `upgrade Y -> X`, or `DOWNGRADE Y -> X` — the last is **refused (exit 2,
+nothing touched)** unless `--allow-downgrade` is passed, because a pristine file is
+overwritten without a `.bak` and a backwards refresh leaves no trace at all. Both of the
+non-upgrade cases exist because the skill loads from a plugin cache pinned at ONE
+version and every path in this file is interpolated from that root: a user who wants a
+newer release than `${CLAUDE_PLUGIN_ROOT}` holds needs `/plugin marketplace update
+godot-selftest-harness` then `/plugin update godot-selftest-harness`, or may point
+`--plugin-root` at a newer clone. **Carry the `[version]` line into the summary
+verbatim**; `[full] harness: <transition>` at the end repeats it.
+
 It prints one line per file/key/step. Read it and carry into the summary: every
 `.bak` it created (step 4), every `.uid` it minted (step 4), which config keys it kept
 as project-owned (step 7), whether `commands.gd` / `CLAUDE.md` / `log-devtools.md`
@@ -758,6 +773,11 @@ fi
 
 Summarize what that shows, in plain terms:
 
+- **the version transition, first** — the installer's `[full] harness: ...` line
+  (`fresh install of X` / `already at X` / `upgrade Y -> X`). `updated from Y` appears
+  per file; `Y -> X` appears only here, and it is the one line a reader wants (gh#32).
+  If it says `already at X`, say plainly that nothing was upgraded and why (the plugin
+  cache is pinned at X);
 - which harness files changed, and from which version to which (step 4's report);
 - any `.bak` files created — **name them individually**. Each is a local edit about to
   be replaced, and it belongs either in `devtools_ext/commands.gd` or upstream in the
