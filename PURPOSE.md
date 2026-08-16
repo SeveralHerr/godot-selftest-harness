@@ -27,8 +27,8 @@ doesn't scale to "after every change."
 So the harness exposes the running scene tree over a file bus: spawn entities, inject
 input and touch, read node state, snapshot the UI, measure FPS and orphan growth, and
 assert on all of it from a script. What a human would have verified by watching becomes
-something a script can assert, which means it can happen on every change instead of at
-the end.
+something a script — or the agent driving the bus — can assert, which means it can happen
+on every change instead of at the end.
 
 Inspired by [tea-leaves](https://github.com/cleak/tea-leaves), adapted to Godot.
 
@@ -79,7 +79,23 @@ the selftest the model writes anyway.
 **Gate on the number that means something.** `orphan_max: 0` is unreachable — a fresh
 launch reports dozens — and a threshold nothing can satisfy trains you to skip the check.
 Growth-since-baseline is the number that means "this change leaks." Same reasoning behind
-lint baselines: `NEW` vs `PRE-EXISTING` beats hand-triaging repo debt per file.
+lint baselines: `NEW` vs `PRE-EXISTING` beats hand-triaging repo debt per file. And a
+number is a measurement only with its spread: one frame's FPS read straight after a
+settings change ranked three quality presets `110 / 50 / 105` and nearly shipped the
+slowest as the fastest. `performance` reports a mean over a window with min, max and
+whether it is still settling, because a single sample presented as a rate invites
+exactly the wrong conclusion.
+
+**It shares the machine.** The normal case is now several sessions, agents and git
+worktrees on one box, each with a game of its own — and a bus that assumes it is alone
+turns every one of them into a source of plausible wrong answers. So: a headless gate
+never touches a bus it did not open (a `--script` runner is passive — it does not claim,
+clear or poll); nothing is ever killed by image name, only by a pid this project
+started and can name; the owner record and `ping` carry the checkout the game runs
+from, and a client refuses to send to a game from another one rather than reading its
+replies as its own. Each of these was learned from a session that debugged its own scene
+for a cycle while a neighbour's game answered — the failure never says "wrong game", it
+says `Root node not found`.
 
 **The gaps log is the improvement pipeline.** Nearly every capability past v1 — the status
 provider, node-path normalization, `--property`, `step-time`, the touch verbs, the orphan
@@ -88,13 +104,24 @@ couldn't do it. That evidence is perishable: once a workaround is found, the fri
 forced it is forgotten by the next turn. Entries that quote real output become features;
 "it was awkward" doesn't.
 
+**A fixed report gets closed the same turn it's fixed, not just marked fixed in this
+log.** Seven of nine open `skill-feedback` issues on this repo's tracker turned out to
+already be fixed in `main` — some for two releases — because closing this log's own
+`H-`/`gh#` line was treated as the whole job and the upstream issue was left open. A
+stranger reading the tracker to decide whether the tool is worth trying sees nine open
+defects where two are real; that is the same failure this project fixes everywhere
+else — a reader who cannot tell "fixed" from "still broken" from the outside. Closing
+the loop is part of the fix, not a follow-up.
+
 ## Non-goals
 
 - **Not a test framework.** `run_tests.gd` is deliberately small. GUT and friends exist.
 - **Not a CI service.** It produces exit codes; wiring them to a pipeline is the project's
   job.
-- **Not concurrent.** One command file, one result file, one client. Request ids make a
-  collision *detectable*, not *safe*.
+- **Not concurrent on one bus.** One command file, one result file, one client per bus.
+  Request ids make a collision *detectable*, not *safe*. (Several buses on one machine
+  is the supported case — see "It shares the machine" — one bus with several clients is
+  not.)
 - **Not a pixel-diff tool.** Headless renders nothing; `instantiate_ui` makes layout
   assertable, not appearance. Visual regressions still need a running game and eyes.
 - **Not a place for game logic.** If a verb needs to know what a combo is, it belongs in

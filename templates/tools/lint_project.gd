@@ -107,10 +107,10 @@ extends SceneTree
 # console. Redirect to a file and read it back. Every line this script emits goes
 # to stdout via print(), so one redirect captures the whole report.
 
-# harness-version: 0.21.0
+# harness-version: 0.23.0
 ## Harness revision these files were copied from. Printed in the header of every run so
 ## a lint result, and any gap logged from it, can name the version it was produced on.
-const HARNESS_VERSION: String = "0.21.0"
+const HARNESS_VERSION: String = "0.23.0"
 
 const CONFIG_PATH: String = "res://addons/godot_selftest/devtools_config.json"
 const DEFAULT_SCAN_ROOT: String = "res://"
@@ -446,6 +446,10 @@ func _initialize() -> void:
 				print("WARN: %s: %s" % [o.file, o.message])
 			print("Orphans: %d of %d public function(s) across %d script(s) have no live reference (advisory; --no-orphans to skip)" % [
 				int(orph.get("count", 0)), int(orph.get("functions_checked", 0)), int(orph.get("scripts", 0))])
+			for o in orph.get("signal_items", []):
+				print("WARN: %s: %s" % [o.file, o.message])
+			print("Signals: %d of %d declared signal(s) have no listener anywhere (advisory)" % [
+				int(orph.get("signal_count", 0)), int(orph.get("signals_checked", 0))])
 		if baseline_read != "":
 			_print_baseline_groups(baseline_read, baseline_keys.size(), new_findings, old_findings)
 
@@ -1204,7 +1208,60 @@ func _find_orphans(scan_root: String, test_dir: String) -> Dictionary:
 	for f in gd_files:
 		if not _is_test_path(f, test_dir):
 			scripts += 1
-	return {"items": out, "count": out.size(), "functions_checked": functions_checked, "scripts": scripts}
+
+	# Signals, the same idea one step over (moving-in:G-028): `restart_requested`
+	# was declared, emitted from two call sites and had zero listeners for the
+	# life of the project - a dead button - and every gate passed, because the
+	# name resolves and the scenes validate. A signal is reported when nothing
+	# outside its declaring file mentions it (no connect in a script, no
+	# [connection] in a scene) and the file itself does not connect it either.
+	# Advisory like the function scan: a signal meant for an external host is a
+	# legitimate design and looks identical in the source.
+	var sig_re := RegEx.new()
+	sig_re.compile("(?m)^\\s*signal\\s+([A-Za-z_][A-Za-z0-9_]*)")
+	var connect_re := RegEx.new()
+	var signal_items: Array = []
+	var signals_checked := 0
+	for f in gd_files:
+		if _is_test_path(f, test_dir) or _is_harness_or_tool_path(f):
+			continue
+		var text := FileAccess.get_file_as_string(f)
+		for m in sig_re.search_all(text):
+			var sig := m.get_string(1)
+			signals_checked += 1
+			var heard := false
+			var test_listeners := 0
+			for other in gd_files:
+				if other == f or not identifiers[other].has(sig):
+					continue
+				if _is_test_path(other, test_dir):
+					test_listeners += 1  # a test connecting it is not the game hearing it
+					continue
+				heard = true
+				break
+			if not heard and scene_names.has(sig):
+				heard = true
+			if not heard:
+				# Self-connected (`sig.connect(` / `connect("sig"` / `connect(sig`) counts.
+				connect_re.compile("(\\b%s\\s*\\.\\s*connect\\s*\\(|connect\\s*\\(\\s*[\"']?%s\\b)" % [sig, sig])
+				if connect_re.search(text) != null:
+					heard = true
+			if heard:
+				continue
+			var emit_re := RegEx.new()
+			emit_re.compile("(\\b%s\\s*\\.\\s*emit\\s*\\(|emit_signal\\s*\\(\\s*[\"']%s[\"'])" % [sig, sig])
+			var emits := emit_re.search_all(text).size()
+			var smsg := ""
+			if emits > 0:
+				smsg = "signal %s is emitted %d time(s) here and nothing in the game connects to it%s - a dead button, unless an external host is meant to listen" % [
+					sig, emits, " (only %d test file(s) do)" % test_listeners if test_listeners > 0 else ""]
+			else:
+				smsg = "signal %s is declared here, never emitted and never connected - heuristic, may be an interface for an external host" % sig
+			signal_items.append({"file": f, "signal": sig, "emits": emits, "message": smsg})
+			_add_finding(f, "orphan_signal", sig, "warning", smsg, true)
+
+	return {"items": out, "count": out.size(), "functions_checked": functions_checked, "scripts": scripts,
+		"signal_items": signal_items, "signal_count": signal_items.size(), "signals_checked": signals_checked}
 
 
 func _identifier_set(text: String) -> Dictionary:

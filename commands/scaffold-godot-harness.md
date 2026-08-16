@@ -124,8 +124,10 @@ stores the name.
 ## Step 3 — Run the installer (`full`): addon core, tools, config, extension, tests, CLAUDE.md, log, hook, autoload
 
 One call does steps 3–10. Detect `hud_layer_name` first (step 7 says how: the name of
-the first `CanvasLayer` in the main scene, else `"HUD"`) and pass it; `main_scene` is
-detected by the installer from `run/main_scene`. Pass `--hook-python "$PY"` so the
+the first `CanvasLayer` in the main scene, falling back to the first `CanvasLayer`
+anywhere under `scan_root`, else `"HUD"`) and pass it; `main_scene` is detected by the
+installer from `run/main_scene`, resolving a `uid://` value to its `res://` path
+itself (gh#19.1) so this detection can open the right scene. Pass `--hook-python "$PY"` so the
 `Stop` hook runs the interpreter that actually executes on this machine (step 1's
 probe), not the Store alias.
 
@@ -306,10 +308,16 @@ add only missing keys and change nothing else.
 
 Detect:
 
-- `main_scene` — from `run/main_scene` in `project.godot`.
-- `hud_layer_name` — best effort: open the main scene and use the **name of the
-  first `CanvasLayer`** you find. If none is found (or the scene can't be read),
-  default to `"HUD"`.
+- `main_scene` — from `run/main_scene` in `project.godot`. The installer resolves this
+  itself now (gh#19.1) — Godot 4.4+ writes it as `uid://…` by default, and `full`
+  already maps that back to the owning `.tscn`'s `res://` path before it reaches
+  `devtools_config.json`, so treat the value `full` reports as the scene to open, not
+  the raw config line.
+- `hud_layer_name` — best effort: open that main scene and use the **name of the
+  first `CanvasLayer`** you find. If the main scene has no `CanvasLayer` at all (the
+  HUD is instantiated at runtime rather than present in the scene file — common),
+  grep `scan_root` for `type="CanvasLayer"` across every `.tscn` and use the first
+  name found. Only default to `"HUD"` if neither search finds one.
 - `extension_script`, `validator_script`, `test_dir`, `scan_root` — the defaults
   below (they match where steps 3–6 placed things).
 

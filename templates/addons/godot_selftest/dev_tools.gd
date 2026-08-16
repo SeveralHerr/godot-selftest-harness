@@ -14,14 +14,14 @@ extends Node
 ## extension loads AFTER the generic handlers, a project may override a generic
 ## verb by registering the same action string (last-writer-wins).
 
-# harness-version: 0.21.0
+# harness-version: 0.23.0
 # --- Constants ---
 
 ## Version of the godot-selftest-harness these files were copied from. Reported by the
 ## `harness_version` verb and stamped into every copied tool script, so a gap logged
 ## against a project can name the version it was seen on, and a refresh can tell a
 ## stale file from a customized one. Bump with .claude-plugin/plugin.json.
-const HARNESS_VERSION: String = "0.21.0"
+const HARNESS_VERSION: String = "0.23.0"
 
 ## Default bus filenames. With a session id (see _resolve_session) the id is spliced in
 ## before the extension, so two instances can each own a bus in the same user:// dir.
@@ -211,6 +211,24 @@ var _dispatch_busy_action: String = ""
 # Live reference to the instantiated registry extension. MUST be held so the
 # Callables it bound (via register_command) are not freed out from under us.
 var _extension: RefCounted = null
+# True when this instance was brought up by `godot --script <runner>` (lint,
+# tests, eval, capture) rather than by a running game. A passive instance
+# registers its handlers - a test may call them in-process - but never touches
+# the bus files: it does not claim the owner file, does not delete a "stale"
+# command/result, and does not poll. Before 0.22.0 every headless gate did all
+# three, so `lint_project.gd` run in one session deleted the owner file AND any
+# in-flight command of the game another session was driving, and then left an
+# owner record naming its own exited pid that refused the next `launch` for 30s
+# (moving-in:G-018, G-025). Nothing in a --script run answers commands, so the
+# claim was pure cost.
+var _passive: bool = false
+var _auto_name_re: RegEx = RegEx.new()
+var _auto_name_re_compiled: bool = false
+# In-tree node count baseline, sampled with the orphan baseline (moving-in:G-030).
+var _node_baseline: int = -1
+var _node_type_baseline: Dictionary = {}
+# Smallest time scale set_game_speed accepts; below it the game is frozen, not slow.
+const MIN_GAME_SPEED: float = 0.01
 
 
 # --- Lifecycle ---
@@ -251,8 +269,10 @@ func _ready() -> void:
 	_register_generic_handlers()
 	_load_extension()
 
-	_clear_stale_files()
-	_write_owner_file()
+	_passive = _is_script_run()
+	if not _passive:
+		_clear_stale_files()
+		_write_owner_file()
 
 	# Script census (G-074b): seed from whatever is already in the tree (autoload
 	# order means the main scene is usually not up yet), then track every node
@@ -266,13 +286,33 @@ func _ready() -> void:
 		"handlers": _handlers.size(),
 		"session": _session,
 		"pid": OS.get_process_id(),
+		"passive": _passive,
 	})
 
 	_process_command_line_args()
 	_capture_orphan_baseline()
 
 
+## `godot --script X` / `-s X` brings the autoloads up with no main scene; that is
+## every shipped runner. Read from the ENGINE args (not user args after `--`), which
+## is where the flag lives.
+func _is_script_run() -> bool:
+	var args: PackedStringArray = OS.get_cmdline_args()
+	for i: int in args.size():
+		if args[i] == "--script" or args[i] == "-s":
+			return true
+	return false
+
+
+## True when this instance owns and polls a bus. Exposed so an extension or a test
+## can tell a live bridge from a passive --script instance.
+func is_bus_active() -> bool:
+	return not _passive
+
+
 func _process(_delta: float) -> void:
+	if _passive:
+		return
 	var now_msec: int = Time.get_ticks_msec()
 	if now_msec - _last_command_check_msec >= 100:
 		_last_command_check_msec = now_msec
@@ -476,6 +516,8 @@ func _register_generic_handlers() -> void:
 	register_command("input_actions", _cmd_input_actions)
 	register_command("input_sequence", _cmd_input_sequence)
 	register_command("input_key", _cmd_input_key)
+	register_command("mouse_move", _cmd_mouse_move)
+	register_command("reload", _cmd_reload)
 	register_command("input_state", _cmd_input_state)
 	register_command("tilemap_cells", _cmd_tilemap_cells)
 	register_command("tilemap_region", _cmd_tilemap_region)
@@ -507,6 +549,7 @@ func _register_generic_handlers() -> void:
 	register_command("curve", _cmd_curve)
 	register_command("reachable_ui", _cmd_reachable_ui)
 	register_command("findings", _cmd_findings)
+	register_command("first_frame", _cmd_first_frame)
 
 
 func _load_extension() -> void:
@@ -793,6 +836,9 @@ func _cmd_ping(_args: Dictionary) -> Dictionary:
 			"paused": get_tree().paused,
 			"bus_dir": _bus_dir if not _bus_dir.is_empty() else ProjectSettings.globalize_path("user://"),
 			"user_dir": ProjectSettings.globalize_path("user://"),
+			# Where this game's res:// is on disk, so a client can tell a
+			# worktree sibling's game from its own (plant-tower-defense:G-018).
+			"project_path": ProjectSettings.globalize_path("res://"),
 		},
 	}
 
@@ -1390,6 +1436,16 @@ func _coerce_arg(value: Variant, target_type: int) -> Dictionary:
 	if target_type == TYPE_NIL or from_type == target_type:
 		return {"ok": true, "value": value, "reason": ""}
 
+	# GDScript itself accepts `null` for any Object-typed parameter (Node,
+	# Resource, a custom class, ..) - it is the language's own nilable case,
+	# not a coercion. The bus was stricter than the language it drives: a
+	# losing path called with a null Object arg by both a unit test and the
+	# game's own code (`_on_pest_escaped(_pest: Pest)`) was unreachable from
+	# run-method, which "cannot convert Nil (null) to Object" made read like a
+	# bug in the caller rather than a bus limitation (plant-tower-defense:G-026).
+	if from_type == TYPE_NIL and target_type == TYPE_OBJECT:
+		return {"ok": true, "value": null, "reason": ""}
+
 	match target_type:
 		TYPE_VECTOR2, TYPE_VECTOR2I:
 			var comps: Array = _numeric_components(value, ["x", "y"], 2, 2)
@@ -1703,27 +1759,73 @@ func _cmd_run_method(args: Dictionary) -> Dictionary:
 ## before reporting, so growth is measured from here on. Call it once the game has
 ## reached the state a run actually starts from -- typically right after /verify's
 ## entry hook -- otherwise the scene load itself dominates the delta.
+##
+## args["frames"] (int, default 30): FPS is MEASURED over this many frames by
+## wall clock and reported as fps (the mean), fps_min, fps_max, fps_samples,
+## fps_window_sec, plus fps_settling when the second half of the window ran
+## more than 15% faster or slower than the first (moving-in:G-021, seen twice: a
+## single Engine.get_frames_per_second() read straight after a quality-preset
+## switch produced HIGH 110 / MEDIUM 50 / LOW 105 - a ladder that would have
+## reported the slowest preset as the fastest - and a shadow toggle read as
+## 70 -> 37 where a controlled A/B says the cost is 2 fps). frames = 0 gives the
+## old instantaneous read; fps_instant carries it either way. Wall clock, not
+## process delta, so a leftover set_game_speed cannot stretch it.
+##
+## Node growth (moving-in:G-030): a node parented under a live node is never an
+## orphan, so a UI that adds a layer per visit or a pool that grows per spawn
+## reports orphan growth +0 forever. node_baseline / node_growth are sampled and
+## reset alongside the orphan baseline; args["by_type"] = true adds
+## node_types_delta = { class: +N } for every class whose live count changed
+## since the baseline, which turns "something accumulates" into "3 more
+## CanvasLayers".
 func _cmd_performance(args: Dictionary) -> Dictionary:
 	var orphan_nodes: int = int(Performance.get_monitor(Performance.OBJECT_ORPHAN_NODE_COUNT))
+	var node_count: int = int(Performance.get_monitor(Performance.OBJECT_NODE_COUNT))
 
 	if bool(args.get("reset_baseline", false)):
 		_orphan_baseline = orphan_nodes
 		_orphan_baseline_frame = int(Engine.get_process_frames())
-		_write_log("system", "Orphan baseline reset", {"orphan_baseline": _orphan_baseline})
+		_node_baseline = node_count
+		_node_type_baseline = _count_nodes_by_type()
+		_write_log("system", "Orphan baseline reset", {"orphan_baseline": _orphan_baseline, "node_baseline": _node_baseline})
 
 	var baseline_captured: bool = _orphan_baseline >= 0
 	var orphan_growth: int = (orphan_nodes - _orphan_baseline) if baseline_captured else 0
+	var node_growth: int = (node_count - _node_baseline) if _node_baseline >= 0 else 0
 
-	var fps: float = Engine.get_frames_per_second()
+	var fps_instant: float = Engine.get_frames_per_second()
+	var frames: int = maxi(0, int(args.get("frames", 30)))
+	var window: Dictionary = await _sample_fps_window(frames)
+	var fps: float = float(window.get("mean", fps_instant)) if frames > 0 else fps_instant
 	var data: Dictionary = {
 		"fps": fps,
+		"fps_instant": fps_instant,
+		"fps_min": window.get("min", fps_instant),
+		"fps_max": window.get("max", fps_instant),
+		# Headless: a frame does no rendering work and waits on nothing, so
+		# fps_max reads five figures (58823 from a 17us frame) and looks
+		# broken rather than merely uninformative (H-060). fps (mean) and
+		# fps_min are still the numbers a gate reads; this just says which
+		# one not to trust, the way geometry findings already do.
+		"fps_max_trustworthy": DisplayServer.get_name() != "headless",
+		"fps_max_caveat": ("" if DisplayServer.get_name() != "headless" else
+			"measured HEADLESS: an idle frame does no rendering work, so fps_max is not " +
+			"a ceiling a player would ever see - read fps (mean) and fps_min instead"),
+		"fps_samples": frames,
+		"fps_window_sec": window.get("seconds", 0.0),
+		"fps_settling": window.get("settling", false),
+		"fps_first_half": window.get("first_half", fps_instant),
+		"fps_second_half": window.get("second_half", fps_instant),
 		"frame_time_ms": 1000.0 / maxf(1.0, fps),
 		"physics_fps": Engine.physics_ticks_per_second,
 		"static_memory_mb": OS.get_static_memory_usage() / (1024.0 * 1024.0),
 		"video_memory_mb": Performance.get_monitor(Performance.RENDER_VIDEO_MEM_USED) / (1024.0 * 1024.0),
 		"draw_calls": Performance.get_monitor(Performance.RENDER_TOTAL_DRAW_CALLS_IN_FRAME),
 		"objects": Performance.get_monitor(Performance.OBJECT_COUNT),
-		"nodes": Performance.get_monitor(Performance.OBJECT_NODE_COUNT),
+		"nodes": node_count,
+		# In-tree growth since the (orphan) baseline; -1 baseline = not sampled.
+		"node_baseline": _node_baseline,
+		"node_growth": node_growth,
 		# Absolute count, unchanged and still reported.
 		"orphan_nodes": orphan_nodes,
 		# Growth against the startup baseline. -1 baseline means "not sampled yet".
@@ -1750,11 +1852,30 @@ func _cmd_performance(args: Dictionary) -> Dictionary:
 		"tree_paused": get_tree().paused,
 	}
 
+	if bool(args.get("by_type", false)):
+		var now_by_type: Dictionary = _count_nodes_by_type()
+		var delta: Dictionary = {}
+		if _node_baseline >= 0:
+			for cls: String in now_by_type:
+				var d: int = int(now_by_type[cls]) - int(_node_type_baseline.get(cls, 0))
+				if d != 0:
+					delta[cls] = d
+			for cls: String in _node_type_baseline:
+				if not now_by_type.has(cls):
+					delta[cls] = -int(_node_type_baseline[cls])
+		data["node_types_delta"] = delta
+		data["node_types_now"] = now_by_type
+
 	var message: String = "Performance metrics collected"
 	if get_tree().paused:
 		message += " on a PAUSED tree - FPS and growth here describe a game that is not stepping"
+	if frames > 0:
+		message += " (fps mean %.1f over %d frames, min %.1f max %.1f%s)" % [
+			fps, frames, float(data["fps_min"]), float(data["fps_max"]),
+			" - STILL SETTLING" if bool(data["fps_settling"]) else ""]
 	if baseline_captured:
-		message += " (orphans %d, baseline %d, growth %d)" % [orphan_nodes, _orphan_baseline, orphan_growth]
+		message += " (orphans %d, baseline %d, growth %d; nodes %d, growth %d)" % [
+			orphan_nodes, _orphan_baseline, orphan_growth, node_count, node_growth]
 	else:
 		message += " (orphan baseline not sampled yet; growth is not meaningful)"
 
@@ -1763,6 +1884,66 @@ func _cmd_performance(args: Dictionary) -> Dictionary:
 		"message": message,
 		"data": data,
 	}
+
+
+## Wall-clock frame times over `frames` process frames. Returns {} for 0.
+## mean = frames / elapsed; min/max are the slowest/fastest single frame.
+## settling is true when the two halves' means differ by more than 15%, which
+## is what "the renderer has not settled after that change" looks like from
+## inside one window - the caller cannot tell it from "this is the rate"
+## otherwise (moving-in:G-021).
+func _sample_fps_window(frames: int) -> Dictionary:
+	if frames <= 0:
+		return {}
+	var deltas: Array[float] = []
+	var last_usec: int = Time.get_ticks_usec()
+	for _i: int in range(frames):
+		await get_tree().process_frame
+		var now_usec: int = Time.get_ticks_usec()
+		deltas.append(float(now_usec - last_usec) / 1_000_000.0)
+		last_usec = now_usec
+	var total: float = 0.0
+	var slowest: float = 0.0
+	var fastest: float = INF
+	for d: float in deltas:
+		total += d
+		slowest = maxf(slowest, d)
+		fastest = minf(fastest, d)
+	var mean: float = float(deltas.size()) / maxf(total, 0.000001)
+	var half: int = deltas.size() / 2
+	var first_total: float = 0.0
+	var second_total: float = 0.0
+	for i: int in deltas.size():
+		if i < half:
+			first_total += deltas[i]
+		else:
+			second_total += deltas[i]
+	var first_mean: float = float(half) / maxf(first_total, 0.000001) if half > 0 else mean
+	var second_mean: float = float(deltas.size() - half) / maxf(second_total, 0.000001)
+	var settling: bool = half > 0 and absf(first_mean - second_mean) > 0.15 * maxf(first_mean, second_mean)
+	return {
+		"mean": mean,
+		"min": 1.0 / maxf(slowest, 0.000001),
+		"max": 1.0 / maxf(fastest, 0.000001),
+		"seconds": total,
+		"first_half": first_mean,
+		"second_half": second_mean,
+		"settling": settling,
+	}
+
+
+## Live node count per class name, whole tree. O(N); called only at baseline
+## capture/reset and on `performance --by-type`.
+func _count_nodes_by_type() -> Dictionary:
+	var counts: Dictionary = {}
+	var stack: Array[Node] = [get_tree().root]
+	while not stack.is_empty():
+		var n: Node = stack.pop_back()
+		var cls: String = n.get_class()
+		counts[cls] = int(counts.get(cls, 0)) + 1
+		for c: Node in n.get_children(true):
+			stack.append(c)
+	return counts
 
 
 ## Samples the orphan-node count once the main scene has settled, so `performance`
@@ -1783,8 +1964,11 @@ func _capture_orphan_baseline() -> void:
 		await get_tree().process_frame
 	_orphan_baseline = int(Performance.get_monitor(Performance.OBJECT_ORPHAN_NODE_COUNT))
 	_orphan_baseline_frame = int(Engine.get_process_frames())
+	_node_baseline = int(Performance.get_monitor(Performance.OBJECT_NODE_COUNT))
+	_node_type_baseline = _count_nodes_by_type()
 	_write_log("system", "Orphan baseline captured", {
 		"orphan_baseline": _orphan_baseline,
+		"node_baseline": _node_baseline,
 		"frames_waited": ORPHAN_BASELINE_FRAMES,
 	})
 
@@ -2122,6 +2306,116 @@ func _cmd_input_key(args: Dictionary) -> Dictionary:
 			"keycode_string": OS.get_keycode_string(keycode),
 			"count": count,
 			"hold_frames": hold_frames,
+		},
+	}
+
+
+## Dispatches a real InputEventMouseMotion (moving-in:G-029). Mouse-look is the
+## one input a first-person game cannot be tested without, and the bridge could
+## drive actions, raw keys and touch but never produce a `relative` - so a
+## camera that reads InputEventMouseMotion.relative was unreachable, and
+## `run-method _unhandled_input` with a JSON event was silently a no-op (the arg
+## cannot become an object). Goes through Input.parse_input_event like `key`, so
+## every _input/_unhandled_input in the tree sees it, captured cursor or not.
+## args: { "relative": [dx, dy], "steps": int = 1 (split the motion into this
+##         many events, one per frame - a look handler that clamps per event sees
+##         them individually), "position": [x, y] (absolute cursor position to
+##         report; defaults to the current one), "buttons": int (button mask) }
+## data keys: relative {x,y}, steps, position {x,y}, mouse_mode.
+func _cmd_mouse_move(args: Dictionary) -> Dictionary:
+	var rel: Variant = _parse_vector2_or_null(args.get("relative"))
+	if rel == null:
+		return {"success": false, "message": "mouse_move needs relative as [dx, dy]"}
+	var steps: int = clampi(int(args.get("steps", 1)), 1, 600)
+	var pos_raw: Variant = _parse_vector2_or_null(args.get("position"))
+	var pos: Vector2 = pos_raw if pos_raw != null else get_viewport().get_mouse_position()
+	var buttons: int = int(args.get("buttons", 0))
+	var per_step: Vector2 = (rel as Vector2) / float(steps)
+	for i: int in range(steps):
+		var ev := InputEventMouseMotion.new()
+		ev.relative = per_step
+		ev.screen_relative = per_step  # 4.1+; the unscaled twin a Window-scaled game reads
+		pos += per_step
+		ev.position = pos
+		ev.global_position = pos
+		ev.button_mask = buttons
+		Input.parse_input_event(ev)
+		if i < steps - 1:
+			await get_tree().process_frame
+	# One more frame so the last event has been delivered before the reply, and a
+	# get-state issued next reads the moved camera, not the pre-move one.
+	await get_tree().process_frame
+	var mode_names: Dictionary = {
+		Input.MOUSE_MODE_VISIBLE: "visible", Input.MOUSE_MODE_HIDDEN: "hidden",
+		Input.MOUSE_MODE_CAPTURED: "captured", Input.MOUSE_MODE_CONFINED: "confined",
+		Input.MOUSE_MODE_CONFINED_HIDDEN: "confined_hidden",
+	}
+	return {
+		"success": true,
+		"message": "Mouse moved by (%.1f, %.1f) in %d event%s (mouse mode: %s)" % [
+			(rel as Vector2).x, (rel as Vector2).y, steps, "" if steps == 1 else "s",
+			str(mode_names.get(Input.mouse_mode, str(Input.mouse_mode)))],
+		"data": {
+			"relative": {"x": (rel as Vector2).x, "y": (rel as Vector2).y},
+			"steps": steps,
+			"position": {"x": pos.x, "y": pos.y},
+			"mouse_mode": str(mode_names.get(Input.mouse_mode, str(Input.mouse_mode))),
+		},
+	}
+
+
+## Re-reads a resource from disk INTO the running game (moving-in:G-033). Godot's
+## resource cache is keyed on path, so after editing a shader/tres/texture a
+## plain load() hands back the copy compiled at startup and the edit looks like a
+## no-op - indistinguishable from an edit that genuinely did nothing, and every
+## iteration cost a relaunch. CACHE_MODE_REPLACE loads the file and copies it
+## over the cached instance, so every node already holding that resource sees
+## the new content without being touched. args: { "path": "res://..." }
+## data keys: path, resource_class, was_cached, holders_note.
+func _cmd_reload(args: Dictionary) -> Dictionary:
+	var path: String = str(args.get("path", ""))
+	if path.is_empty():
+		return {"success": false, "message": "reload needs path (res://...)"}
+	if not path.begins_with("res://") and not path.begins_with("user://"):
+		path = "res://" + path.trim_prefix("/")
+	if not ResourceLoader.exists(path):
+		return {"success": false, "message": "reload: no resource at %s (ResourceLoader.exists is false; is the path spelled as the project sees it?)" % path}
+	var was_cached: bool = ResourceLoader.has_cached(path)
+	# (GDScript has no ResourceCache; a REUSE load of a cached path is the
+	# cached instance and reads nothing from disk.)
+	var old: Resource = ResourceLoader.load(path, "", ResourceLoader.CACHE_MODE_REUSE) if was_cached else null
+	var res: Resource = ResourceLoader.load(path, "", ResourceLoader.CACHE_MODE_REPLACE)
+	if res == null:
+		return {"success": false, "message": "reload: %s exists but failed to load - a parse/compile error in the edited file? see the game's stderr" % path}
+	# Text resources are re-parsed INTO the cached object under REPLACE, so
+	# holders see the change; binary/shader/texture loaders build a NEW object
+	# that merely takes over the path, and every node still holding the old one
+	# keeps the old content. Copy the stored properties across in that case, so
+	# the verb means the same thing for every resource type.
+	var copied: int = 0
+	var in_place: bool = old != null and old == res
+	if old != null and old != res and old.get_class() == res.get_class():
+		for prop: Dictionary in res.get_property_list():
+			var pname: String = str(prop.get("name", ""))
+			if pname.is_empty() or pname.begins_with("resource_") or pname == "script":
+				continue
+			if int(prop.get("usage", 0)) & PROPERTY_USAGE_STORAGE == 0:
+				continue
+			old.set(pname, res.get(pname))
+			copied += 1
+	var holders_updated: bool = in_place or copied > 0
+	return {
+		"success": true,
+		"message": "Reloaded %s (%s%s)" % [path, res.get_class(),
+			(", re-parsed into the cached instance - holders see the new content" if in_place
+				else ", %d stored propert%s copied onto the cached instance - holders see the new content" % [copied, "y" if copied == 1 else "ies"])
+			if was_cached else ", was not cached: nothing in the running game held it"],
+		"data": {
+			"path": path,
+			"resource_class": res.get_class(),
+			"was_cached": was_cached,
+			"holders_updated": holders_updated,
+			"properties_copied": copied,
 		},
 	}
 
@@ -2603,14 +2897,28 @@ func _execute_sequence(sequence_id: String, steps: Array, timeout: float) -> voi
 
 func _cmd_set_game_speed(args: Dictionary) -> Dictionary:
 	var prev: float = Engine.time_scale
-	var scale: float = clampf(float(args.get("scale", 1.0)), 0.0, 100.0)
+	var requested: float = float(args.get("scale", 1.0))
+	# A time scale of 0 stops the game dead while the bus keeps answering, so
+	# every later read returns well-formed, identical, stale values - "a run
+	# that never changes" arrived at from a verb that reported success
+	# (moving-in:G-019: 0.04 was echoed as `1.0 -> 0.0` by a 1-dp print and the
+	# session chased a freeze). Pausing is what `ping` reports and the tree's
+	# own pause is for; this verb refuses zero and names its floor.
+	if requested < MIN_GAME_SPEED:
+		return {
+			"success": false,
+			"message": "set_game_speed refuses %.4f: a scale below %.3f freezes the game while the bus keeps answering (use the tree's pause for that); smallest accepted is %.3f" % [
+				requested, MIN_GAME_SPEED, MIN_GAME_SPEED],
+			"data": {"previous_scale": prev, "current_scale": prev, "min_scale": MIN_GAME_SPEED},
+		}
+	var scale: float = clampf(requested, MIN_GAME_SPEED, 100.0)
 	Engine.time_scale = scale
 	# Remembered so `performance` can report a leftover override (G-059).
 	_devtools_set_speed = scale
 
 	return {
 		"success": true,
-		"message": "Game speed: %.1f -> %.1f" % [prev, scale],
+		"message": "Game speed: %.3f -> %.3f" % [prev, scale],
 		"data": {"previous_scale": prev, "current_scale": scale},
 	}
 
@@ -3024,6 +3332,10 @@ func _apply_ui_baseline(issues: Array, args: Dictionary) -> Dictionary:
 			"new_count": 0, "pre_existing_count": issues.size(),
 		}
 
+	# key -> how many findings the baseline holds under it. Multiplicity matters
+	# because keys are normalised (see _ui_finding_key): three runtime-built rows
+	# under one named parent share a key, and a FOURTH broken row must still read
+	# as NEW rather than hide behind the accepted three.
 	var known: Dictionary = {}
 	var in_use: bool = false
 	if use and FileAccess.file_exists(path):
@@ -3034,12 +3346,17 @@ func _apply_ui_baseline(issues: Array, args: Dictionary) -> Dictionary:
 			if keys_value is Array:
 				in_use = true
 				for key: Variant in keys_value as Array:
-					known[str(key)] = true
+					# Baselines written before 0.22.0 hold raw @Type@NNN keys;
+					# normalising on read keeps them valid.
+					var k: String = _normalize_ui_key(str(key))
+					known[k] = int(known.get(k, 0)) + 1
 
 	var new_count: int = 0
 	var pre_existing: int = 0
 	for issue: Dictionary in issues:
-		if in_use and known.has(_ui_finding_key(issue)):
+		var k: String = _ui_finding_key(issue)
+		if in_use and int(known.get(k, 0)) > 0:
+			known[k] = int(known[k]) - 1
 			issue["baseline"] = "pre_existing"
 			pre_existing += 1
 		else:
@@ -3054,8 +3371,24 @@ func _apply_ui_baseline(issues: Array, args: Dictionary) -> Dictionary:
 
 ## Stable identity of a UI finding: the rule that fired and the node it fired
 ## on. Deliberately excludes the message - see _apply_ui_baseline().
+##
+## Auto-generated node names (`@VBoxContainer@465`) are normalised to their type
+## (`@VBoxContainer`) because the counter is a per-process allocation order, not
+## an identity: an unrelated commit that inserts one sibling anywhere earlier in
+## the scene renumbers every runtime-built row after it, and a baseline keyed on
+## the raw path re-presented 30 accepted findings as NEW on a diff that touched
+## no UI (moving-in:G-031, twice). A gate that fires on someone else's commit is
+## a gate that gets waved through. Multiplicity is kept by _apply_ui_baseline.
 func _ui_finding_key(issue: Dictionary) -> String:
-	return "%s@%s" % [str(issue.get("code", "")), str(issue.get("path", ""))]
+	return _normalize_ui_key("%s@%s" % [str(issue.get("code", "")), str(issue.get("path", ""))])
+
+
+## `.../@VBoxContainer@465/@HBoxContainer@466` -> `.../@VBoxContainer/@HBoxContainer`.
+func _normalize_ui_key(key: String) -> String:
+	if not _auto_name_re_compiled:
+		_auto_name_re.compile("@([A-Za-z_][A-Za-z0-9_]*)@[0-9]+")
+		_auto_name_re_compiled = true
+	return _auto_name_re.sub(key, "@$1", true)
 
 
 ## Reads the safe-area inset (pixels trimmed off each viewport edge) from args, else
@@ -4363,20 +4696,48 @@ func _cmd_press(args: Dictionary) -> Dictionary:
 ## the message names: a ray STARTING INSIDE a shape reports nothing, so five
 ## bisecting probes can all come back `clear` while a wall sits between them.
 ##
-## args: { "from": [x,y], "to": [x,y], "mask": int (default all layers),
-##         "areas": bool (also hit Area2Ds, default false),
+## Dimension is decided by the coordinates (moving-in:G-023): [x,y] queries the
+## 2D space, [x,y,z] queries the 3D space, and data.space says which. Before
+## 0.22.0 this was 2D-only and answered `clear` in a 3D project - with the
+## inside-a-shape caveat attached, which sent a session hunting for a geometry
+## bug that did not exist. A 2D query is now REFUSED when the 3D space has
+## bodies and the 2D space has none, naming the fix; a verb that answers
+## confidently in the wrong dimension is worse than one that is absent.
+##
+## args: { "from": [x,y] | [x,y,z], "to": same arity, "mask": int (default all
+##         layers), "areas": bool (also hit Areas, default false),
 ##         "exclude": Array[String] of node paths }
 ## data keys: clear (bool), collider (String path or ""), collider_class,
-## position {x,y}, normal {x,y}, mask, mask_names (Array).
+## position {x,y[,z]}, normal {x,y[,z]}, mask, mask_names (Array), space ("2d"|"3d").
 func _cmd_raycast(args: Dictionary) -> Dictionary:
-	var from: Variant = _parse_vector2_or_null(args.get("from"))
-	var to: Variant = _parse_vector2_or_null(args.get("to"))
+	var raw_from: Variant = args.get("from")
+	var raw_to: Variant = args.get("to")
+	var from3: Variant = _parse_vector3_or_null(raw_from)
+	var to3: Variant = _parse_vector3_or_null(raw_to)
+	if from3 != null and to3 != null:
+		return _raycast_3d(from3, to3, args)
+	if (from3 == null) != (to3 == null):
+		return {"success": false, "message": "raycast: from and to must have the same arity - both [x, y] (2D) or both [x, y, z] (3D)"}
+
+	var from: Variant = _parse_vector2_or_null(raw_from)
+	var to: Variant = _parse_vector2_or_null(raw_to)
 	if from == null or to == null:
-		return {"success": false, "message": "raycast needs from and to as [x, y] (or {\"x\":..,\"y\":..})"}
+		return {"success": false, "message": "raycast needs from and to as [x, y] (2D) or [x, y, z] (3D)"}
 
 	var world: World2D = get_tree().root.world_2d
 	if world == null:
 		return {"success": false, "message": "No World2D (is this a headless run with no 2D space?)"}
+
+	# A 2D query in a project whose colliders all live in 3D can only ever say
+	# `clear`; refuse it rather than answer it. Counted from the tree (static
+	# bodies are not "active" physics objects, so the monitors cannot tell).
+	var colliders: Array[int] = _count_collision_objects()
+	if colliders[0] == 0 and colliders[1] > 0:
+		return {
+			"success": false,
+			"message": "raycast: this tree has %d CollisionObject3D(s) and no CollisionObject2D - a 2D ray can only ever report clear here. Pass 3-component coordinates: --from X,Y,Z --to X,Y,Z" % colliders[1],
+			"data": {"collision_objects_2d": colliders[0], "collision_objects_3d": colliders[1]},
+		}
 
 	var params: PhysicsRayQueryParameters2D = PhysicsRayQueryParameters2D.create(from, to)
 	params.collision_mask = int(args.get("mask", 0xFFFFFFFF))
@@ -4403,7 +4764,7 @@ func _cmd_raycast(args: Dictionary) -> Dictionary:
 			"data": {
 				"clear": true, "collider": "", "collider_class": "",
 				"position": {}, "normal": {},
-				"mask": params.collision_mask, "mask_names": mask_names,
+				"mask": params.collision_mask, "mask_names": mask_names, "space": "2d",
 			},
 		}
 
@@ -4424,6 +4785,77 @@ func _cmd_raycast(args: Dictionary) -> Dictionary:
 			"normal": {"x": normal.x, "y": normal.y},
 			"mask": params.collision_mask,
 			"mask_names": mask_names,
+			"space": "2d",
+		},
+	}
+
+
+## [CollisionObject2D count, CollisionObject3D count] over the whole tree.
+func _count_collision_objects() -> Array[int]:
+	var n2: int = 0
+	var n3: int = 0
+	var stack: Array[Node] = [get_tree().root]
+	while not stack.is_empty():
+		var n: Node = stack.pop_back()
+		if n is CollisionObject2D:
+			n2 += 1
+		elif n is CollisionObject3D:
+			n3 += 1
+		for c: Node in n.get_children(true):
+			stack.append(c)
+	return [n2, n3]
+
+
+## The 3D half of _cmd_raycast. Same contract, Vector3 in and out, layer names
+## from layer_names/3d_physics.
+func _raycast_3d(from: Vector3, to: Vector3, args: Dictionary) -> Dictionary:
+	var world: World3D = get_tree().root.world_3d
+	if world == null:
+		return {"success": false, "message": "No World3D (is this a headless run with no 3D space?)"}
+	var params: PhysicsRayQueryParameters3D = PhysicsRayQueryParameters3D.create(from, to)
+	params.collision_mask = int(args.get("mask", 0xFFFFFFFF))
+	params.collide_with_areas = bool(args.get("areas", false))
+	params.collide_with_bodies = true
+	var excluded: Array[RID] = []
+	for entry: Variant in (args.get("exclude", []) if args.get("exclude") is Array else []):
+		var found: Dictionary = _resolve_node(str(entry))
+		var node: Node = found["node"]
+		if node != null and node is CollisionObject3D:
+			excluded.append((node as CollisionObject3D).get_rid())
+	params.exclude = excluded
+
+	var hit: Dictionary = world.direct_space_state.intersect_ray(params)
+	var mask_names: Array = _layer_names_for_mask(params.collision_mask, "3d_physics")
+	if hit.is_empty():
+		return {
+			"success": true,
+			"message": ("clear from (%.1f, %.1f, %.1f) to (%.1f, %.1f, %.1f) on mask %d [%s] -- note that a ray "
+				+ "STARTING INSIDE a shape reports nothing") % [
+				from.x, from.y, from.z, to.x, to.y, to.z, params.collision_mask, ", ".join(PackedStringArray(mask_names))],
+			"data": {
+				"clear": true, "collider": "", "collider_class": "",
+				"position": {}, "normal": {},
+				"mask": params.collision_mask, "mask_names": mask_names, "space": "3d",
+			},
+		}
+	var collider: Variant = hit.get("collider")
+	var collider_path: String = str((collider as Node).get_path()) if collider is Node else ""
+	var point: Vector3 = hit.get("position", Vector3.ZERO)
+	var normal: Vector3 = hit.get("normal", Vector3.ZERO)
+	return {
+		"success": true,
+		"message": "blocked by %s at (%.2f, %.2f, %.2f)" % [
+			collider_path if not collider_path.is_empty() else "an unnamed collider",
+			point.x, point.y, point.z],
+		"data": {
+			"clear": false,
+			"collider": collider_path,
+			"collider_class": (collider as Object).get_class() if collider is Object else "",
+			"position": {"x": point.x, "y": point.y, "z": point.z},
+			"normal": {"x": normal.x, "y": normal.y, "z": normal.z},
+			"mask": params.collision_mask,
+			"mask_names": mask_names,
+			"space": "3d",
 		},
 	}
 
@@ -4431,12 +4863,12 @@ func _cmd_raycast(args: Dictionary) -> Dictionary:
 ## Resolves a 2D collision mask to the project's own layer names, because the
 ## whole class of bug here is a number nobody can read. Unnamed layers report as
 ## "layer_N" so a bit is never silently dropped from the list.
-func _layer_names_for_mask(mask: int) -> Array:
+func _layer_names_for_mask(mask: int, group: String = "2d_physics") -> Array:
 	var names: Array = []
 	for bit: int in range(32):
 		if mask & (1 << bit) == 0:
 			continue
-		var setting: String = "layer_names/2d_physics/layer_%d" % (bit + 1)
+		var setting: String = "layer_names/%s/layer_%d" % [group, bit + 1]
 		var name: String = str(ProjectSettings.get_setting(setting, ""))
 		names.append(name if not name.is_empty() else "layer_%d" % (bit + 1))
 	return names
@@ -4525,6 +4957,15 @@ func _cmd_sample_pixels(args: Dictionary) -> Dictionary:
 			"darkest": {"r": darkest.r, "g": darkest.g, "b": darkest.b},
 			"dominant": {"r": dominant.r, "g": dominant.g, "b": dominant.b},
 			"dominant_share": float(top_count) / maxf(1.0, float(count)),
+			# Stated so a disagreement with an offline crop is diagnosable
+			# (moving-in:G-032): the rect is in the root viewport's rendered
+			# image, origin top-left, y down - the SAME image and the same
+			# Rect2i that `screenshot --region` crops - and the values are the
+			# 8-bit sRGB the PNG would hold, mapped 0..1.
+			"origin": "top-left",
+			"space": "srgb_0_1",
+			"image_size": {"w": full.size.x, "h": full.size.y},
+			"same_image_as_screenshot": true,
 		},
 	}
 
@@ -4751,6 +5192,85 @@ func _nearest_scroll_container(control: Control) -> ScrollContainer:
 	return null
 
 
+## What a player would see right now, in one call (H-059 -- moving-in's second
+## `G-027`, filed the same turn as its first and lost to an id collision because
+## `upstream_gaps.py` keys on id: two entries with one id pool as one, and the
+## second is silently the one that never arrives). Every other verb answers a
+## narrower question -- reachable_ui answers "can a finger hit THIS ONE control",
+## performance answers "is it fast" -- and none of them answer "what IS the
+## screen showing", which is the one state every game has and the thing a human
+## glancing at a screenshot reads in half a second.
+func _cmd_first_frame(_args: Dictionary) -> Dictionary:
+	var layers: Array = []
+	_collect_canvas_layers(get_tree().root, layers)
+	layers.sort_custom(func(a: Dictionary, b: Dictionary) -> bool: return int(a["layer"]) < int(b["layer"]))
+
+	var vp: Vector2 = _screen_reference_rect().size
+	var topmost: Dictionary = {}
+	_find_topmost_control(get_tree().root, vp, topmost)
+
+	var mouse_mode: String
+	match Input.get_mouse_mode():
+		Input.MOUSE_MODE_VISIBLE: mouse_mode = "VISIBLE"
+		Input.MOUSE_MODE_HIDDEN: mouse_mode = "HIDDEN"
+		Input.MOUSE_MODE_CAPTURED: mouse_mode = "CAPTURED"
+		Input.MOUSE_MODE_CONFINED: mouse_mode = "CONFINED"
+		Input.MOUSE_MODE_CONFINED_HIDDEN: mouse_mode = "CONFINED_HIDDEN"
+		_: mouse_mode = "UNKNOWN"
+
+	var message: String = "%d visible CanvasLayer(s)" % layers.size()
+	if topmost.is_empty():
+		message += "; no on-screen Control found"
+	else:
+		message += "; topmost Control is %s '%s'" % [topmost["type"], topmost["path"]]
+	if bool(get_tree().paused):
+		message += " -- TREE IS PAUSED"
+
+	return {
+		"success": true,
+		"message": message,
+		"data": {
+			"tree_paused": bool(get_tree().paused),
+			"cursor_mode": mouse_mode,
+			"visible_canvas_layers": layers,
+			"topmost_control": topmost,
+			"viewport": {"w": vp.x, "h": vp.y},
+			"geometry_trustworthy": _geometry_caveat().is_empty(),
+			"geometry_caveat": _geometry_caveat(),
+		},
+	}
+
+
+func _collect_canvas_layers(node: Node, out: Array) -> void:
+	if node is CanvasLayer:
+		var cl: CanvasLayer = node as CanvasLayer
+		if cl.visible:
+			out.append({"path": str(cl.get_path()), "layer": cl.layer, "name": str(cl.name)})
+	for child: Node in node.get_children():
+		_collect_canvas_layers(child, out)
+
+
+## `out` is a single-entry Dictionary used as an out-param, overwritten on every
+## visible on-screen Control found. Godot paints children after parents and a
+## later sibling after an earlier one, so the LAST one a depth-first walk finds
+## is the last one painted -- the topmost, by construction, with no z-index or
+## occlusion math needed.
+func _find_topmost_control(node: Node, vp: Vector2, out: Dictionary) -> void:
+	if node is Control:
+		var control: Control = node as Control
+		if _is_effectively_visible(control):
+			var rect: Rect2 = _screen_rect_of(control)
+			if rect.size.x > 0.0 and rect.size.y > 0.0 and Rect2(Vector2.ZERO, vp).intersects(rect):
+				out.clear()
+				out["path"] = str(control.get_path())
+				out["type"] = control.get_class()
+				out["text"] = _get_control_text(control)
+				out["rect"] = {"x": rect.position.x, "y": rect.position.y,
+					"w": rect.size.x, "h": rect.size.y}
+	for child: Node in node.get_children():
+		_find_topmost_control(child, vp, out)
+
+
 ## Every check the harness can run against a live game, in one call, normalized
 ## into one flat findings list. Zero config, zero assertions, one exit code.
 ##
@@ -4887,7 +5407,9 @@ func _cmd_findings(args: Dictionary) -> Dictionary:
 	checks_run.append("signal_unconnected")
 
 	# --- 4. performance: FPS vs fps_min, orphan GROWTH vs orphan_growth_max --
-	var perf: Dictionary = _cmd_performance({})
+	# Measured over the default window (0.22.0), so the gate reads a mean rather
+	# than one frame; the reply says fps_samples for the record.
+	var perf: Dictionary = await _cmd_performance({})
 	var perf_data: Dictionary = perf.get("data", {})
 	var fps: float = float(perf_data.get("fps", 0.0))
 	var fps_min: float = float(_config.get("fps_min", 30))
@@ -5153,6 +5675,19 @@ func _is_number(value: Variant) -> bool:
 ## Parses [x, y] or {"x": ..., "y": ...} into a Vector2. Returns null -- not a zero
 ## vector -- on anything else, so a malformed argument is rejected loudly rather than
 ## silently reinterpreted as the top-left corner of the screen.
+## [x, y, z] or {x, y, z} -> Vector3; anything else (including a 2-vector) -> null.
+func _parse_vector3_or_null(value: Variant) -> Variant:
+	if value is Array:
+		var arr: Array = value
+		if arr.size() == 3 and _is_number(arr[0]) and _is_number(arr[1]) and _is_number(arr[2]):
+			return Vector3(float(arr[0]), float(arr[1]), float(arr[2]))
+	elif value is Dictionary:
+		var dict: Dictionary = value
+		if dict.has("x") and dict.has("y") and dict.has("z") and _is_number(dict["x"]) and _is_number(dict["y"]) and _is_number(dict["z"]):
+			return Vector3(float(dict["x"]), float(dict["y"]), float(dict["z"]))
+	return null
+
+
 func _parse_vector2_or_null(value: Variant) -> Variant:
 	if value is Array:
 		var arr: Array = value
@@ -5197,6 +5732,12 @@ func _write_owner_file() -> void:
 		"last_poll_unix": Time.get_unix_time_from_system(),
 		"heartbeat_interval_sec": float(HEARTBEAT_INTERVAL_MSEC) / 1000.0,
 		"project": str(ProjectSettings.get_setting("application/config/name", "")),
+		# The checkout this game runs from (plant-tower-defense:G-018). A sibling
+		# git worktree has the same project NAME, so the same user:// and the same
+		# bus; its game overwrites this record and its pid then matches every
+		# reply, so the pid check reads a foreign game as your own. The path is
+		# the one fact that differs, and the client compares it to its --path.
+		"project_path": ProjectSettings.globalize_path("res://"),
 		"session": _session,
 		"bus_dir": _bus_dir if not _bus_dir.is_empty() else ProjectSettings.globalize_path("user://"),
 	}, "  "))

@@ -12,14 +12,20 @@ This is the exact sequence, in order. Do not skip a step because the change felt
 
 ## 0a. Confirm you are looking at the current HEAD
 
-**Do this before reading a single source file.** The `gitStatus` block in a session's
+**Do this before reading a single source file.** Also `gh issue list --state open
+--limit 5` — a parallel session can file an issue mid-turn (gh#17 arrived while 0.22.0
+was being built and was addressed in the same release). The `gitStatus` block in a session's
 context is a snapshot taken when the session started, and this repo can move under a long
 session — a merged PR, a parallel session, a `pull --ff-only` between turns.
 
 ```bash
 git log --oneline -3
-git status --short
+git update-index --refresh >/dev/null; git status --short
 ```
+
+(`update-index --refresh` first: a stale stat cache, or a parallel session, can move the
+modified-file count under a long session — gh#17 saw 6 become 8 across one worktree
+add/remove. Re-run it rather than remember it.)
 
 Compare the top sha against whatever your context claims. If they differ, **re-read every
 file you were about to change** and re-derive line numbers; do not edit by remembered
@@ -141,7 +147,16 @@ FAIL line in the log. In 0.21.0 a mutation written through a shell heredoc had i
 ` escapes rewritten by the tool, the script asserted-out, and the run that followed
 printed every new check green against the pristine file — a mutation that did not
 apply reads exactly like a passing control ([H-057]). Write the mutation script with the
-file-write tool, not a heredoc, and check `s.count(anchor) == 1` inside it.
+file-write tool, not a heredoc, and check `s.count(anchor) == 1` inside it. (The same
+heredoc rewriting bites *every* Python edit script that carries a `\n` or `\t` — in
+0.22.0 three template edits silently failed their anchor for that reason before the
+pattern was recognised. Any edit script with a backslash goes through the file-write tool.)
+
+**Batch the mutations.** One run of `check_templates.py` costs ~5 minutes and every
+check names itself in its FAIL line, so one run can carry every mutation whose checks
+are independent — 0.22.0 proved eight in one run plus one follow-up. Restore from a
+copy you took *before* mutating and prove it with `cmp` against that copy; never
+restore a template with `git checkout --` (the file also holds the release's real edits).
 
 **Do not edit the mutated file while the run is in flight** — the restore overwrites
 whatever is on disk. Do other work (docs, log) for the five minutes, and quote the FAIL
@@ -197,7 +212,8 @@ commit; if you are already on `master` with the work in the tree,
 
 Landing it on `master` is a **separate, explicit ask.** When it comes, prefer a PR;
 merge locally with `--no-ff` only if the user asked for `master` directly, so the history
-keeps the merge-commit shape the PRs produce.
+keeps the merge-commit shape the PRs produce — and do it by §6b, never by checking out
+`master` in the main worktree.
 
 The commit message is the release note: what shipped, **why the obvious implementation
 was not used** if it wasn't, how it was validated, and what was considered and rejected.
@@ -212,9 +228,40 @@ release X.Y.Z: <the one-line claim>
 
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
 EOF
-git push origin master
+git push -u origin release/X.Y.Z     # the branch; master is §6b, and only when asked
 bd dolt push        # beads sync is separate from git; ask before running it
 ```
+
+## 6b. Landing it on master (gh#17)
+
+Separate, explicit ask; prefer a PR. When the user asks for `master` directly, **do not
+`git checkout master` in the main worktree.** A release branch is normally dirty with the
+next version's work, and `experiments/` and `.devtools/` are untracked by design with no
+stash, reflog or Recycle Bin fallback ([H-052]) — `git checkout master` there either
+refuses or carries all of it onto `master`, where the next `git add -A` commits an
+unstamped half-version onto the default branch. Merge in a throwaway worktree instead; it
+cannot reach the main tree at all:
+
+```bash
+WT="$TEMP/master-wt"
+git worktree add "$WT" master
+git -C "$WT" merge --no-ff release/X.Y.Z -m "Merge release/X.Y.Z: <release commit subject>"
+
+# prove nothing from the working tree leaked in, and that the result is stamp-clean
+[ "$(git rev-parse "$(git -C "$WT" rev-parse HEAD)^{tree}")" = "$(git rev-parse release/X.Y.Z^{tree})" ] \
+  && echo "tree match OK"
+(cd "$WT" && python tools/record_version.py --check)   # expect exit 0
+
+git -C "$WT" push origin master
+git worktree remove "$WT"
+git update-index --refresh >/dev/null; git status --short   # your uncommitted work, still here
+```
+
+The tree-hash equality is the load-bearing assertion: a `--no-ff` merge of a descendant
+branch must produce exactly the release commit's tree, so any difference means
+working-tree content got in. Then close the GitHub issues the release named
+(`gh issue close N --comment "shipped in X.Y.Z"`) — they stay open until the merge, not
+until the branch commit.
 
 ## Docs that must move with the code
 

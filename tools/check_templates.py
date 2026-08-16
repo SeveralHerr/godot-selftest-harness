@@ -474,6 +474,18 @@ def stage_assemble(scratch, user_dir_name):
         "## Harness-check fixture (written by check_templates.py stage_assemble).",
         "",
         "var presses: int = 0",
+        "## moving-in:G-029: the last InputEventMouseMotion.relative this node saw.",
+        "var last_motion: Vector2 = Vector2.ZERO",
+        "var motion_events: int = 0",
+        "## moving-in:G-033: resources held from startup, to prove `reload` reaches holders.",
+        'var reload_settings: LabelSettings = preload("res://tools/harness_check_reload.tres")',
+        'var reload_shader: Shader = preload("res://shaders/plain.gdshader")',
+        "",
+        "",
+        "func _unhandled_input(event: InputEvent) -> void:",
+        "\tif event is InputEventMouseMotion:",
+        "\t\tlast_motion = (event as InputEventMouseMotion).relative",
+        "\t\tmotion_events += 1",
         "",
         "",
         "func _ready() -> void:",
@@ -618,6 +630,74 @@ def stage_assemble(scratch, user_dir_name):
         '\t\trow.text = "Buy %d" % (i + 1)',
         "\t\trow.custom_minimum_size = Vector2(160, 40)",
         "\t\trows.add_child(row)",
+        "\t# moving-in:G-023: one collider per physics space. The 2D wall sits on the",
+        "\t# contract row's (0,0)->(64,64) ray; the 3D wall sits on (0,0,0)->(0,0,-10).",
+        "\t# harness_set_wall_2d(false) removes the 2D one so the refusal path (2D ray,",
+        "\t# 3D-only tree) can be exercised and restored.",
+        "\tvar wall2 := StaticBody2D.new()",
+        '\twall2.name = "Wall2D"',
+        "\twall2.position = Vector2(40, 40)",
+        "\tvar shape2 := CollisionShape2D.new()",
+        "\tvar rect2 := RectangleShape2D.new()",
+        "\trect2.size = Vector2(16, 16)",
+        "\tshape2.shape = rect2",
+        "\twall2.add_child(shape2)",
+        "\tadd_child(wall2)",
+        "\tvar wall3 := StaticBody3D.new()",
+        '\twall3.name = "Wall3D"',
+        "\twall3.position = Vector3(0, 0, -5)",
+        "\tvar shape3 := CollisionShape3D.new()",
+        "\tvar box3 := BoxShape3D.new()",
+        "\tbox3.size = Vector3(1, 1, 1)",
+        "\tshape3.shape = box3",
+        "\twall3.add_child(shape3)",
+        "\tadd_child(wall3)",
+        "\t# moving-in:G-031: a defective row under an AUTO-NAMED container",
+        "\t# (@VBoxContainer@NNN/@Button@MMM). harness_rebuild_auto_rows() frees and",
+        "\t# rebuilds it, which renumbers it - the baseline must survive that.",
+        "\tharness_build_auto_rows()",
+        "",
+        "",
+        "func harness_build_auto_rows() -> void:",
+        "\tvar holder := VBoxContainer.new()",
+        "\tholder.position = Vector2(400, 300)",
+        "\tholder.add_to_group(\"harness_auto_rows\")",
+        "\tvar tiny := Button.new()",
+        "\ttiny.custom_minimum_size = Vector2(8, 8)",
+        "\ttiny.size = Vector2(8, 8)",
+        "\tholder.add_child(tiny)",
+        "\tadd_child(holder)",
+        "",
+        "",
+        "## Frees every auto-named holder and builds one again (new @NNN counters).",
+        "func harness_rebuild_auto_rows(extra_broken: int = 0) -> int:",
+        "\tfor n: Node in get_tree().get_nodes_in_group(\"harness_auto_rows\"):",
+        "\t\tremove_child(n)",
+        "\t\tn.free()",
+        "\tharness_build_auto_rows()",
+        "\tfor _i: int in extra_broken:",
+        "\t\tharness_build_auto_rows()",
+        "\treturn get_tree().get_nodes_in_group(\"harness_auto_rows\").size()",
+        "",
+        "",
+        "func harness_set_wall_2d(on: bool) -> bool:",
+        "\tvar wall: Node = get_node_or_null(\"Wall2D\")",
+        "\tif wall == null:",
+        "\t\treturn false",
+        "\tif on and wall.get_parent() == null:",
+        "\t\tadd_child(wall)",
+        "\telif not on and wall.get_parent() != null:",
+        "\t\tremove_child(wall)",
+        "\treturn true",
+        "",
+        "",
+        "## moving-in:G-030: adds N nodes under a live parent (never orphans).",
+        "func harness_add_nodes(count: int) -> int:",
+        "\tfor _i: int in count:",
+        "\t\tvar n := Node2D.new()",
+        "\t\tn.add_to_group(\"harness_added\")",
+        "\t\tadd_child(n)",
+        "\treturn get_tree().get_nodes_in_group(\"harness_added\").size()",
         "",
         "",
         "## Lets check_paused_bridge() pause the tree over the bus, so the",
@@ -656,6 +736,11 @@ def stage_assemble(scratch, user_dir_name):
         "class_name HarnessCheckElite\nextends HarnessCheckCritter\n\n"
         "## gh#15.2 fixture: a subclass; --class HarnessCheckCritter must find it.\n"
         "var crown: bool = true\n", encoding="utf-8")
+    # moving-in:G-033: a text resource the fixture preloads; check_reload rewrites
+    # it on disk and asserts the held instance changed.
+    (scratch / "tools" / "harness_check_reload.tres").write_text(
+        '[gd_resource type="LabelSettings" format=3]\n\n[resource]\nfont_size = 11\n',
+        encoding="utf-8")
 
     (scratch / "main.tscn").write_text(
         "\n".join([
@@ -721,8 +806,21 @@ def stage_assemble(scratch, user_dir_name):
     orphan.parent.mkdir(parents=True, exist_ok=True)
     orphan.write_text(
         "extends Node\n\n## gh#11 fixture: a public method with no caller anywhere.\n\n"
-        "func never_called_anywhere() -> int:\n\treturn 1\n", encoding="utf-8")
+        "## moving-in:G-028 fixture: a signal emitted here that nothing connects to.\n"
+        "signal harness_dead_button\n"
+        "## ...and one that IS connected (from the fixture scene script), the negative control.\n"
+        "signal harness_heard_signal\n\n"
+        "func never_called_anywhere() -> int:\n\tharness_dead_button.emit()\n\treturn 1\n",
+        encoding="utf-8")
     scaffold_install.ensure_uid_sidecars(REPO_ROOT, scratch, [orphan])
+    # The negative control's listener: a game script that connects the second signal.
+    listener = scratch / "game" / "harness_check_listener.gd"
+    listener.write_text(
+        "extends Node\n\n## moving-in:G-028 fixture: connects harness_heard_signal so the "
+        "orphan-signal scan has a signal that must NOT be reported.\n\n"
+        "func hook(o: Node) -> void:\n\to.harness_heard_signal.connect(func() -> void: pass)\n",
+        encoding="utf-8")
+    scaffold_install.ensure_uid_sidecars(REPO_ROOT, scratch, [listener])
     project_text = (scratch / "project.godot").read_text(encoding="utf-8")
     if project_text.count(scaffold_install.AUTOLOAD_LINE) != 1:
         return fail("full did not wire the DevTools autoload exactly once:\n" + project_text)
@@ -834,6 +932,24 @@ def stage_names(scratch, godot, cache):
         "func probe() -> void:",
         "\tprint(Node.NOTIFICATION_NOT_A_THING)",
         "",
+        "# moving-in:G-022: verbatim the override that passed name_check clean and",
+        "# failed --import with 'The function signature doesn't match the parent'.",
+        "func _set(action: Callable) -> void:",
+        "\taction.call()",
+        "",
+        "# The negative controls: a correct override, one with an extra OPTIONAL",
+        "# parameter (legal), and an inner class whose _process arity is that of a",
+        "# different base and must not be judged against Node's.",
+        "func _process(_delta: float) -> void:",
+        "\tpass",
+        "",
+        "func _notification(what: int, _extra: int = 0) -> void:",
+        "\tif what == 0: pass",
+        "",
+        "class Inner extends RefCounted:",
+        "\tfunc _process(a: int, b: int) -> void:",
+        "\t\tprint(a + b)",
+        "",
     ]), encoding="utf-8")
     try:
         proc = _run_name_check(scratch, cache, ["--json"])
@@ -842,17 +958,28 @@ def stage_names(scratch, godot, cache):
                       % (proc.returncode, proc.stdout.strip()))
         else:
             try:
-                rules = {f["rule"] for f in json.loads(proc.stdout)["findings"]}
+                findings = json.loads(proc.stdout)["findings"]
+                rules = {f["rule"] for f in findings}
             except (ValueError, KeyError) as exc:
-                rules = set()
+                findings, rules = [], set()
                 ok = fail("stage 2.5 names: --json output not parseable: %s" % exc)
-            expected = {"missing_preload", "unknown_type", "unknown_member"}
+            expected = {"missing_preload", "unknown_type", "unknown_member",
+                        "virtual_signature_mismatch"}
             if not expected <= rules:
                 ok = fail("stage 2.5 names: planted file should trigger %s, got %s"
                           % (sorted(expected), sorted(rules)))
             else:
-                print("stage 2.5 names: planted bad names -> exit 1, rules %s"
-                      % sorted(expected))
+                virt = [f for f in findings if f["rule"] == "virtual_signature_mismatch"]
+                subjects = sorted(f.get("subject") for f in virt)
+                if subjects != ["_set"]:
+                    ok = fail("stage 2.5 names: virtual_signature_mismatch should name "
+                              "exactly ['_set'] (the correct _process, the optional-arg "
+                              "_notification and the inner class's _process are the "
+                              "negative controls), got %s" % subjects)
+                else:
+                    print("stage 2.5 names: planted bad names -> exit 1, rules %s; "
+                          "virtual_signature_mismatch names _set only"
+                          % sorted(expected))
     finally:
         planted.unlink(missing_ok=True)
 
@@ -909,6 +1036,21 @@ def check_engine_skew(scratch, cache):
 
 def stage_runners(godot, scratch):
     ok = True
+    # moving-in:G-018/G-025: a --script runner must not touch a bus it did not
+    # open. Plant a live-looking owner record and an in-flight command in the
+    # scratch user dir BEFORE the runners; both must survive byte-for-byte.
+    # Before 0.22.0 the autoload's _ready() deleted both and wrote its own owner
+    # (its pid, soon dead) - hijacking a colleague session's game mid-command and
+    # then refusing the next `launch` for 30s.
+    udir = user_data_dir(_project_user_dir_name(scratch))
+    udir.mkdir(parents=True, exist_ok=True)
+    owner_path = udir / "devtools_owner.json"
+    cmd_path = udir / "devtools_commands.json"
+    planted_owner = json.dumps({"pid": 424242, "start_unix": 1.0, "last_poll_unix": time.time(),
+                                "project": "someone-else", "planted_by": "check_templates"})
+    planted_cmd = json.dumps({"id": "planted01", "action": "ping", "args": {}})
+    owner_path.write_text(planted_owner, encoding="utf-8")
+    cmd_path.write_text(planted_cmd, encoding="utf-8")
     for script, name in (("res://tools/lint_project.gd", "lint"),
                          ("res://tools/run_tests.gd", "tests")):
         proc = run_godot(godot, scratch, ["--script", script])
@@ -923,12 +1065,57 @@ def stage_runners(godot, scratch):
             if name == "lint":
                 ok = check_shader_denominator(proc.stdout) and ok
                 ok = check_orphan_denominator(proc.stdout) and ok
+                ok = check_signal_denominator(proc.stdout) and ok
+        surviving_owner = owner_path.read_text(encoding="utf-8") if owner_path.exists() else None
+        surviving_cmd = cmd_path.read_text(encoding="utf-8") if cmd_path.exists() else None
+        if surviving_owner != planted_owner or surviving_cmd != planted_cmd:
+            ok = fail("stage 4 %s: a --script runner touched the bus it does not own "
+                      "(moving-in:G-018/G-025): owner file %s, command file %s"
+                      % (name, "intact" if surviving_owner == planted_owner else
+                         ("DELETED" if surviving_owner is None else "REWRITTEN to %s" % surviving_owner),
+                         "intact" if surviving_cmd == planted_cmd else
+                         ("DELETED" if surviving_cmd is None else "REWRITTEN")))
+            # Re-plant so the second runner is judged on its own.
+            owner_path.write_text(planted_owner, encoding="utf-8")
+            cmd_path.write_text(planted_cmd, encoding="utf-8")
+    owner_path.unlink(missing_ok=True)
+    cmd_path.unlink(missing_ok=True)
+    if ok:
+        print("stage 4 runners: a planted owner record and in-flight command survived "
+              "both --script runners untouched (passive bus)")
     if ok:
         ok = stage_vacuous_control(godot, scratch) and ok
         ok = stage_runner_controls(godot, scratch) and ok
         ok = stage_shader_control(godot, scratch) and ok
         ok = stage_capture(godot, scratch) and ok
     return ok
+
+
+def _project_user_dir_name(scratch):
+    m = re.search(r'custom_user_dir_name="([^"]+)"',
+                  (scratch / "project.godot").read_text(encoding="utf-8"))
+    return m.group(1) if m else "harness_check"
+
+
+def check_signal_denominator(out):
+    """The orphan-signal scan reports what it looked at and names the planted
+    dead button (moving-in:G-028); the connected control must NOT be named."""
+    m = re.search(r"Signals: (\d+) of (\d+) declared signal\(s\) have no listener", out)
+    if not m:
+        return fail("lint printed no `Signals: N of M declared signal(s)` line - the "
+                    "orphan-signal scan is not running (moving-in:G-028)\n%s" % out)
+    found, checked = (int(g) for g in m.groups())
+    if checked < 2 or found < 1:
+        return fail("signal scan reports %d of %d - the fixture declares two signals in "
+                    "game/harness_check_orphan.gd and one is unheard" % (found, checked))
+    if "harness_dead_button" not in out:
+        return fail("signal scan did not name the planted unheard signal harness_dead_button\n%s" % out)
+    if "harness_heard_signal" in out:
+        return fail("signal scan named harness_heard_signal, which game/harness_check_listener.gd "
+                    "connects - the listener walk is not looking at other files")
+    print("stage 4 lint: signals %d of %d unheard (harness_dead_button named, "
+          "harness_heard_signal not)" % (found, checked))
+    return True
 
 
 def check_shader_denominator(out):
@@ -1227,7 +1414,10 @@ def stage_capture(godot, scratch):
         print("stage 4 capture: windowed capture SKIPPED (no display server available)")
         return True
     if real.returncode != 0:
-        return fail("windowed capture.gd exited %d\n%s" % (real.returncode, real.stdout))
+        # H-058: keep stderr too - the 0xFFFFFFFF exits printed nothing on stdout.
+        return fail("windowed capture.gd exited %d\nstdout:\n%s\nstderr (tail):\n%s"
+                    % (real.returncode, real.stdout,
+                       "\n".join((real.stderr or "").strip().splitlines()[-15:])))
     if not shot.exists() or shot.stat().st_size == 0:
         return fail("windowed capture.gd exited 0 but produced no usable file")
     m = re.search(r"(\d+) distinct colour\(s\) sampled", real.stdout)
@@ -1654,6 +1844,39 @@ def check_ui_baseline(client, scratch):
     if (ignored.get("data") or {}).get("new_count") != n:
         return fail("--no-baseline must re-report every finding")
 
+    # moving-in:G-031: rebuild the auto-named holder so its @VBoxContainer@NNN /
+    # @Button@MMM path renumbers. The finding is the same finding; it must stay
+    # PRE-EXISTING. Then add one MORE broken auto row: exactly one NEW, so the
+    # normalised key still counts.
+    rebuilt = client.send_command(scratch, "run_method",
+                                  {"node_path": "/root/Main", "method": "harness_rebuild_auto_rows",
+                                   "args": [0]}, timeout=15.0)
+    if not rebuilt.get("success"):
+        return fail("could not rebuild the auto-named rows: %s" % rebuilt.get("message"))
+    renum = call()
+    dr = renum.get("data") or {}
+    if dr.get("new_count") != 0 or dr.get("pre_existing_count") != n:
+        news = [i.get("path") for i in dr.get("issues", []) if i.get("baseline") == "new"]
+        return fail("after renumbering the auto-named holder, findings must stay pre-existing: "
+                    "new=%r pre=%r of %d; NEW paths %r (moving-in:G-031)"
+                    % (dr.get("new_count"), dr.get("pre_existing_count"), n, news))
+    more = client.send_command(scratch, "run_method",
+                               {"node_path": "/root/Main", "method": "harness_rebuild_auto_rows",
+                                "args": [1]}, timeout=15.0)
+    if not more.get("success"):
+        return fail("could not add the extra auto row: %s" % more.get("message"))
+    extra = call()
+    de = extra.get("data") or {}
+    if de.get("new_count") != 1 or de.get("pre_existing_count") != n:
+        return fail("one extra broken auto row must be exactly 1 NEW over %d pre-existing "
+                    "(multiplicity), got new=%r pre=%r"
+                    % (n, de.get("new_count"), de.get("pre_existing_count")))
+    client.send_command(scratch, "run_method",
+                        {"node_path": "/root/Main", "method": "harness_rebuild_auto_rows",
+                         "args": [0]}, timeout=15.0)
+    print("stage 5 bridge: validate_ui baseline survives auto-name renumbering (0 NEW), and "
+          "one extra auto row is exactly 1 NEW")
+
     # The baseline stays written. The contract table's validate_ui row runs
     # after this and asserts the envelope only, precisely because success now
     # depends on baseline state rather than on the verb alone.
@@ -2020,6 +2243,226 @@ def check_set_state_dotted(client, scratch):
     return True
 
 
+def check_performance_window_and_growth(client, scratch):
+    """`performance` MEASURES fps over a window and reports in-tree node growth
+    (moving-in:G-021, G-030). A one-frame read presented as a rate nearly gated
+    a feature on 70->37 where the controlled A/B said 2 fps; a per-visit
+    CanvasLayer leak reported orphan growth +0 forever."""
+    def call(action, args=None, timeout=20.0):
+        return client.send_command(scratch, action, args or {}, timeout=timeout)
+
+    perf = call("performance", {"frames": 24, "reset_baseline": True})
+    d = perf.get("data") or {}
+    for key in ("fps", "fps_instant", "fps_min", "fps_max", "fps_samples", "fps_window_sec",
+                "fps_settling", "nodes", "node_baseline", "node_growth"):
+        if key not in d:
+            return fail("performance reply lacks %r (moving-in:G-021/G-030)" % key)
+    if d["fps_samples"] != 24:
+        return fail("performance --frames 24 sampled %r frames" % d["fps_samples"])
+    if not (d["fps_min"] - 1e-6 <= d["fps"] <= d["fps_max"] + 1e-6) or d["fps_window_sec"] <= 0:
+        return fail("performance window is not a measurement: mean %r outside [min %r, max %r] "
+                    "or window %rs" % (d["fps"], d["fps_min"], d["fps_max"], d["fps_window_sec"]))
+    if d["node_growth"] != 0:
+        return fail("performance --reset-baseline must report node_growth 0 right after, got %r"
+                    % d["node_growth"])
+    single = call("performance", {"frames": 0})
+    if (single.get("data") or {}).get("fps_samples") != 0:
+        return fail("performance --frames 0 must be the instantaneous read (fps_samples 0)")
+
+    added = call("run_method", {"node_path": "/root/Main", "method": "harness_add_nodes",
+                                "args": [7]})
+    if not added.get("success"):
+        return fail("could not add fixture nodes: %s" % added.get("message"))
+    after = call("performance", {"frames": 4, "by_type": True})
+    da = after.get("data") or {}
+    if da.get("node_growth") != 7:
+        return fail("7 nodes parented under a live node must show as node_growth 7, got %r "
+                    "(orphan growth cannot see in-tree accumulation - this is the number "
+                    "that can)" % da.get("node_growth"))
+    delta = da.get("node_types_delta")
+    if not isinstance(delta, dict) or delta.get("Node2D") != 7:
+        return fail("performance --by-type must attribute the growth: expected {'Node2D': 7}, "
+                    "got %r" % delta)
+    if da.get("orphan_growth", 0) != 0:
+        return fail("the added nodes are in-tree; orphan growth should stay 0, got %r"
+                    % da.get("orphan_growth"))
+    print("stage 5 bridge: performance --frames 24 -> mean %.1f in [%.1f, %.1f] over %.2fs, "
+          "--frames 0 instantaneous; 7 in-tree nodes -> node_growth +7, by-type Node2D +7, "
+          "orphan growth 0" % (d["fps"], d["fps_min"], d["fps_max"], d["fps_window_sec"]))
+    return True
+
+
+def check_game_speed_floor(client, scratch):
+    """set_game_speed refuses a scale that would freeze the game (moving-in:G-019)."""
+    def call(action, args=None):
+        return client.send_command(scratch, action, args or {}, timeout=15.0)
+    r = call("set_game_speed", {"scale": 0.0})
+    if r.get("success") is not False or "smallest accepted" not in str(r.get("message")):
+        call("set_game_speed", {"scale": 1.0})
+        return fail("set_game_speed 0.0 must be refused naming the floor, got %r"
+                    % r.get("message"))
+    r2 = call("set_game_speed", {"scale": 0.04})
+    d2 = r2.get("data") or {}
+    if not r2.get("success") or abs(float(d2.get("current_scale", 0)) - 0.04) > 1e-6:
+        call("set_game_speed", {"scale": 1.0})
+        return fail("set_game_speed 0.04 must be applied as 0.04, got %r / %r"
+                    % (r2.get("message"), d2))
+    r3 = call("set_game_speed", {"scale": 1.0})
+    if not r3.get("success"):
+        return fail("could not restore game speed: %r" % r3.get("message"))
+    print("stage 5 bridge: set_game_speed 0.0 refused (names the floor), 0.04 applied as 0.04, restored")
+    return True
+
+
+def check_raycast_3d(client, scratch):
+    """raycast queries the space its coordinates name (moving-in:G-023): a 3D ray
+    hits the planted Wall3D; a 2D ray hits Wall2D; a 2D ray on a tree with only
+    3D colliders is REFUSED naming the fix; mixed arity is refused."""
+    def call(action, args=None):
+        return client.send_command(scratch, action, args or {}, timeout=15.0)
+    hit3 = call("raycast", {"from": [0, 0, 0], "to": [0, 0, -10]})
+    d3 = hit3.get("data") or {}
+    if not hit3.get("success") or d3.get("space") != "3d" or d3.get("clear") is not False:
+        return fail("3D raycast (0,0,0)->(0,0,-10) should hit Wall3D in space 3d, got %r %r"
+                    % (hit3.get("message"), d3))
+    if "Wall3D" not in str(d3.get("collider")) or "z" not in (d3.get("position") or {}):
+        return fail("3D raycast hit reports collider %r position %r" % (d3.get("collider"), d3.get("position")))
+    hit2 = call("raycast", {"from": [0, 0], "to": [64, 64]})
+    d2 = hit2.get("data") or {}
+    if not hit2.get("success") or d2.get("space") != "2d" or d2.get("clear") is not False:
+        return fail("2D raycast (0,0)->(64,64) should hit Wall2D in space 2d, got %r %r"
+                    % (hit2.get("message"), d2))
+    mixed = call("raycast", {"from": [0, 0], "to": [0, 0, -10]})
+    if mixed.get("success") is not False or "arity" not in str(mixed.get("message")):
+        return fail("mixed-arity raycast must be refused naming arity, got %r" % mixed.get("message"))
+    off = call("run_method", {"node_path": "/root/Main", "method": "harness_set_wall_2d", "args": [False]})
+    if not off.get("success"):
+        return fail("could not remove Wall2D: %s" % off.get("message"))
+    try:
+        refused = call("raycast", {"from": [0, 0], "to": [64, 64]})
+        if refused.get("success") is not False or "X,Y,Z" not in str(refused.get("message")):
+            return fail("a 2D raycast on a tree whose only colliders are 3D must be refused "
+                        "naming --from X,Y,Z; got %r" % refused.get("message"))
+    finally:
+        call("run_method", {"node_path": "/root/Main", "method": "harness_set_wall_2d", "args": [True]})
+    print("stage 5 bridge: raycast 3D hits Wall3D (space 3d), 2D hits Wall2D, mixed arity refused, "
+          "2D on a 3D-only tree refused naming X,Y,Z")
+    return True
+
+
+def check_mouse_move(client, scratch):
+    """mouse_move dispatches a real InputEventMouseMotion the tree can read
+    (moving-in:G-029) - asserted by the fixture's _unhandled_input, not by the reply."""
+    def call(action, args=None):
+        return client.send_command(scratch, action, args or {}, timeout=15.0)
+    before = call("get_state", {"node_path": "/root/Main", "properties": ["motion_events"]})
+    n0 = int(_state_props(before).get("motion_events", 0))
+    r = call("mouse_move", {"relative": [40, -8], "steps": 4})
+    d = r.get("data") or {}
+    if not r.get("success") or d.get("steps") != 4 or "mouse_mode" not in d:
+        return fail("mouse_move failed or lacks keys: %r %r" % (r.get("message"), d))
+    after = call("get_state", {"node_path": "/root/Main", "properties": ["motion_events", "last_motion"]})
+    props = _state_props(after)
+    n1 = int(props.get("motion_events", 0))
+    if n1 - n0 != 4:
+        return fail("mouse_move --steps 4 should reach _unhandled_input 4 times, saw %d -> %d"
+                    % (n0, n1))
+    last = props.get("last_motion")
+    lx, ly = _xy_of(last)
+    if lx is None or abs(lx - 10.0) > 1e-3 or abs(ly - (-2.0)) > 1e-3:
+        return fail("last relative should be (10, -2) (40,-8 split in 4), fixture saw %r" % (last,))
+    print("stage 5 bridge: mouse_move 40,-8 in 4 steps reached _unhandled_input 4 times, "
+          "last relative (10, -2)")
+    return True
+
+
+def _state_props(reply):
+    """get_state's filtered values: newer games nest them under data.properties,
+    older ones put them at the top level of data beside missing/transform."""
+    data = reply.get("data") or {}
+    props = data.get("properties")
+    if isinstance(props, dict):
+        return props
+    return {k: v for k, v in data.items() if k not in ("missing", "transform")}
+
+
+def _xy_of(value):
+    """(x, y) from a Vector2 rendered as dict, list, or '(x, y)' string."""
+    if isinstance(value, dict):
+        return value.get("x"), value.get("y")
+    if isinstance(value, (list, tuple)) and len(value) >= 2:
+        return value[0], value[1]
+    m = re.match(r"\(?\s*(-?[\d.]+)\s*,\s*(-?[\d.]+)", str(value))
+    if m:
+        return float(m.group(1)), float(m.group(2))
+    return None, None
+
+
+def check_reload(client, scratch):
+    """`reload` re-reads an edited resource into the instance the game already
+    holds (moving-in:G-033): a text .tres (re-parsed in place) and a .gdshader
+    (new object; stored properties copied onto the cached one)."""
+    def call(action, args=None):
+        return client.send_command(scratch, action, args or {}, timeout=15.0)
+    def held(prop):
+        r = call("get_state", {"node_path": "/root/Main", "properties": [prop]})
+        return _state_props(r).get(prop)
+    if held("reload_settings.font_size") != 11:
+        return fail("fixture should hold font_size 11 from the preloaded .tres, got %r"
+                    % held("reload_settings.font_size"))
+    tres = scratch / "tools" / "harness_check_reload.tres"
+    tres.write_text(tres.read_text(encoding="utf-8").replace("font_size = 11", "font_size = 23"),
+                    encoding="utf-8")
+    r = call("reload", {"path": "res://tools/harness_check_reload.tres"})
+    d = r.get("data") or {}
+    if not r.get("success") or d.get("was_cached") is not True or d.get("holders_updated") is not True:
+        return fail("reload .tres: %r %r" % (r.get("message"), d))
+    if held("reload_settings.font_size") != 23:
+        return fail("after reload the HELD LabelSettings should read font_size 23, got %r - the "
+                    "cached instance was not updated" % held("reload_settings.font_size"))
+    shader = scratch / "shaders" / "plain.gdshader"
+    code0 = str(held("reload_shader.code") or "")
+    if "0.5" not in code0:
+        return fail("fixture's held shader code should contain the 0.5 default, got %r" % code0[:80])
+    shader.write_text(shader.read_text(encoding="utf-8").replace("= 0.5", "= 0.75"), encoding="utf-8")
+    r2 = call("reload", {"path": "res://shaders/plain.gdshader"})
+    d2 = r2.get("data") or {}
+    if not r2.get("success") or d2.get("holders_updated") is not True:
+        return fail("reload .gdshader: %r %r" % (r2.get("message"), d2))
+    code1 = str(held("reload_shader.code") or "")
+    if "0.75" not in code1:
+        return fail("after reload the HELD Shader's code should carry 0.75, got %r" % code1[:120])
+    missing = call("reload", {"path": "res://tools/no_such_resource.tres"})
+    if missing.get("success") is not False:
+        return fail("reload of a missing path must fail")
+    print("stage 5 bridge: reload updated a held .tres (font_size 11 -> 23) and a held .gdshader "
+          "(0.5 -> 0.75) in place; missing path refused")
+    return True
+
+
+def check_ping_project_path(client, scratch):
+    """ping and the owner file name the checkout the game runs from
+    (plant-tower-defense:G-018), and the client's comparison sees a worktree."""
+    ping = client.send_command(scratch, "ping", {}, timeout=10.0)
+    pp = (ping.get("data") or {}).get("project_path")
+    if not pp or not client._same_project_dir(pp, scratch):
+        return fail("ping.project_path should name the scratch project, got %r (scratch %s)"
+                    % (pp, scratch))
+    owner, _ = client._read_owner(client.get_user_data_path(scratch))
+    if not owner or not client._same_project_dir(owner.get("project_path"), scratch):
+        return fail("owner file should carry project_path naming the scratch project, got %r"
+                    % (owner or {}).get("project_path"))
+    status = client.owner_status(client.get_user_data_path(scratch))
+    if client.foreign_project_owner(status, scratch) is not None:
+        return fail("the scratch's own game must not read as foreign")
+    if client.foreign_project_owner(status, scratch.parent / "elsewhere") is None:
+        return fail("a live owner from another checkout must read as foreign to a client "
+                    "at a different --path (plant-tower-defense:G-018)")
+    print("stage 5 bridge: ping/owner carry project_path = the scratch; the same game read "
+          "from another --path is reported foreign")
+    return True
+
+
 def check_paused_bridge(client, scratch):
     """The bridge must answer while the tree is paused (findmyballs:G-003).
 
@@ -2271,6 +2714,12 @@ def stage_bridge(godot, scratch, full):
         ok = check_findings_aggregate(client, scratch) and ok
         ok = check_geometry_caveat_and_hide(client, scratch) and ok
         ok = check_ui_baseline(client, scratch) and ok
+        ok = check_ping_project_path(client, scratch) and ok
+        ok = check_performance_window_and_growth(client, scratch) and ok
+        ok = check_game_speed_floor(client, scratch) and ok
+        ok = check_raycast_3d(client, scratch) and ok
+        ok = check_mouse_move(client, scratch) and ok
+        ok = check_reload(client, scratch) and ok
         ok = check_paused_bridge(client, scratch) and ok
         ok = check_dispatch_reentrancy(client, scratch) and ok
 
@@ -2385,9 +2834,21 @@ def main():
         ok = stage_names(scratch, godot, Path(tmp) / "api-cache") and ok
         # First import builds .godot/ so later runs resolve class caches.
         imp = run_godot(godot, scratch, ["--import"])
+        cache = scratch / ".godot" / "global_script_class_cache.cfg"
         if imp.returncode != 0:
-            print("note: --import exited %d (often benign on a bare project)"
-                  % imp.returncode)
+            # H-058: an --import that dies (0xFFFFFFFF, three of seven runs one
+            # day, while other sessions' games were live) used to print this
+            # note and then cascade into three unrelated-looking stage failures
+            # because the class cache never got built. Keep its stderr, and
+            # make a missing cache the FAIL it is.
+            tail = "\n".join((imp.stderr or imp.stdout or "").strip().splitlines()[-15:])
+            if not cache.exists():
+                ok = fail("--import exited %d and left no %s - every later stage would "
+                          "cascade off the missing class cache (H-058). Its output tail:\n%s"
+                          % (imp.returncode, cache.relative_to(scratch), tail or "(nothing)"))
+            else:
+                print("note: --import exited %d but the class cache exists (often benign "
+                      "on a bare project); output tail:\n%s" % (imp.returncode, tail or "(nothing)"))
         ok = stage_parse(godot, scratch) and ok
         ok = stage_runners(godot, scratch) and ok
         ok = stage_bridge(godot, scratch, args.full) and ok

@@ -86,8 +86,8 @@ from bisect import bisect_right
 from datetime import datetime, timezone
 from pathlib import Path
 
-# harness-version: 0.21.0
-HARNESS_VERSION = "0.21.0"
+# harness-version: 0.23.0
+HARNESS_VERSION = "0.23.0"
 
 EXIT_OK = 0
 EXIT_FINDINGS = 1
@@ -374,6 +374,7 @@ class GDFile:
         self.consts = {}                  # name -> preloaded res path or None
         self.enums = {}                   # name -> [value names]; "" key = anonymous
         self.funcs = set()
+        self.func_sigs = {}               # top-level func name -> (line, required, total)
         self.signals = set()
         self.variables = set()
         self.local_names = set()          # everything bound anywhere in the file
@@ -461,7 +462,15 @@ def scan_file(res_path, fs_path, vendored=False):
         if close < 0:
             continue
         params = code[open_pos + 1:close - 1]
-        for part in _split_top_level(params):
+        # Signature of a TOP-LEVEL func (column 0, so an inner class's methods -
+        # which override a different base - are not attributed to this file's
+        # engine base). Static funcs never override a virtual.
+        top_level = (m.start() == 0 or code[m.start() - 1] == "\n") and code[m.start()] == "f"
+        parts = [p for p in _split_top_level(params) if p.strip()]
+        required = sum(1 for p in parts if "=" not in p)
+        if top_level:
+            gd.func_sigs[m.group(1)] = (src.line_of(m.start()), required, len(parts))
+        for part in parts:
             pm = re.match(r"([A-Za-z_]\w*)[ \t]*(:[ \t]*[^=]+)?", part)
             if not pm:
                 continue
@@ -770,8 +779,31 @@ class ApiIndex:
         self.global_enums = data.get("global_enums", {})
         self.global_constants = set(data.get("global_constants", []))
         self.utility_functions = set(data.get("utility_functions", []))
+        # class -> {virtual method name: [required_args, total_args]}. Absent on an
+        # index distilled before 0.22.0; has_virtuals says so and the check
+        # reports itself SKIPPED rather than passing.
+        self.virtuals = data.get("virtuals")
         self.source_path = None
         self._all_members = None
+
+    @property
+    def has_virtuals(self):
+        return isinstance(self.virtuals, dict)
+
+    def virtuals_of(self, class_name, depth=0):
+        """Every virtual method an instance of `class_name` inherits, nearest
+        declaration winning: {name: [required, total]}."""
+        if not self.has_virtuals or depth > 64:
+            return {}
+        entry = self.classes.get(class_name)
+        if entry is None:
+            return {}
+        out = {}
+        parent = entry.get("inherits")
+        if parent:
+            out.update(self.virtuals_of(parent, depth + 1))
+        out.update(self.virtuals.get(class_name, {}))
+        return out
 
     def knows_type(self, name):
         return (name in self.classes or name in self.builtins
@@ -820,6 +852,7 @@ class ApiIndex:
             "global_enums": self.global_enums,
             "global_constants": sorted(self.global_constants),
             "utility_functions": sorted(self.utility_functions),
+            "virtuals": self.virtuals if self.has_virtuals else {},
         }
 
 
@@ -830,6 +863,7 @@ def distill_api(dump):
     user directory reasonable rather than something a project would be tempted to commit.
     """
     classes = {}
+    virtuals = {}
     for c in dump.get("classes", []):
         members = set()
         for key in ("methods", "properties", "signals", "constants"):
@@ -841,6 +875,30 @@ def distill_api(dump):
             "inherits": c.get("inherits", "") or "",
             "members": sorted(members),
         }
+        # Virtual methods with their arity, so a script overriding one with the
+        # wrong signature is caught here (2 s) instead of at --import (40 s), where
+        # Godot reports it against the DEPENDENT file (moving-in:G-022).
+        vt = {}
+        for mth in c.get("methods", []):
+            if not mth.get("is_virtual") or "name" not in mth:
+                continue
+            arguments = mth.get("arguments", []) or []
+            required = sum(1 for a in arguments if "default_value" not in a)
+            vt[mth["name"]] = [required, len(arguments)]
+        if c["name"] == "Object":
+            # Object's script-level virtuals are GDScript's own and are NOT in the
+            # extension API (no is_virtual entry, not even a member) - and they are
+            # the ones with the short tempting names a UI file reaches for.
+            # Arities per the Object class reference; `_init` is deliberately
+            # absent (a GDScript constructor takes anything).
+            vt.update({
+                "_get": [1, 1], "_get_property_list": [0, 0], "_iter_get": [1, 1],
+                "_iter_init": [1, 1], "_iter_next": [1, 1], "_notification": [1, 1],
+                "_property_can_revert": [1, 1], "_property_get_revert": [1, 1],
+                "_set": [2, 2], "_to_string": [0, 0], "_validate_property": [1, 1],
+            })
+        if vt:
+            virtuals[c["name"]] = vt
     builtins = {}
     for c in dump.get("builtin_classes", []):
         members = set()
@@ -870,6 +928,7 @@ def distill_api(dump):
         "global_constants": sorted(global_constants),
         "utility_functions": sorted(
             f["name"] for f in dump.get("utility_functions", []) if "name" in f),
+        "virtuals": virtuals,
     })
     return index
 
@@ -948,7 +1007,9 @@ def refresh_index(godot_path, force=False, timeout=300):
     dest = cache_path_for(version)
     if dest.is_file() and not force:
         index = load_index(dest)
-        if index is not None:
+        # An index distilled before 0.22.0 has no virtual-method table; a refresh
+        # that handed it back would leave that check SKIPPED forever.
+        if index is not None and index.has_virtuals:
             return index, "cached (%s)" % version
     tmp = Path(tempfile.mkdtemp(prefix="godot-api-"))
     try:
@@ -1222,6 +1283,45 @@ class Checker:
                          "project, and no engine member by that name"
                          % (verb, name, name, name))
 
+    def check_virtual_signatures(self):
+        """A top-level func whose name is an engine virtual on the script's engine
+        base must accept the arity the engine calls it with (moving-in:G-022).
+
+        `func _set(action: Callable) -> void` passed every static check and then
+        failed --import with `The function signature doesn't match the parent`,
+        reported against the file that PRELOADED it. Only arity is checked - a
+        script may add optional parameters, so the engine's count has to fall
+        within [required, total] - because parameter types are not recorded in
+        the index and GDScript accepts a looser type. `_init` is GDScript's own
+        constructor and takes anything.
+        """
+        if self.api is None or not self.api.has_virtuals:
+            return
+        for gd in self.project.files:
+            if gd.vendored or not gd.func_sigs:
+                continue
+            base = self.project.engine_base_of(gd)
+            if not base:
+                continue
+            virtuals = self.api.virtuals_of(base)
+            if not virtuals:
+                continue
+            for name, (line, required, total) in sorted(gd.func_sigs.items()):
+                if name == "_init" or name not in virtuals:
+                    continue
+                engine_required, engine_total = virtuals[name]
+                if required <= engine_total <= total:
+                    continue
+                self.add(gd.res_path, line, "virtual_signature_mismatch", SEVERITY_ERROR,
+                         name,
+                         "%s() overrides %s.%s, which the engine calls with %d argument(s); "
+                         "this declaration takes %s - the import will fail with 'The "
+                         "function signature doesn't match the parent', reported against "
+                         "whichever file loads this one"
+                         % (name, base, name, engine_total,
+                            str(required) if required == total
+                            else "%d to %d" % (required, total)))
+
     def check_class_cache(self):
         """Warn when `.godot/` and the source disagree -- without touching `.godot/`."""
         cached = _read_class_cache(self.project.root)
@@ -1245,6 +1345,7 @@ class Checker:
         self.check_global_refs()
         if self.options.get("strings", True):
             self.check_string_refs()
+        self.check_virtual_signatures()
         self.check_class_cache()
         return self.findings
 
@@ -1455,6 +1556,10 @@ def main():
             print("Error: %s" % note, file=sys.stderr)
             return EXIT_CANNOT_RUN
         skipped.append(note)
+    elif not index.has_virtuals:
+        skipped.append("virtual_signature_mismatch (a script overriding an engine "
+                       "virtual with the wrong arity): the cached index predates "
+                       "0.22.0 and holds no virtual-method table. %s" % REFRESH_HINT)
 
     # --- scan ---
     project = Project(project_root, config)
