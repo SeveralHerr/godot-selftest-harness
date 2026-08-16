@@ -14,14 +14,14 @@ extends Node
 ## extension loads AFTER the generic handlers, a project may override a generic
 ## verb by registering the same action string (last-writer-wins).
 
-# harness-version: 0.36.0
+# harness-version: 0.37.0
 # --- Constants ---
 
 ## Version of the godot-selftest-harness these files were copied from. Reported by the
 ## `harness_version` verb and stamped into every copied tool script, so a gap logged
 ## against a project can name the version it was seen on, and a refresh can tell a
 ## stale file from a customized one. Bump with .claude-plugin/plugin.json.
-const HARNESS_VERSION: String = "0.36.0"
+const HARNESS_VERSION: String = "0.37.0"
 
 ## Default bus filenames. With a session id (see _resolve_session) the id is spliced in
 ## before the extension, so two instances can each own a bus in the same user:// dir.
@@ -581,6 +581,7 @@ func _register_generic_handlers() -> void:
 	register_command("validate_ui", _cmd_validate_ui)
 	register_command("get_ui_snapshot", _cmd_get_ui_snapshot)
 	register_command("get_node_bounds", _cmd_get_node_bounds)
+	register_command("contained_in", _cmd_contained_in)
 	register_command("canvas_scale", _cmd_canvas_scale)
 	register_command("aabb", _cmd_aabb)
 	register_command("look_at", _cmd_look_at)
@@ -3421,6 +3422,25 @@ func _cmd_validate_ui(args: Dictionary) -> Dictionary:
 				],
 			})
 
+	# plant-tower-defense:G-048b: a Control that visibly belongs to a panel drawn as
+	# its SIBLING (a legend row over a pause card, both children of the screen) is
+	# "inside its parent" trivially, so 34px of it hanging off the paper passed
+	# every gate. For each visible Panel/PanelContainer, a sibling Control whose
+	# CENTRE sits on the panel but whose box is not fully inside it is reported.
+	# The centre rule is what keeps a neighbouring HUD element that merely brushes
+	# an edge out of the report; a Control that CONTAINS the panel (a backdrop) is
+	# skipped the same way.
+	for esc: Dictionary in _collect_panel_escapes(get_tree().current_scene):
+		issues.append({
+			"path": str(esc["path"]),
+			"severity": "warning",
+			"code": "ui_escapes_panel",
+			"message": "%s '%s' hangs off sibling panel '%s' by %s (control %s, panel %s)" % [
+				esc["type"], esc["name"], esc["panel_name"], esc["overhang_text"],
+				esc["control_rect_text"], esc["panel_rect_text"],
+			],
+		})
+
 	var baseline: Dictionary = _apply_ui_baseline(issues, args)
 
 	# Gate on what is NEW when a baseline is in play. A finding that is correct
@@ -3591,6 +3611,121 @@ func _resolve_safe_area_inset(args: Dictionary) -> Dictionary:
 ## Screen-position checks are meaningless for it: its "position" is a function of
 ## where the player is standing, which is how validate-ui once produced 9 findings
 ## that all evaporated on a different save (gap gather:G-018).
+## Overhang of `inner` past `outer` on each side, in px (0 = inside on that side).
+func _rect_overhang(inner: Rect2, outer: Rect2) -> Dictionary:
+	return {
+		"left": maxf(0.0, outer.position.x - inner.position.x),
+		"top": maxf(0.0, outer.position.y - inner.position.y),
+		"right": maxf(0.0, inner.end.x - outer.end.x),
+		"bottom": maxf(0.0, inner.end.y - outer.end.y),
+	}
+
+
+func _overhang_text(over: Dictionary) -> String:
+	var parts: PackedStringArray = PackedStringArray()
+	for side: String in ["left", "top", "right", "bottom"]:
+		if float(over[side]) > 0.5:
+			parts.append("%.0fpx %s" % [float(over[side]), side])
+	return ", ".join(parts) if not parts.is_empty() else "0px"
+
+
+func _rect_text(r: Rect2) -> String:
+	return "%.0f,%.0f %.0fx%.0f" % [r.position.x, r.position.y, r.size.x, r.size.y]
+
+
+## Sibling Controls hanging off a Panel/PanelContainer they visibly sit on
+## (plant-tower-defense:G-048b). See the call site in _cmd_validate_ui.
+func _collect_panel_escapes(root: Node) -> Array:
+	var out: Array = []
+	if root == null:
+		return out
+	var stack: Array[Node] = [root]
+	while not stack.is_empty():
+		var parent: Node = stack.pop_back()
+		var panels: Array[Control] = []
+		var others: Array[Control] = []
+		for child: Node in parent.get_children():
+			stack.append(child)
+			if not (child is Control) or not _is_effectively_visible(child):
+				continue
+			var c: Control = child as Control
+			if _is_world_space_control(c):
+				continue
+			if c is Panel or c is PanelContainer:
+				panels.append(c)
+			else:
+				others.append(c)
+		if panels.is_empty() or others.is_empty():
+			continue
+		for panel: Control in panels:
+			var prect: Rect2 = _screen_rect_of(panel)
+			if prect.size.x <= 0.0 or prect.size.y <= 0.0:
+				continue
+			for other: Control in others:
+				var orect: Rect2 = _screen_rect_of(other)
+				if orect.size.x <= 0.0 or orect.size.y <= 0.0:
+					continue
+				if not prect.has_point(orect.get_center()):
+					continue
+				if prect.encloses(orect):
+					continue
+				if orect.encloses(prect):
+					continue  # a backdrop or container the panel sits on
+				var over: Dictionary = _rect_overhang(orect, prect)
+				out.append({
+					"path": str(other.get_path()), "name": str(other.name), "type": other.get_class(),
+					"panel": str(panel.get_path()), "panel_name": str(panel.name),
+					"overhang": over, "overhang_text": _overhang_text(over),
+					"control_rect_text": _rect_text(orect), "panel_rect_text": _rect_text(prect),
+				})
+	return out
+
+
+## Is one Control's screen box inside another's? (plant-tower-defense:G-048b - the
+## question three screens in one project each answered with a bespoke test.)
+## args: { "node_path": String, "within": String }
+## data keys: inside (bool), overhang {left, top, right, bottom} px, control_rect,
+##            within_rect, control_centre_inside (bool).
+func _cmd_contained_in(args: Dictionary) -> Dictionary:
+	var node_path: String = str(args.get("node_path", ""))
+	var within_path: String = str(args.get("within", ""))
+	if node_path.is_empty() or within_path.is_empty():
+		return {"success": false, "message": "contained_in needs node_path and within"}
+	var a: Dictionary = _resolve_node(node_path)
+	var b: Dictionary = _resolve_node(within_path)
+	if a["node"] == null:
+		return {"success": false, "message": "Node not found: %s" % node_path}
+	if b["node"] == null:
+		return {"success": false, "message": "Node not found: %s" % within_path}
+	if not (a["node"] is Control) or not (b["node"] is Control):
+		return {"success": false, "message": "contained_in measures Controls; got %s and %s" % [
+			(a["node"] as Node).get_class(), (b["node"] as Node).get_class()]}
+	var inner: Rect2 = _screen_rect_of(a["node"])
+	var outer: Rect2 = _screen_rect_of(b["node"])
+	var over: Dictionary = _rect_overhang(inner, outer)
+	var inside: bool = outer.encloses(inner)
+	var caveat: String = _geometry_caveat()
+	var message: String = "%s is %s %s" % [
+		a["path"], "inside" if inside else "NOT inside", b["path"]]
+	if not inside:
+		message += " -- hangs off by %s" % _overhang_text(over)
+	if not caveat.is_empty():
+		message += " (%s)" % caveat
+	return {
+		"success": inside,
+		"message": message,
+		"data": {
+			"inside": inside,
+			"overhang": over,
+			"control_rect": {"x": inner.position.x, "y": inner.position.y, "w": inner.size.x, "h": inner.size.y},
+			"within_rect": {"x": outer.position.x, "y": outer.position.y, "w": outer.size.x, "h": outer.size.y},
+			"control_centre_inside": outer.has_point(inner.get_center()),
+			"geometry_trustworthy": caveat.is_empty(),
+			"geometry_caveat": caveat,
+		},
+	}
+
+
 func _is_world_space_control(control: Control) -> bool:
 	var ancestor: Node = control.get_parent()
 	while ancestor != null:

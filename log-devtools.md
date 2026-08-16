@@ -6242,7 +6242,7 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   shared `.godot/` import cache), but this time the crash was a hard segfault
   rather than a truncated cache, and it happened on the FIRST import call of
   the session rather than after `/verify` was already mid-run.
-  - [plant-tower-defense:G-044] status: fixed | fixed-in: 0.29.0, 0.34.0, 0.35.0 (5th sighting: retry while progressing, up to 4) | seen: 5 | harness: 0.25.0 | source: plant-tower-defense 2026-08-16
+  - [plant-tower-defense:G-044] status: fixed | fixed-in: 0.29.0, 0.34.0, 0.35.0 (5th sighting: retry while progressing, up to 4; 6th sighting pooled at 0.37.0 came from a 0.33.0 cache - nothing further) | seen: 6 | harness: 0.25.0 | source: plant-tower-defense 2026-08-16
   - Improvement: `/verify`'s import step retrying once on a non-zero exit
     before surfacing failure would turn "verified nothing, investigate a
     crash" into "verified cleanly, noted a transient" — the same shape as the
@@ -7060,3 +7060,172 @@ failure, not the fact — shipped as written.
 (14 files, 56 verbs + 58 CLI). `unittest discover -s tools` — 51 OK (2 new).
 `check_templates.py` — OK, all stages, stage 4 line quoting the assert_margin control
 (no bus verb touched; `--full` last ran clean on 0.34.0's identical `dev_tools.gd`).
+
+## 2026-08-16 - Upstreamed 4 open gap(s) from plant-tower-defense (harness 0.18.0, 0.19.0, 0.21.0, 0.23.0, 0.24.0, 0.25.0, 0.32.0, 0.33.0)
+
+Pooled by `tools/upstream_gaps.py` from `C:\Users\gotmi\Documents\GitHub\plant-tower-defense\log-devtools.md`. Gap text is the project's,
+verbatim; only the id line is rewritten (qualified with the project name so
+ids from two projects cannot collide, plus a `source:` back-pointer).
+
+- Gap: **`node-bounds` crashes on a Button whose text contains a non-cp1252
+  character.** `python tools/devtools.py node-bounds .../KeysScreen/BackButton`
+  exited with a Python traceback ending `UnicodeEncodeError: 'charmap' codec can't
+  encode character '←' in position 17` at `cmd_node_bounds`, devtools.py:3096
+  (`print(f"  Text: ...")`). The button's label is the left-arrow + " Back" that
+  every overlay in this game uses, so the most obvious verb to point at an
+  overlay's Back button is the one that cannot print it on a default Windows
+  console. Workaround: `PYTHONIOENCODING=utf-8` in front of the command, which is
+  not discoverable from the traceback.
+  - [plant-tower-defense:G-048] status: fixed | fixed-in: 0.37.0 | seen: 1 | harness: 0.33.0 | source: plant-tower-defense 2026-08-16
+  - Improvement: reconfigure stdout once in `main()` -
+    `sys.stdout.reconfigure(encoding="utf-8", errors="replace")` - so no verb can
+    take the whole client down over a character in game text. Failing that,
+    `_printable()` should strip unencodable characters, since it is already the
+    function every text field is routed through.
+
+- Gap: **nothing measures a Control's BOX against the panel it is drawn on when
+  the two are siblings.** This is the half of `neg` that no gate could see, and it
+  is distinct from the text-fitting gap above.
+  `python tools/devtools.py findings` reported `0 finding(s) across 5 of 5 checks`
+  against a live game whose pause card had 34px of legend hanging off the paper.
+  Every check was right to: `ui_layout` measures a Control against its own box and
+  its own parent, and `KeyRow4`'s parent is `PauseScreen` (full-viewport), not
+  `Card` — the paper it visibly belongs to is a SIBLING, so "inside its parent" is
+  trivially true. `validate-ui`'s `ui_text_trimmed` measures text against
+  `control.size` and passed too, because after the clamp `size` had *become* 326.
+  The project's own pause-card test checked vertical fit and pairwise overlap, and
+  a Label sticking out sideways over a backdrop overlaps nothing.
+  Workaround: hand-written, per-screen — `right = row.global_position.x +
+  row.size.x` asserted against `card.global_position.x + card.size.x`, with the
+  card found by node name. That is the third screen in this project to grow its
+  own bespoke version of "stays on the paper", after
+  `NotebookScreen.SUBHEAD_MAX_WIDTH` and now `PauseScreen.KEY_ROW_MAX_WIDTH`.
+  - [plant-tower-defense:G-048b] status: fixed | fixed-in: 0.37.0 | seen: 1 | harness: 0.33.0 | source: plant-tower-defense 2026-08-16
+  - Improvement: a `contained-in --node PATH --within PATH` verb, and a
+    corresponding `ui_escapes_panel` check driven by an opt-in map in
+    `devtools_config.json` (`{"PauseScreen/KeyRow*": "PauseScreen/Card"}`). The
+    generic version is guessable without config too: for each visible Panel, flag
+    any SIBLING Control that overlaps it and is not fully inside it. A Control half
+    on and half off a piece of paper is a defect in every UI, and it is currently
+    invisible to every check this harness ships.
+
+- Gap: **the headless suite rewrites the developer's real `user://highscore.save`,
+  and no gate says so.** Four tests in `test_selftest.gd` (`:679`, `:1014`, `:4326`,
+  `:4921`) stage low scores in memory and call `RunConfig.record_score()` while
+  `RunConfig.save_path` is still the real file; `record_score` calls `_save()`.
+  Observed across two full runs: `v5/308/5008` -> `v6/310/5010` -> `v6/2/2`. Both high
+  scores destroyed, recovered only from a copy taken into the scratchpad before the
+  work started. Every one of those tests stashes and restores the in-memory scores,
+  which is exactly what hides it — the FILE keeps the last number written, and the
+  suite reports `ALL TESTS PASSED`. Filed as `plant-tower-defense-csl`.
+  - [plant-tower-defense:G-048c] status: fixed | fixed-in: 0.37.0 | seen: 1 | harness: 0.33.0 | source: plant-tower-defense 2026-08-16
+  - Improvement: the harness knows `test_dir` and it knows `user://`. A `/verify`
+    step that snapshots `user://` before the suite and diffs it after — printing
+    `user:// writes: N file(s) changed by the suite` as a denominator — would turn
+    this from an invisible loss into a line. Advisory is enough; a test suite
+    legitimately writes `user://`, but a suite that writes a file NO test named a
+    path for is a suite driving production state. Related to gh#33/gh#28: with two
+    agents in two worktrees sharing one `user://`, this is not a niche case.
+
+- Gap: **`run_tests.py` silently ignores a `--select` passed after `--`.** `python
+  tools/run_tests.py -- --select test_economy` printed `Selected: 491 of 491
+  discovered  (no selector)` and ran the whole suite. `run_tests.py --select ...`
+  without the `--` errors correctly (`unrecognized arguments: --select`), so the
+  passthrough form is the one that fails quietly. Cost here was small (two full
+  ~90s runs where one file would have done); the shape is the harness's own
+  documented worst failure mode — a denominator that reads fine while describing a
+  different run from the one you asked for.
+  - [plant-tower-defense:G-049] status: fixed | fixed-in: 0.37.0 | seen: 1 | harness: 0.33.0 | source: plant-tower-defense 2026-08-16
+  - Improvement: `run_tests.py` should forward everything after `--` into
+    `run_tests.gd`'s own argument parsing, or, failing that, `run_tests.gd` should
+    exit 2 on an argument it does not recognise rather than printing
+    `(no selector)` beside a full-suite run. The parenthetical is already the
+    evidence; it just isn't fatal.
+
+## 2026-08-16 - Upstreamed 1 open gap(s) from moving-in (harness 0.11.0, 0.16.0, 0.19.0, 0.21.0, 0.31.0, 0.33.0 (cache) / 0.31.0 (vendored))
+
+Pooled by `tools/upstream_gaps.py` from `C:\Users\gotmi\Documents\GitHub\moving-in\log-devtools.md`. Gap text is the project's,
+verbatim; only the id line is rewritten (qualified with the project name so
+ids from two projects cannot collide, plus a `source:` back-pointer).
+
+- Gap: **[G-058] — the runner counts assertions and tests but not ERRORS, so a run
+  that emits engine errors on every pass reports clean.** `Array is in read-only
+  state.` appeared once per run for an entire cycle. `run_tests.gd` prints `Total`,
+  `Selected`, `Autoloads`, `Assertions` and `Suite` — five denominators, none of which
+  is "how many errors did this run emit". Related to [G-054]/#27 but strictly simpler:
+  that one needs per-method attribution, this one needs a count.
+  - [moving-in:G-058] status: fixed | fixed-in: 0.37.0 | seen: 2 | harness: 0.33.0 (cache) / 0.31.0 (vendored) | source: moving-in 2026-08-16
+  - Improvement: `tools/run_tests.py` already wraps the runner specifically to catch
+    `SCRIPT ERROR` text the `-> String` return value cannot carry. Have it count
+    `ERROR:` lines too and print `Errors: N emitted` beside the other denominators.
+    PRINT BEFORE GATING — some engine errors may be legitimate for a test exercising a
+    failure path, and the clean baseline should be measured before zero is assumed
+    reachable. Filed locally as `moving-in-bjh` as well, because this project can do
+    the printing half itself without waiting on the harness.
+
+## 2026-08-16 — 0.37.0: loop tick five — two issues, five gaps, six fixes, and the tool caught me
+
+Two new GitHub issues (#34, #35) and five new gap entries (plant G-048/b/c, G-049,
+moving-in G-058) — the biggest tick since the first. All six shipped; the plant
+G-048 pooling shows the 0.32.0 collision fix (`G-048b`, `G-048c`) working on real
+input: three different gaps had been handed one id and all three arrived.
+
+- **[gh#34 / plant G-048 — fixed] every Python client reconfigures stdout/stderr to
+  UTF-8 with `errors="replace"`** (`devtools.py`, `run_tests.py`, `import_check.py`,
+  `name_check.py`). A `← Back` caption killed `node-bounds` on a cp1252 console and
+  the traceback pointed at the node, not the reporting.
+- **[gh#35 / moving-in G-058 — fixed] `run_tests.py` prints `Engine errors: N ERROR:
+  line(s) emitted`**, quoted, **never gated** — the reporter measured a clean baseline
+  of two legitimate ones, so zero is not the threshold. Probed first: `push_error`
+  prints plain `ERROR:` on 4.7.1, so a deliberate one under test is counted, not
+  gated; stage 4 plants exactly that and asserts count 1 and exit 0.
+- **[plant G-048b — fixed] `ui_escapes_panel` + `contained-in` verb.** A Control whose
+  centre sits on a SIBLING Panel but whose box hangs off it (a legend row past a pause
+  card) passed every gate because its parent is the screen. Centre rule + skip a
+  Control that contains the panel (backdrops). Stage 5 plants Panel + escaping Label +
+  inside Label; stock fixture must report none. **False-positive sweep on the real
+  plant game, live: title, pause, notebook, keys and options screens — 0 findings**, and
+  `contained-in KeyRow4 within Card` read `inside` (the project already clamps it).
+  moving-in not swept this tick (3D game, no panels on the boot screen).
+- **[plant G-048c — fixed] `run_tests.py` prints `user:// writes: N file(s) changed by
+  the suite`** — four tests staged scores through a real `_save()` and destroyed both
+  high scores across two runs; advisory, but a suite writing a file no test named is
+  driving production state. Uses `devtools.py`'s stat helpers when it sits beside
+  the wrapper; says "not checked" otherwise.
+- **[plant G-049 — fixed] `run_tests.gd` refuses an unknown argument** (exit 2, named).
+  `-- --select x` used to run the whole suite as `(no selector)`.
+
+**The tool caught me.** The false-positive sweep ran the new addon in a throwaway
+copy of `plant-tower-defense`; I set `config/custom_user_dir_name` and forgot
+`config/use_custom_user_dir=true`, so the copy used the developer's REAL `user://`.
+`quit` printed `user://: this run wrote the developer's REAL user data … changed:
+highscore.save` — 0.36.0's report, doing exactly its job on its second day. The file
+was rewritten with identical content (`v6 / 308 / 5008`, size unchanged; only mtime
+moved — `record_score` only ever raises and the probe scored nothing), so no harm,
+but the correct move was `launch --snapshot-userstate`, which exists precisely for
+this, and I did not reach for it. Recording it as the evidence gh#33 asked for.
+
+- Gap: **`launch` should tell you when a copy of a project shares another checkout's
+  `user://`.** The probe's `custom_user_dir_name` was ignored because
+  `use_custom_user_dir` was not set, and the launch line printed the shared path
+  without saying "this is the same directory `../plant-tower-defense` uses". The
+  owner file already carries the checkout path; a second checkout of the same
+  `config/name` on one machine is the fan-out case, not an edge one.
+  - [H-067] status: open | seen: 1 | harness: 0.37.0
+  - Improvement: when `launch` resolves `user://` to a directory whose
+    `devtools_owner.json` (or `.devtools/launched.jsonl` history) names a DIFFERENT
+    checkout, say so on the launch line and suggest `--snapshot-userstate`; and
+    document `use_custom_user_dir=true` beside `custom_user_dir_name` wherever the
+    scaffold mentions isolating a copy.
+
+**Validation run this turn:** `record_version.py --record` then `--check` OK at 0.37.0
+(14 files, 57 verbs + 59 CLI). `unittest discover -s tools` — 51 OK.
+`check_templates.py --full` — OK, `stage 6 contract: 90/90`, stage 5
+`ui_escapes_panel names the planted Legend (40px right) and nothing else; contained_in
+says NOT inside/right=40 for it, inside for Inside, refuses a Node2D`; two mutation runs
+(the second because the first stage-4 failure returned before the engine-error control
+ran): `_collect_panel_escapes` disabled → `ui_escapes_panel should name exactly the
+planted Legend, got []`; unknown-arg branch removed → `run_tests.gd must exit 2 naming
+an unknown argument (--select); got exit 0`; ERROR regex broken → `must count the
+planted push_error as exactly 1 engine error`. Restores proved by `cmp`. Real-project
+sweep as above.

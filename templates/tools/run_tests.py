@@ -51,8 +51,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-# harness-version: 0.36.0
-HARNESS_VERSION = "0.36.0"
+# harness-version: 0.37.0
+HARNESS_VERSION = "0.37.0"
 
 # The runtime-error prefixes Godot emits for a GDScript that raised mid-execution.
 # Deliberately narrower than import_check.py's FAILURE_SIGNALS: "Parse Error" /
@@ -63,6 +63,14 @@ HARNESS_VERSION = "0.36.0"
 # "USER SCRIPT ERROR" (a push_error() call) -- either way, code that was running when
 # the harness's own tally says nothing went wrong.
 FAILURE_SIGNALS = ("SCRIPT ERROR", "USER SCRIPT ERROR")
+# gh#35 / moving-in:G-058: a plain engine `ERROR:` line is COUNTED, never gated. A
+# 313-test suite emitted `Array is in read-only state.` on every run for a whole
+# cycle while reporting 312/312 clean; the test passed for the wrong reason from the
+# day it was written. Zero is not the right threshold - the reporter measured a
+# clean baseline of exactly two legitimate ERROR: lines (a deliberate push_error
+# under test, and the dummy renderer's null texture in a failed-capture test) - so
+# this prints the number and lets a reader see it move.
+_ENGINE_ERROR_RE = re.compile(r"^\s*(?:USER )?ERROR:\s*(.*)$")
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 _AT_RE = re.compile(r"^\s+at: ")
@@ -116,6 +124,63 @@ def scan_output(text: str):
                 detail = nxt.strip()
         findings.append({"line_no": index + 1, "text": line.strip(), "at": detail})
     return findings
+
+
+def scan_engine_errors(text: str):
+    """[(line_no, text, at)] for every plain `ERROR:` line that is not one of
+    FAILURE_SIGNALS' lines (those are gated separately)."""
+    out = []
+    lines = text.splitlines()
+    for index, raw in enumerate(lines):
+        line = _ANSI_RE.sub("", raw).rstrip()
+        m = _ENGINE_ERROR_RE.match(line)
+        if not m or any(sig in line for sig in FAILURE_SIGNALS):
+            continue
+        detail = ""
+        if index + 1 < len(lines):
+            nxt = _ANSI_RE.sub("", lines[index + 1]).rstrip()
+            if _AT_RE.match(nxt):
+                detail = nxt.strip()
+        out.append({"line_no": index + 1, "text": line.strip(), "at": detail})
+    return out
+
+
+def _user_state_before(project_path: Path):
+    """plant-tower-defense:G-048c: record user:// before the suite so the wrapper can
+    say which files the SUITE wrote. Four tests staged low scores through a real
+    `record_score()` -> `_save()` and destroyed both high scores across two runs while
+    every test restored the in-memory values and the suite said ALL TESTS PASSED.
+    Uses devtools.py's user-dir resolution and stat helpers when they are beside this
+    file; absent, the check is skipped and says so."""
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import devtools  # noqa: WPS433 - shipped beside this file
+        user_dir = devtools.get_user_data_path(project_path)
+    except Exception as exc:  # noqa: BLE001 - advisory; never block the suite on this
+        return None, "user:// writes: not checked (%s: %s)" % (type(exc).__name__, exc)
+    n = devtools.userstate_stat_take(project_path, user_dir)
+    return devtools, "%d file(s) in %s" % (n, user_dir)
+
+
+def _user_state_after(devtools_mod, project_path: Path) -> str:
+    diff = devtools_mod.userstate_stat_diff(project_path)
+    if diff is None:
+        return "user:// writes: not checked (no record)"
+    changed, created, deleted, user_dir = diff
+    total = len(changed) + len(created) + len(deleted)
+    if not total:
+        return "user:// writes: 0 file(s) changed by the suite (%s)" % user_dir
+    parts = []
+    if changed:
+        parts.append("changed: " + ", ".join(changed))
+    if created:
+        parts.append("created: " + ", ".join(created))
+    if deleted:
+        parts.append("deleted: " + ", ".join(deleted))
+    return ("user:// writes: %d file(s) changed by the suite in %s -- %s. A suite that "
+            "writes a file no test named a path for is driving production state; point "
+            "the save path at a temp file in the test, or expect the developer's real "
+            "save to change (advisory)" % (total, user_dir, "; ".join(parts)))
 
 
 def run_suite(godot_path: Path, project_path: Path, log_path: Path, passthrough, timeout: int):
@@ -182,7 +247,23 @@ def declared_assertions(project_path):
     return count, files
 
 
+
+def _utf8_console() -> None:
+    """gh#34: the client inherits the Windows console's cp1252 stdout, so any verb
+    echoing game text with a glyph outside it (a Back button reading "\u2190 Back",
+    a key legend using arrows) died with UnicodeEncodeError - and the traceback read
+    as "this verb is broken on this node", not "the reporting is". `errors="replace"`
+    rather than bare utf-8: a console that genuinely cannot render a glyph shows `?`
+    and keeps going, instead of trading one crash for another."""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, OSError, ValueError):
+            pass
+
+
 def main():
+    _utf8_console()
     parser = argparse.ArgumentParser(
         description="Run run_tests.gd and fail the run when it emitted a runtime error "
                     "it did not itself notice.",
@@ -216,6 +297,7 @@ def main():
     devtools_dir.mkdir(exist_ok=True)
     log_path = devtools_dir / "tests.log"
 
+    devtools_mod, user_before = _user_state_before(project_path)
     try:
         godot_rc = run_suite(godot_path, project_path, log_path, passthrough, args.timeout)
     except subprocess.TimeoutExpired:
@@ -244,6 +326,8 @@ def main():
     print(captured, end="" if captured.endswith("\n") else "\n")
 
     findings = scan_output(captured)
+    engine_errors = scan_engine_errors(captured)
+    user_writes = _user_state_after(devtools_mod, project_path) if devtools_mod else user_before
     # run_tests.gd's own exit code: 0 all passed, 1 failures/vacuous, 2 could not run.
     # A nonzero error count overrides a reported 0 -- that is the entire point of this
     # wrapper -- but never downgrades a run_tests.gd exit 2 (could not run at all).
@@ -263,6 +347,9 @@ def main():
             "log": str(log_path),
             "error_count": len(findings),
             "errors": findings,
+            "engine_error_count": len(engine_errors),
+            "engine_errors": engine_errors,
+            "user_writes": user_writes,
             "exit": exit_code,
         }, indent=2))
         sys.exit(exit_code)
@@ -290,6 +377,21 @@ def main():
         pass
     else:
         print(f"Errors: 0 emitted during the suite. Full log: {log_path}")
+
+    # gh#35: engine ERROR: lines, counted, never gated (see _ENGINE_ERROR_RE).
+    if engine_errors:
+        print(f"Engine errors: {len(engine_errors)} ERROR: line(s) emitted (advisory - some are "
+              "legitimate for a test exercising a failure path; watch this number MOVE):")
+        for e in engine_errors[:10]:
+            print(f"  {log_path.name}:{e['line_no']}: {e['text']}")
+            if e["at"]:
+                print(f"      {e['at']}")
+        if len(engine_errors) > 10:
+            print(f"  ... and {len(engine_errors) - 10} more; full log: {log_path}")
+    else:
+        print("Engine errors: 0 ERROR: line(s) emitted")
+    # plant-tower-defense:G-048c: what the suite wrote under user://.
+    print(user_writes)
 
     # moving-in:G-054: written-vs-executed assertion count, suite level, advisory.
     # Skipped under --filter/--file, where the denominator is not the whole dir.

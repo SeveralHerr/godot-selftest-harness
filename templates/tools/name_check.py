@@ -86,8 +86,8 @@ from bisect import bisect_right
 from datetime import datetime, timezone
 from pathlib import Path
 
-# harness-version: 0.36.0
-HARNESS_VERSION = "0.36.0"
+# harness-version: 0.37.0
+HARNESS_VERSION = "0.37.0"
 
 EXIT_OK = 0
 EXIT_FINDINGS = 1
@@ -1601,7 +1601,22 @@ def report(findings, index, project, counts, args, skipped, baseline_info,
             print("NOT COVERED: %s" % NOT_COVERED)
 
 
+def _utf8_console() -> None:
+    """gh#34: the client inherits the Windows console's cp1252 stdout, so any verb
+    echoing game text with a glyph outside it (a Back button reading "\u2190 Back",
+    a key legend using arrows) died with UnicodeEncodeError - and the traceback read
+    as "this verb is broken on this node", not "the reporting is". `errors="replace"`
+    rather than bare utf-8: a console that genuinely cannot render a glyph shows `?`
+    and keeps going, instead of trading one crash for another."""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, OSError, ValueError):
+            pass
+
+
 def main():
+    _utf8_console()
     parser = argparse.ArgumentParser(
         formatter_class=argparse.RawDescriptionHelpFormatter,
         description="Resolve every name a GDScript project mentions, without launching Godot.\n"

@@ -50,8 +50,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-# harness-version: 0.36.0
-HARNESS_VERSION = "0.36.0"
+# harness-version: 0.37.0
+HARNESS_VERSION = "0.37.0"
 
 # Substrings that mean the import did not leave a parseable project behind. Every one
 # of these is taken from real captured output, not from guesswork:
@@ -182,7 +182,22 @@ def _last_reimport_line(captured):
     return last
 
 
+def _utf8_console() -> None:
+    """gh#34: the client inherits the Windows console's cp1252 stdout, so any verb
+    echoing game text with a glyph outside it (a Back button reading "\u2190 Back",
+    a key legend using arrows) died with UnicodeEncodeError - and the traceback read
+    as "this verb is broken on this node", not "the reporting is". `errors="replace"`
+    rather than bare utf-8: a console that genuinely cannot render a glyph shows `?`
+    and keeps going, instead of trading one crash for another."""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, OSError, ValueError):
+            pass
+
+
 def main():
+    _utf8_console()
     parser = argparse.ArgumentParser(
         description="Run Godot's --import and exit non-zero when the project no longer parses.",
         epilog="Exit codes: 0 imported clean, 1 parse/load errors in the import output, "

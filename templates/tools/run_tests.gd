@@ -91,10 +91,10 @@ extends SceneTree
 ## (res://addons/godot_selftest/devtools_config.json key "test_dir", default
 ## "res://test/unit") for files named test_*.gd.
 
-# harness-version: 0.36.0
+# harness-version: 0.37.0
 ## Harness revision these files were copied from. See lint_project.gd / the
 ## `harness_version` bus verb; bump with .claude-plugin/plugin.json.
-const HARNESS_VERSION: String = "0.36.0"
+const HARNESS_VERSION: String = "0.37.0"
 
 const CONFIG_PATH: String = "res://addons/godot_selftest/devtools_config.json"
 const DEFAULT_TEST_DIR: String = "res://test/unit"
@@ -150,16 +150,35 @@ var _vacuous: int = 0
 
 func _initialize() -> void:
 	var args: PackedStringArray = OS.get_cmdline_user_args()
+	var expect_value: bool = false
 	for i: int in args.size():
+		if expect_value:
+			expect_value = false
+			continue
 		match args[i]:
 			"--json":
 				_json_output = true
 			"--filter":
 				if i + 1 < args.size():
 					_filter = args[i + 1]
+					expect_value = true
 			"--file":
 				if i + 1 < args.size():
 					_file_filter = args[i + 1]
+					expect_value = true
+			_:
+				# plant-tower-defense:G-049: `-- --select test_economy` used to be
+				# ignored and the whole suite ran under `Selected: 491 of 491
+				# (no selector)` - a denominator that read fine while describing a
+				# different run from the one asked for. Unknown flag: exit 2, name it.
+				_runner_error = true
+				_errors.append({
+					"script": "command line",
+					"error": "unknown argument %s (this runner takes --filter NAME, --file NAME, --json); nothing was run" % args[i],
+				})
+				_print_results()
+				quit(_exit_code())
+				return
 
 	# A never-imported project has no class cache, so every `class_name` in it is
 	# unresolvable and a test whose first statement uses one aborts on a runtime

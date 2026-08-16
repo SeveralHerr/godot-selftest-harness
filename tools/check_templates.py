@@ -730,6 +730,47 @@ def stage_assemble(scratch, user_dir_name):
         "%sreturn [str(a.get_path()), str(b.get_path())]" % BT,
         "",
         "",
+        "## plant-tower-defense:G-048b: a Panel and a SIBLING Label whose centre is on",
+        "## the panel but whose box hangs 40px off its right edge, on their own",
+        "## CanvasLayer. Planted/removed by check_panel_escape(); held by reference.",
+        "var _escape_layer: CanvasLayer = null",
+        "",
+        "",
+        "func harness_plant_panel_escape() -> Array:",
+        BT + "if _escape_layer != null:",
+        BT + BT + "return [str(_escape_layer.get_node(" + BQ + "Card" + BQ + ").get_path()), str(_escape_layer.get_node(" + BQ + "Legend" + BQ + ").get_path())]",
+        BT + "_escape_layer = CanvasLayer.new()",
+        BT + "_escape_layer.name = " + BQ + "EscapeLayer" + BQ,
+        BT + "add_child(_escape_layer)",
+        BT + "var card := Panel.new()",
+        BT + "card.name = " + BQ + "Card" + BQ,
+        BT + "card.position = Vector2(100, 100)",
+        BT + "card.size = Vector2(200, 100)",
+        BT + "_escape_layer.add_child(card)",
+        BT + "var legend := Label.new()",
+        BT + "legend.name = " + BQ + "Legend" + BQ,
+        BT + "legend.text = " + BQ + "keys" + BQ,
+        BT + "legend.position = Vector2(220, 120)  # centre x=280 on the card; right edge 340 > 300",
+        BT + "legend.size = Vector2(120, 30)",
+        BT + "_escape_layer.add_child(legend)",
+        BT + "var inside := Label.new()",
+        BT + "inside.name = " + BQ + "Inside" + BQ,
+        BT + "inside.text = " + BQ + "ok" + BQ,
+        BT + "inside.position = Vector2(110, 110)",
+        BT + "inside.size = Vector2(50, 20)",
+        BT + "_escape_layer.add_child(inside)",
+        BT + "return [str(card.get_path()), str(legend.get_path())]",
+        "",
+        "",
+        "func harness_remove_panel_escape() -> bool:",
+        BT + "if _escape_layer == null:",
+        BT + BT + "return false",
+        BT + "remove_child(_escape_layer)",
+        BT + "_escape_layer.free()",
+        BT + "_escape_layer = null",
+        BT + "return true",
+        "",
+        "",
         "func harness_remove_touching_pair() -> bool:",
         "%sif _touch_layer == null:" % BT,
         "%s%sreturn false" % (BT, BT),
@@ -1669,6 +1710,46 @@ def check_run_tests_py(godot, scratch):
     finally:
         margin_test.unlink(missing_ok=True)
 
+    # plant-tower-defense:G-049 (0.37.0): an argument the runner does not know must
+    # be refused (exit 2, named), never silently run the whole suite as "(no selector)".
+    unknown = run_godot(godot, scratch, ["--script", "res://tools/run_tests.gd", "--", "--select", "test_x"])
+    if unknown.returncode != 2 or "unknown argument --select" not in unknown.stdout:
+        return fail("run_tests.gd must exit 2 naming an unknown argument (--select); got exit %d:\n%s"
+                    % (unknown.returncode, unknown.stdout[-800:]))
+    # gh#35 (0.37.0): plain ERROR: lines are counted, never gated. Plant a test whose
+    # only effect is a push_error (a legitimate deliberate error under test): the suite
+    # passes, the wrapper exits 0, and the count reads 1 - not 0, and not a failure.
+    err_test = scratch / "test" / "unit" / "test_engine_error_count_control.gd"
+    err_test.write_text(
+        "extends RefCounted" + chr(10) + "var _T" + chr(10) + chr(10)
+        + "func test_deliberate_push_error_is_counted_not_gated() -> String:" + chr(10)
+        + BT + "push_error(" + BQ + "harness_check deliberate error under test" + BQ + ")" + chr(10)
+        + BT + "return _T.assert_true(true, " + BQ + "still a pass" + BQ + ")" + chr(10),
+        encoding="utf-8")
+    try:
+        counted = subprocess.run(
+            [sys.executable, str(scratch / "tools" / "run_tests.py"),
+             "-p", str(scratch), "--godot", str(godot)],
+            capture_output=True, text=True, timeout=GODOT_TIMEOUT)
+        # push_error prints as USER SCRIPT ERROR on 4.x, which the wrapper already GATES
+        # (that is the 0.28.0 catch) - so this control asserts the two buckets stay
+        # separate: the gated count names it, and the advisory engine-error line exists.
+        if counted.returncode != 0:
+            return fail("a deliberate push_error under test must not gate the run (exit %d):\n%s"
+                        % (counted.returncode, counted.stdout[-1500:]))
+        if "Engine errors: 1 ERROR: line(s) emitted" not in counted.stdout \
+                or "harness_check deliberate error under test" not in counted.stdout:
+            return fail("run_tests.py must count the planted push_error as exactly 1 engine error "
+                        "and quote it (gh#35):\n%s" % counted.stdout[-1500:])
+        if "Engine errors:" not in counted.stdout:
+            return fail("run_tests.py must print an 'Engine errors: N' line (gh#35):\n%s"
+                        % counted.stdout[-1500:])
+        if "user:// writes:" not in counted.stdout:
+            return fail("run_tests.py must print the 'user:// writes:' line (plant G-048c):\n%s"
+                        % counted.stdout[-1500:])
+    finally:
+        err_test.unlink(missing_ok=True)
+
     # Clean-suite control: no planted defect -> the wrapper must not cry wolf.
     clean = subprocess.run(
         [sys.executable, str(scratch / "tools" / "run_tests.py"),
@@ -1978,6 +2059,12 @@ def contract_rows():
          "lands, so the next read carries no ambient drift",
          ["paused_after", "was_paused_before", "elapsed_wall_ms"], {"paused_after": True}),
         ("unpause", {}, True, "restore after the then_pause row"),
+        ("contained_in", {"node_path": "/root/Main/Go", "within": "/root/Main/Go"}, True,
+         "plant-tower-defense:G-048b: a Control is inside itself; behaviour asserted by "
+         "check_panel_escape()",
+         ["inside", "overhang", "control_rect", "within_rect", "control_centre_inside",
+          "geometry_trustworthy", "geometry_caveat"], {"inside": True}),
+        ("contained_in", {"node_path": "/root/Main/Go"}, False, "missing `within`: envelope only"),
         ("project_settings", {"filter": "application/"}, True,
          "dave-game:G-003: ProjectSettings as the running game sees them",
          ["settings", "count", "missing", "filter"]),
@@ -2238,6 +2325,56 @@ def check_controls_touching(client, scratch):
                         % removed.get("message"))
     print("stage 5 bridge: min_control_gap=4 names the planted flush pair as "
           "controls_touching (0px apart); 0 reports none; pair removed")
+    return True
+
+
+def check_panel_escape(client, scratch):
+    """ui_escapes_panel + contained_in (plant-tower-defense:G-048b).
+
+    The planted Legend's centre is on the Card and its box hangs 40px past the
+    Card's right edge; the planted Inside label is fully inside. validate_ui must
+    name Legend (and only Legend) as ui_escapes_panel; contained_in must say NOT
+    inside with overhang right=40 for Legend and inside for Inside. Planted on
+    demand and removed, so nothing else's counts move.
+    """
+    def call(action, args):
+        return client.send_command(scratch, action, args, timeout=20.0)
+
+    planted = call("run_method", {"node_path": "/root/Main", "method": "harness_plant_panel_escape", "args": []})
+    if not planted.get("success"):
+        return fail("could not plant the panel escape: %s" % planted.get("message"))
+    try:
+        issues = (call("validate_ui", {"use_baseline": False}).get("data") or {}).get("issues", [])
+        esc = [i for i in issues if i.get("code") == "ui_escapes_panel"]
+        if len(esc) != 1 or "EscapeLayer/Legend" not in str(esc[0].get("path")):
+            return fail("ui_escapes_panel should name exactly the planted Legend, got %r"
+                        % [(i.get("path"), i.get("message")) for i in esc])
+        if "40px right" not in str(esc[0].get("message")):
+            return fail("ui_escapes_panel must quote the overhang (40px right), got %r"
+                        % esc[0].get("message"))
+        card, legend = planted["data"]["result"]
+        r = call("contained_in", {"node_path": legend, "within": card})
+        d = r.get("data") or {}
+        if r.get("success") is not False or d.get("inside") is not False \
+                or abs(float((d.get("overhang") or {}).get("right", 0)) - 40.0) > 0.5:
+            return fail("contained_in Legend within Card must be NOT inside, overhang right=40, got %r" % r)
+        r2 = call("contained_in", {"node_path": card.rsplit("/", 1)[0] + "/Inside", "within": card})
+        if not r2.get("success") or (r2.get("data") or {}).get("inside") is not True:
+            return fail("contained_in Inside within Card must be inside, got %r" % r2)
+        r3 = call("contained_in", {"node_path": "/root/Main", "within": card})
+        if r3.get("success") is not False or "inside" in (r3.get("data") or {}):
+            return fail("contained_in on a Node2D must refuse (envelope only), got %r" % r3)
+    finally:
+        removed = call("run_method", {"node_path": "/root/Main", "method": "harness_remove_panel_escape", "args": []})
+        if removed.get("data", {}).get("result") is not True:
+            return fail("harness_remove_panel_escape did not remove the planted layer: %r"
+                        % removed.get("message"))
+    after = (call("validate_ui", {"use_baseline": False}).get("data") or {}).get("issues", [])
+    if any(i.get("code") == "ui_escapes_panel" for i in after):
+        return fail("ui_escapes_panel still reported after the plant was removed - the stock "
+                    "fixture must produce none (false-positive control)")
+    print("stage 5 bridge: ui_escapes_panel names the planted Legend (40px right) and nothing "
+          "else; contained_in says NOT inside/right=40 for it, inside for Inside, refuses a Node2D")
     return True
 
 
@@ -3558,6 +3695,7 @@ def stage_bridge(godot, scratch, full):
         # gating so a zero here means "the check did not run".
         ok = check_findings_aggregate(client, scratch) and ok
         ok = check_controls_touching(client, scratch) and ok
+        ok = check_panel_escape(client, scratch) and ok
         ok = check_geometry_caveat_and_hide(client, scratch) and ok
         ok = check_ui_baseline(client, scratch) and ok
         ok = check_validator_reach(client, scratch) and ok
