@@ -179,6 +179,10 @@ so name a fan-out agent's own changed file(s) and get an actual compile check in
 of the `NOT COVERED` caveat. Needs the project already imported once (this project's
 own, or any earlier launch in the checkout) or a `class_name` from another file
 false-positives as unresolved — it reads the shared cache, it does not build one.
+Separately (0.29.0): **it also false-positives on any file that calls an autoload by
+its bare global name** (`DevTools.foo(...)`) — `--check-only` on an isolated file
+never resolves an autoload singleton name, import or not. Workaround where it bites:
+`get_node("/root/DevTools").call("foo", ...)` parses clean.
 
 ### Import gate (after names, before lint)
 

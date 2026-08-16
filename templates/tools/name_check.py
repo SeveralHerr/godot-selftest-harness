@@ -86,8 +86,8 @@ from bisect import bisect_right
 from datetime import datetime, timezone
 from pathlib import Path
 
-# harness-version: 0.28.0
-HARNESS_VERSION = "0.28.0"
+# harness-version: 0.29.0
+HARNESS_VERSION = "0.29.0"
 
 EXIT_OK = 0
 EXIT_FINDINGS = 1
@@ -1582,7 +1582,10 @@ def main():
                              "no cache write) - safe alongside concurrent instances of "
                              "itself or a running game. Needs the project's class cache "
                              "already built once (a prior --import or launch); without one, "
-                             "a file referencing another file's class_name false-positives.")
+                             "a file referencing another file's class_name false-positives. "
+                             "Separately: --check-only does not resolve an autoload SINGLETON "
+                             "by its bare global name at all, import or not - a file calling "
+                             "an autoload that way false-positives too (0.29.0).")
     args = parser.parse_args()
 
     project_root = Path(args.project).expanduser().resolve()
