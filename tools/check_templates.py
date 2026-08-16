@@ -474,6 +474,13 @@ def stage_assemble(scratch, user_dir_name):
         "## Harness-check fixture (written by check_templates.py stage_assemble).",
         "",
         "var presses: int = 0",
+        "## H-062: held by reference, because once removed from the tree the wall is",
+        "## unreachable by path and harness_set_wall_2d(true) used to be a silent no-op -",
+        "## which is why the raycast contract row failed on a clean tree for 7 releases.",
+        "var _wall2d: Node = null",
+        "## plant-tower-defense:G-019: a TYPED array property. A plain JSON Array",
+        "## assigned to it is a silent no-op in GDScript; set_state must rebuild it.",
+        "var tags: Array[StringName] = [&\"seed\"]",
         "## moving-in:G-029: the last InputEventMouseMotion.relative this node saw.",
         "var last_motion: Vector2 = Vector2.ZERO",
         "var motion_events: int = 0",
@@ -651,6 +658,7 @@ def stage_assemble(scratch, user_dir_name):
         "\tshape2.shape = rect2",
         "\twall2.add_child(shape2)",
         "\tadd_child(wall2)",
+        "\t_wall2d = wall2",
         "\tvar wall3 := StaticBody3D.new()",
         '\twall3.name = "Wall3D"',
         "\twall3.position = Vector3(0, 0, -5)",
@@ -689,7 +697,7 @@ def stage_assemble(scratch, user_dir_name):
         "",
         "",
         "func harness_set_wall_2d(on: bool) -> bool:",
-        "\tvar wall: Node = get_node_or_null(\"Wall2D\")",
+        "\tvar wall: Node = _wall2d",
         "\tif wall == null:",
         "\t\treturn false",
         "\tif on and wall.get_parent() == null:",
@@ -1736,6 +1744,16 @@ def contract_rows():
          ["result"], {"result": "3.0,4.0"}),
         ("set_state", {"node_path": "/root/Main", "property": "position", "value": {"x": 0, "y": 0}}, True,
          "restore; dict vector form"),
+        ("set_state", {"node_path": "/root/Main", "property": "tags", "value": ["corn", "sun"]}, True,
+         "plant-tower-defense:G-019: a JSON array written to an Array[StringName] "
+         "property must LAND (rebuilt as the target's typed array), not silently "
+         "no-op and not merely fail the read-back",
+         ["read_back", "coerced"], {"read_back": ["corn", "sun"], "coerced": True}),
+        ("set_state", {"node_path": "/root/Main", "property": "tags", "value": [1, "x"]}, False,
+         "an element that cannot convert to StringName must be refused, not "
+         "partially applied"),
+        ("get_state", {"node_path": "/root/Main", "properties": ["position.x"]}, True,
+         "H-046: a dotted path may end inside a built-in struct"),
         ("run_method", {"node_path": "/root/Main", "method": "returns_nothing", "args": []}, True,
          "gather:G-096: a -> void call must be distinguishable from an abort",
          ["returned_null", "declared_return"], {"returned_null": True, "declared_return": "Nil"}),
@@ -1761,14 +1779,24 @@ def contract_rows():
          "G-017: headless may clamp/ignore; envelope only, read-back is honest"),
         ("set_feature", {"query": True}, True, "G-033: read the flags without writing"),
         ("clear_nodes", {"group": "harness_check_no_such_group"}, True, "empty selector match"),
-        ("clear_nodes", {"class": "harness_check_no_such_class", "via_method": "die"}, True,
-         "gather:G-123: removal through the game's own path, not queue_free()",
-         ["count", "via", "skipped"]),
+        ("clear_nodes", {"class": "harness_check_no_such_class", "via_method": "die"}, False,
+         "gh#15.2: a class that names nothing is a typo, not an absence - refused, "
+         "envelope only (this row expected success until 0.32.0, H-062)"),
+        ("clear_nodes", {"class": "RigidBody2D", "via_method": "die"}, True,
+         "gather:G-123: removal through the game's own path, not queue_free(); a real "
+         "engine class with no instances in the fixture clears nothing and says so",
+         ["count", "via", "skipped"], {"count": 0}),
         ("find_nodes", {"class": "TileMapLayer"}, True,
          "gather:G-109: identify a node by predicate instead of one probe per child",
          ["nodes", "count", "truncated"]),
         ("find_nodes", {"class": "Button", "properties": ["text"], "where": {"text": "Go"}}, True,
          "property predicate + reported property",
+         ["nodes", "count"]),
+        ("find_nodes", {"class": "Button", "calls": ["get_class", "no_such_method_here"],
+                        "properties": ["position.x", "no_such_prop"], "where": {"text": "Go"}}, True,
+         "plant-tower-defense:G-005 / H-046: a getter read beside each hit, and an "
+         "unresolvable property carries the resolver's reason instead of a bare "
+         "null; check_find_nodes_calls() reads the per-hit keys",
          ["nodes", "count"]),
         ("press", {"node_path": "/root/Main/Go"}, True,
          "gather:G-119: emit `pressed` on a real BaseButton",
@@ -1779,8 +1807,13 @@ def contract_rows():
         ("press", {"node_path": "/root/Main/Cells"}, False,
          "not a button and has no button child: must refuse, not silently no-op"),
         ("raycast", {"from": [0, 0], "to": [64, 64]}, True,
-         "gather:G-136: what a collision mask would actually hit",
-         ["clear", "mask", "mask_names"]),
+         "gather:G-136: what a collision mask would actually hit - Wall2D sits on this "
+         "ray (check_raycast_3d removes and restores it; the restore was a silent no-op "
+         "for 7 releases because the removed wall was looked up by path, H-062)",
+         ["clear", "mask", "mask_names"], {"clear": False}),
+        ("raycast", {"from": [0, 0, 0], "to": [0, 0, -10]}, True,
+         "moving-in:G-023: three components query the 3D space; Wall3D sits on this ray",
+         ["clear", "mask", "mask_names"], {"clear": False}),
         ("raycast", {"from": [0, 0]}, False, "missing `to`: envelope only"),
         ("get_node_bounds", {"node_path": "/root/Main/Blip"}, True,
          "gather:G-120: a screen rect for a Sprite2D, not just a Control",
@@ -1813,13 +1846,17 @@ def contract_rows():
         ("scene_tree", {"root": "/root/Main/Go", "depth": 2, "properties": ["text"]}, True,
          "gather:G-119/G-109: a subtree, with a property reported per node"),
         ("reachable_ui", {}, True,
-         "gather:G-129: the fixture's four Buttons ('Go', the planted 8x8 'Tiny', "
-         "and the scaled-HUD pair) must all be found; three are reachable and "
-         "'ScaledOutside' is not, because it renders at x=1800 of 1152. That the "
-         "reachable count is 3 and not 4 is the gh#2 assertion in this table: a "
-         "count of 4 means the off-screen test stopped firing, and 2 means the "
-         "CanvasLayer scale is being ignored again",
-         ["controls", "count", "reachable", "viewport"], {"count": 4, "reachable": 3}),
+         "gather:G-129 / gh#2 / gh#16: the fixture's eleven Buttons must all be found "
+         "('Go', the planted 8x8 'Tiny', the scaled-HUD pair, the 'Overflowing' "
+         "text plant, and the six Shop rows). Six are reachable: Go, Tiny, "
+         "ScaledInside, Overflowing, and Shop rows 1-2. 'ScaledOutside' renders at "
+         "x=1800 of 1152 (gh#2: a reachable count one higher means the off-screen "
+         "test stopped firing; one lower means the CanvasLayer scale is ignored "
+         "again) and Shop rows 3-6 are past the ScrollContainer's fold (gh#16: "
+         "scroll-reachable, counted and never gated - "
+         "check_label_lines_and_scroll asserts that split). The row read 4/3 "
+         "from 0.19.0 to 0.31.0 while the fixture grew (H-062).",
+         ["controls", "count", "reachable", "viewport"], {"count": 11, "reachable": 6}),
         ("input_press", {"action": "ui_accept"}, True, ""),
         ("input_release", {"action": "ui_accept"}, True, ""),
         ("input_tap", {"action": "ui_accept"}, True, ""),
@@ -1836,6 +1873,17 @@ def contract_rows():
         ("set_feature", {"touchscreen": False}, True, ""),
         ("set_game_speed", {"scale": 2.0}, True, ""),
         ("set_game_speed", {"scale": 1.0}, True, ""),
+        ("step_time", {"seconds": 0.1, "then_pause": True}, True,
+         "plant-tower-defense:G-016: the tree is left paused the moment the step "
+         "lands, so the next read carries no ambient drift",
+         ["paused_after", "was_paused_before", "elapsed_wall_ms"], {"paused_after": True}),
+        ("unpause", {}, True, "restore after the then_pause row"),
+        ("project_settings", {"filter": "application/"}, True,
+         "dave-game:G-003: ProjectSettings as the running game sees them",
+         ["settings", "count", "missing", "filter"]),
+        ("project_settings", {"names": ["harness_check/no_such_setting"]}, False,
+         "a key no setting has must fail, naming it in `missing`",
+         ["settings", "missing"], {"missing": ["harness_check/no_such_setting"]}),
         ("pause", {}, True, "behaviour and idempotency asserted by check_pause_verb()"),
         ("unpause", {}, True, "behaviour and idempotency asserted by check_pause_verb()"),
         ("look_at", {"node": "/root/Main/Prop3D"}, True,
@@ -1853,7 +1901,7 @@ def contract_rows():
         ("validate_ui", {}, False,
          "envelope only: success depends on baseline state, and check_ui_baseline() "
          "tests that semantics properly",
-         ["issues", "baseline_in_use", "new_count", "pre_existing_count"]),
+         ["issues", "baseline_in_use", "new_count", "pre_existing_count", "last_findings_path"]),
         ("get_ui_snapshot", {}, True, ""),
         ("save_ui_baseline", {}, True, ""),
         ("ui_snapshot_diff", {}, True, "baseline saved by the previous row"),
@@ -1879,7 +1927,7 @@ def check_envelope(action, reply):
 
 _FINDINGS_KEYS = ("findings", "counts", "checks_run", "checks_skipped", "viewport",
                   "baseline_in_use", "new_count", "pre_existing_count",
-                  "geometry_trustworthy", "geometry_caveat")
+                  "geometry_trustworthy", "geometry_caveat", "last_findings_path")
 _FINDINGS_CHECKS = ("ui_layout", "ui_reachable", "signal_unconnected",
                     "performance", "scene_validation")
 
@@ -1951,10 +1999,33 @@ def check_findings_aggregate(client, scratch):
                     "silently is the failure this key exists to prevent (skipped: %r)"
                     % skipped2)
 
+    # plant-tower-defense:G-030: a non-clean run leaves its full records on disk.
+    # The planted defects make this run non-clean by construction, so the path
+    # must be reported, the file must exist, and its count must be the reply's -
+    # a stale file from an earlier run would fail the count, and a do-nothing
+    # implementation fails the path.
+    last_path = str(data.get("last_findings_path", "") or "")
+    if not last_path:
+        return fail("findings found %d thing(s) but reported no last_findings_path - "
+                    "the records of a non-clean run must be persisted (G-030)"
+                    % len(data["findings"]))
+    try:
+        persisted = json.loads(Path(last_path).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        return fail("findings named %s as its record file but it cannot be read: %s"
+                    % (last_path, exc))
+    if persisted.get("verb") != "findings" or persisted.get("count") != len(data["findings"]) \
+            or len(persisted.get("records") or []) != len(data["findings"]):
+        return fail("findings_last.json disagrees with the reply: verb=%r count=%r "
+                    "records=%d vs %d finding(s) in the reply"
+                    % (persisted.get("verb"), persisted.get("count"),
+                       len(persisted.get("records") or []), len(data["findings"])))
+
     print("stage 5 bridge: findings ran %d of %d checks, %d finding(s) incl. %d "
           "ui_layout on the planted defects; --no-scenes -> %d checks with "
-          "scene_validation named as skipped"
-          % (len(ran), len(_FINDINGS_CHECKS), len(data["findings"]), ui, len(ran2)))
+          "scene_validation named as skipped; %d record(s) persisted at %s"
+          % (len(ran), len(_FINDINGS_CHECKS), len(data["findings"]), ui, len(ran2),
+             persisted["count"], Path(last_path).name))
 
     # H-051: this stage runs HEADLESS, which is exactly the condition under which
     # a screen-position verdict is not what a player sees (the window is 64x64;
@@ -2795,6 +2866,48 @@ def check_pause_verb(client, scratch):
     return True
 
 
+def check_find_nodes_calls(client, scratch):
+    """find_nodes --call and the H-046 property-error channel (0.32.0).
+
+    plant-tower-defense:G-005: `--call METHOD` reads a getter beside each hit.
+    H-046: a property the resolver cannot read must carry the reason, not print
+    a bare null. Both are asserted against the fixture's 'Go' Button: get_class
+    must come back "Button", a bogus method must land in call_errors (not abort
+    the reply), `position.x` must resolve to a number (a dotted path ending
+    inside a Vector2, the H-046 case), and a bogus property must appear in
+    property_errors with a reason naming the class.
+    """
+    reply = client.send_command(scratch, "find_nodes", {
+        "class": "Button", "where": {"text": "Go"},
+        "calls": ["get_class", "no_such_method_here"],
+        "properties": ["position.x", "no_such_prop"],
+    }, timeout=15.0)
+    nodes = (reply.get("data") or {}).get("nodes") or []
+    if not reply.get("success") or len(nodes) != 1:
+        return fail("find_nodes --call: expected exactly one 'Go' Button hit, got %r" % reply)
+    hit = nodes[0]
+    calls = hit.get("calls") or {}
+    call_errors = hit.get("call_errors") or {}
+    props = hit.get("properties") or {}
+    prop_errors = hit.get("property_errors") or {}
+    if calls.get("get_class") != "Button":
+        return fail("find_nodes --call get_class should report 'Button' beside the hit, got %r"
+                    % (hit,))
+    if "no_such_method_here" not in call_errors or "no method" not in str(call_errors.get("no_such_method_here")):
+        return fail("find_nodes --call on a missing method must land in call_errors with a "
+                    "reason, got %r" % (hit,))
+    if not isinstance(props.get("position.x"), (int, float)):
+        return fail("H-046: find_nodes --property position.x must resolve inside the Vector2, "
+                    "got %r (errors: %r)" % (props.get("position.x"), prop_errors))
+    if "no_such_prop" not in prop_errors or "Button" not in str(prop_errors["no_such_prop"]):
+        return fail("H-046: an unresolvable --property must carry the resolver's reason "
+                    "naming the class, got %r" % (hit,))
+    print("stage 5 bridge: find_nodes --call get_class()=Button beside the hit, missing "
+          "method in call_errors, position.x=%s resolved inside the Vector2, "
+          "no_such_prop carried its reason (H-046)" % props["position.x"])
+    return True
+
+
 def check_look_at(client, scratch):
     """`look_at` actually reorients a Node3D, and only a Node3D (moving-in:G-044).
 
@@ -3281,6 +3394,7 @@ def stage_bridge(godot, scratch, full):
         ok = check_mark_script_reached(client, scratch) and ok
         ok = check_find_nodes_denominator(client, scratch) and ok
         ok = check_find_nodes_script_class(client, scratch) and ok
+        ok = check_find_nodes_calls(client, scratch) and ok
         ok = check_label_lines_and_scroll(client, scratch) and ok
         ok = check_set_state_dotted(client, scratch) and ok
         # Before check_ui_baseline for the same reason: it writes a baseline that

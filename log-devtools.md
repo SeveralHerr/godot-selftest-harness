@@ -3652,7 +3652,7 @@ patches; both patches would have reviewed clean, linted clean and fixed nothing.
   property that genuinely holds null. `--where` shares the root cause and is fixed
   this release by carrying the resolver's reason; the `--property` half still lies.
   Found while investigating `moving-in:G-011`, reported by nobody.
-  - [H-046] status: open | seen: 1 | harness: 0.18.0
+  - [H-046] status: fixed | fixed-in: 0.32.0 | seen: 1 | harness: 0.18.0
   - Improvement: the report loop in `_cmd_find_nodes` should carry the resolver's
     `reason` instead of `null` — either as `{"unresolved": reason}` or by omitting the
     key and listing it once per query. Alternatively, let `_resolve_property_path`
@@ -4111,7 +4111,7 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   `/root/Game/Entities/@Node2D@128`, which is what every follow-up `run-method` and
   `get-state` then has to be typed against; relaunch and it is `@Node2D@131`. Workaround
   was to re-run `find-nodes` before every read and paste the path back in by hand.
-  - [plant-tower-defense:G-005] status: open | seen: 1 | harness: 0.18.0 | source: plant-tower-defense 2026-08-15
+  - [plant-tower-defense:G-005] status: fixed | fixed-in: 0.32.0 | seen: 1 | harness: 0.18.0 | source: plant-tower-defense 2026-08-15
   - Improvement: give `find-nodes` a `--call METHOD` / `--property NAME` pass-through that
     invokes the read on each match and reports it beside the path, so identifying a node
     and reading it are one command. `--property` already exists for properties; the
@@ -4303,7 +4303,7 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   `run-method --node <the node> --method _process --args "[5.0]"` — the bridge answers
   while paused, so the system under test can be stepped by hand with zero ambient
   drift.
-  - [plant-tower-defense:G-016] status: open | seen: 1 | harness: 0.19.0 | source: plant-tower-defense 2026-08-15
+  - [plant-tower-defense:G-016] status: fixed | fixed-in: 0.32.0 | seen: 1 | harness: 0.19.0 | source: plant-tower-defense 2026-08-15
   - Improvement: give `step-time` a `--paused` flag that pauses the tree, advances by
     calling the loop by hand, and restores the previous pause state — and have the reply
     include `wall_seconds_elapsed` alongside `process_seconds` either way, so the gap
@@ -4514,7 +4514,7 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   `set-state` reply is the thing that is supposed to catch exactly this. A `Variant`
   Array cannot be assigned to an `Array[StringName]` in GDScript, so the write is
   dropped — but the verb reports as though it landed.
-  - [plant-tower-defense:G-019] status: open | seen: 1 | harness: 0.19.0 | source: plant-tower-defense 2026-08-15
+  - [plant-tower-defense:G-019] status: fixed | fixed-in: 0.32.0 | seen: 1 | harness: 0.19.0 | source: plant-tower-defense 2026-08-15
   - Improvement: `set-state` already reads the property back; compare it against what
     was requested and exit 1 with both values when they differ. That is a general fix,
     not an Array-specific one, and it would also catch setters that clamp or ignore.
@@ -4530,7 +4530,7 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   chasing a "tooltip bleeding through the notebook" bug that only exists under the
   harness. Workaround: none needed in the end — those tooltips were the wrong design
   anyway and their text moved into the button labels.
-  - [plant-tower-defense:G-020] status: open | seen: 1 | harness: 0.19.0 | source: plant-tower-defense 2026-08-15
+  - [plant-tower-defense:G-020] status: fixed | fixed-in: 0.32.0 | seen: 1 | harness: 0.19.0 | source: plant-tower-defense 2026-08-15
   - Improvement: have `press` push a synthetic `InputEventMouseButton` through
     `Input.parse_input_event` when the target is under the pointer; failing that,
     document on the verb that hover/tooltip state is not cleared and that a screenshot
@@ -5089,7 +5089,7 @@ pair of concurrent sessions.
   collision.** `upstream_gaps.py` keys on id, so two entries with one id pool as one and
   the second is silently the one that is not there. The idea itself is good — it is the
   one state every game has and no check looks at.
-  - [H-059] status: open | seen: 1 | harness: 0.22.0
+  - [H-059] status: fixed | fixed-in: 0.32.0 | seen: 1 | harness: 0.22.0
   - Improvement: `upstream_gaps.py` should detect a duplicate id in the *source* log and
     append both, suffixing the second (`G-027b`) and saying so, rather than pooling the
     first and dropping the second. Then build `first-frame`.
@@ -5389,7 +5389,7 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   already truncated. The verb re-run seconds later is a different frame and says
   `[OK]`. Everything else in this harness is reproducible by construction — a
   scene, a diff, a seed — and this is the one signal that is not.
-  - [plant-tower-defense:G-030] status: open | seen: 1 | harness: 0.23.0 | source: plant-tower-defense 2026-08-16
+  - [plant-tower-defense:G-030] status: fixed | fixed-in: 0.32.0 | seen: 1 | harness: 0.23.0 | source: plant-tower-defense 2026-08-16
   - Improvement: have `findings` and `validate-ui` write the full finding records
     of the most recent non-clean run to `user://ui_findings_last.json` (node path,
     rule, measured rect, timestamp), and print that path whenever the count is
@@ -5807,7 +5807,7 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   each needing real investigation into what changed and when (H-035 already fired
   here: a check that is not run is a check that is not passing, whichever the log
   claims).
-  - [H-062] status: open | seen: 1 | harness: 0.25.0
+  - [H-062] status: fixed | fixed-in: 0.32.0 | seen: 1 | harness: 0.25.0
   - Improvement: run `check_templates.py --full` at least once per release cycle (a
     line in the harness-release skill's §3, alongside the mutation-testing step),
     not only when a new contract row happens to need it — the whole reason `--full`
@@ -6551,3 +6551,255 @@ is a Python helper and `as_precedence` a name_check rule). `python -m unittest
 discover -s tools` — 35 tests OK. `python tools/check_templates.py` — OK, all
 stages, two new controls each mutation-tested. Real-project false-positive
 sweep for the new static rule: 0/0/0.
+
+## 2026-08-16 - Upstreamed 2 open gap(s) from BoomerShooter (harness 0.16.0)
+
+Pooled by `tools/upstream_gaps.py` from `C:\Users\gotmi\Documents\GitHub\BoomerShooter\log-devtools.md`. Gap text is the project's,
+verbatim; only the id line is rewritten (qualified with the project name so
+ids from two projects cannot collide, plus a `source:` back-pointer).
+
+- Gap: **`scaffold_install.py config --set` does not merge across separate invocations
+  in the same run** — calling it three times (once per key: `hud_layer_name`, then
+  `main_scene`, then `godot_bin`) silently reverted the *previous* call's key back to the
+  shipped schema default each time, because `--set` values are apparently not folded into
+  `_scaffold_defaults` until the process that set them exits, so the next invocation reads
+  the file's on-disk `_scaffold_defaults` and treats the on-disk value as still-scaffold-owned,
+  overwriting it. Concretely: set `hud_layer_name=UI` and `main_scene=res://scenes/main.tscn`
+  in one call → correct. Then a second call setting only `godot_bin=...` silently rewrote
+  `hud_layer_name` back to `"HUD"` and `main_scene` back to `""`. Worked around by passing
+  all four `--set` flags in a single invocation instead of splitting them per detected value
+  (which the scaffold instructions' own step 7/11 examples do split across calls).
+  - [BoomerShooter:G-101] status: fixed | fixed-in: 0.20.0 | seen: 1 | harness: 0.16.0 | source: BoomerShooter 2026-08-14
+  - Improvement: either document loudly in step 7/11 that all `--set` calls for one
+    scaffold run must be batched into a single `scaffold_install.py config` invocation, or
+    (better) fix the tool so each invocation reads and re-merges the *current* on-disk
+    `_scaffold_defaults`/values before deciding ownership, so sequential `--set` calls are
+    safe.
+
+- Gap: **step 11's Godot-binary detection can resolve to a POSIX shell shim instead of a
+  real Win32 executable on Windows/Git-Bash**, and nothing downstream catches it early.
+  `command -v godot` found `/c/Users/gotmi/bin/godot`, a `#!/bin/sh` wrapper script
+  (`exec ".../Godot_v4.7.1-stable_win64_console.exe" "$@"`) that Bash happily executes but
+  `subprocess.CreateProcess` (used by `name_check.py --refresh-api` and presumably by the
+  Godot-launching parts of `devtools.py`) cannot: `OSError: [WinError 193] %1 is not a
+  valid Win32 application`. `name_check.py --refresh-api` failed with only `Error: could
+  not read \`<path> --version\`` — no hint that the path itself was the problem. Had to
+  manually `file` the resolved binary, find it was a shell script, and locate the real
+  `.exe` under `Downloads/Godot_v4.7.1/` to fix `godot_bin`.
+  - [BoomerShooter:G-102] status: fixed | fixed-in: 0.32.0 | seen: 1 | harness: 0.16.0 | source: BoomerShooter 2026-08-14
+  - Improvement: step 11 should validate the resolved `godot_bin` by actually invoking it
+    (not just checking `-x`) and reject/skip candidates that raise `WinError 193` /
+    "not a valid Win32 application", falling through to the next candidate rather than
+    recording a shim path as `godot_bin`. Worth a general note for Windows/Git-Bash setups:
+    `command -v` can resolve a wrapper script fine for Bash while being useless to any
+    Python subprocess call the harness makes later.
+
+## 2026-08-16 - Upstreamed 2 open gap(s) from dave-game (harness 0.18.0)
+
+Pooled by `tools/upstream_gaps.py` from `C:\Users\gotmi\Documents\GitHub\dave-game\log-devtools.md`. Gap text is the project's,
+verbatim; only the id line is rewritten (qualified with the project name so
+ids from two projects cannot collide, plus a `source:` back-pointer).
+
+- Gap: **a project setting silently not applying has no gate at all.**
+  `environment/defaults/default_clear_color=Color(0.035, 0.05, 0.055, 1)` was written into
+  `project.godot` under `[rendering]`, survived the import pass, lint reported
+  `0 error(s), 0 warning(s)`, `validate-all` reported `0 total issues`, and the game still
+  rendered on the stock mid grey. Nothing in the harness reads project settings back from the
+  running game, so the only detection was opening a PNG. Workaround: called
+  `RenderingServer.set_default_clear_color()` in `_ready()` instead.
+  - [dave-game:G-003] status: fixed | fixed-in: 0.32.0 | seen: 1 | harness: 0.18.0 | source: dave-game 2026-08-15
+  - Improvement: a `project-settings [--filter PREFIX]` verb returning `ProjectSettings.get_setting()`
+    for the live session, so "did the setting I wrote actually land" is one read instead of a
+    screenshot. `get-state` cannot do it — `ProjectSettings` is not a node in the tree.
+
+- Gap: **`sample-pixels` / `screenshot` are the only way to catch a light-and-shadow
+  regression, and neither is assertable.** Every visual fix this session (ambient at 0.20
+  rendering the room as a black void, the player washing out to a featureless disc under its
+  own spill light, the tipped carboy covering the flask readout the player pours by) was found
+  by opening a PNG and looking at it. `validate-ui` correctly reported `No UI issues found`
+  throughout — it is a layout check and these are none of its business.
+  - [dave-game:G-004] status: open | seen: 1 | harness: 0.18.0 | source: dave-game 2026-08-15
+  - Improvement: `sample-pixels --rect` already returns mean/dominant colour; what is missing
+    is the ability to name a rect and a baseline together. A `save-pixel-baseline` /
+    `pixel-diff` pair keyed on named rects (the way `save-ui-baseline` already works for
+    layout) would turn "is the room still readable" into a gate rather than an inspection.
+
+## 2026-08-16 - Upstreamed 2 open gap(s) from moving-in (harness 0.11.0, 0.16.0, 0.19.0, 0.21.0)
+
+Pooled by `tools/upstream_gaps.py` from `C:\Users\gotmi\Documents\GitHub\moving-in\log-devtools.md`. Gap text is the project's,
+verbatim; only the id line is rewritten (qualified with the project name so
+ids from two projects cannot collide, plus a `source:` back-pointer).
+
+- Gap: **I reproduced the harness's own documented `validate-ui` bug inside a test I
+  wrote** — the first version measured overflow as `Control.global_position + Control.size`,
+  which adds a **scaled** position to an **unscaled** size. `ResultsScreen` scales itself
+  through `UiTheme.fit`, so the sum overstates the layout by 1/scale, and it reported a
+  104 px overflow on a screen that fitted. The correct reading is
+  `c.get_global_transform() * Rect2(Vector2.ZERO, c.size)`. The `/verify` notes describe
+  this exact failure for `validate-ui` before 0.17.0 — "measured Controls in CanvasLayer
+  space against a viewport measured in pixels" — and I walked into it anyway, because the
+  note is filed under a *tool's* history rather than as a thing to know when measuring UI.
+  There was a real overflow underneath, which is luck, not vindication.
+  - [moving-in:G-026b] status: fixed | fixed-in: 0.32.0 | seen: 1 | harness: 0.16.0 | source: moving-in 2026-08-14
+  - Improvement: put the rule where someone measuring UI will hit it — a Generic Pitfall
+    in `/verify` Phase 4 saying that `Control.size` is local and `global_position` is not,
+    that the two must never be added, and giving the one-line transform that is correct.
+    Better still, expose it as a verb: `node-bounds` already returns screen-space rects
+    with ancestor CanvasLayer transforms applied, so `node-bounds --recursive --outside`
+    could answer "what is off screen" without anyone re-deriving the arithmetic.
+
+- Gap: **nothing checks that a shipped scene enables the flags the shipped game needs.**
+  `show_title` sat false in `house.tscn` for the whole project and no gate could care:
+  lint validates scene structure, `validate-all` reports 0 issues, and every test that
+  instantiates `UnpackUi` deliberately wants the title OFF. The only way to notice is to
+  boot the game and look at the first frame.
+  - [moving-in:G-027b] status: fixed | fixed-in: 0.23.0 | seen: 1 | harness: 0.16.0 | source: moving-in 2026-08-14
+  - Improvement: a `first-frame` verb — launch, advance N frames, and report what the
+    player can actually see (visible CanvasLayers, topmost interactive Control, whether
+    the tree is paused, whether the cursor is captured). It is the one state every game
+    has and no automated check ever looks at, and it would have printed "no Control above
+    the HUD; cursor captured; tree running" for a game that should have opened on a menu.
+
+## 2026-08-16 — 0.32.0: ten things, chosen by reading the whole pool — and the pool itself was lying twice
+
+Brief for this turn: land 0.31.0 on master (it already was — `3c0faaf`, pushed),
+then read the open GitHub issues, `PURPOSE.md`, this log and the project logs
+(`plant-tower-defense`, `moving-in`, `findmyballs`, `BoomerShooter`, `dave-game`,
+`harness-test-1`) and pick the ten changes most likely to keep the tool useful,
+without treating any request as mandatory. Pooled all six logs first
+(`upstream_gaps.py`), which is where two of the ten came from before a single
+project gap was read.
+
+**What the reading actually said.** Of the plant log's 20 open gaps at 0.21.0+,
+**twelve were already fixed here** (0.24.0–0.31.0) and still open there because the
+project runs 0.25.0; `moving-in` runs 0.21.0. The marketplace clone on this machine
+is itself at 0.25.0 (`~/.claude/plugins/marketplaces/godot-selftest-harness`, last
+updated 14:51 today — six releases ago). So the single largest "usefulness" fact in
+the pool is not a missing verb: it is that **fixes are not reaching the projects**,
+and the projects go on logging real friction against bugs that no longer exist. That
+became item 9 and a new commitment in `PURPOSE.md` ("A fix is delivered when the
+project runs it, not when it ships"). The user-side action it cannot do for them:
+`/plugin marketplace update godot-selftest-harness`, then `/scaffold-godot-harness`
+in each project.
+
+**The ten, and what shipped:**
+
+1. **[H-063, new — fixed] `upstream_gaps.py` pooled `**no new gap.**` bullets as
+   OPEN gaps.** This turn's own pooling run appended `moving-in:auto-0d4eca` and
+   `auto-628dc7`, both "no new gap" absence markers, because `_NO_GAP_RE` knew only
+   the spelling `no gaps this turn`. Broadened to every absence spelling seen in the
+   six logs (`no new gap`, `no harness gaps`, `none this turn`, `nothing new`), with
+   a negative control for the commonest real-gap openings (`no way to…`, `no verb…`,
+   `None of the three gates…`) — the first draft's `none\b` matched that last one and
+   the unit test caught it. Removed the two bogus entries from this log. **[H-059 —
+   fixed] the second of two source entries sharing one id is no longer dropped:** a
+   collision (both `seen: 1`) is appended as `G-NNNb` and announced with `!`; a
+   recurrence (`seen: 2+` on the later block) still collapses. Re-pooling `moving-in`
+   immediately surfaced two real ones — `G-026b` (measure Controls in viewport
+   space; already what `validate-ui`/`reachable-ui` do since 0.17.0/0.19.0) and
+   `G-027b` (the `first-frame` verb, shipped 0.23.0) — both closed on arrival.
+   `tools/test_upstream_gaps.py` (4 tests) is new; the tool had none.
+2. **[plant-tower-defense:G-019 — fixed] `set-state` rebuilds a JSON array as the
+   property's typed Array.** Probed first (H-033): `Array(value, typed_builtin,
+   class, script)` converts String→StringName and drops the lot with an engine
+   error on an inconvertible element — the size check turns that into a refusal
+   with a count. Contract rows: `["corn","sun"]` → `Array[StringName]` lands with
+   `coerced: true`; `[1,"x"]` refused.
+3. **[plant-tower-defense:G-016 — fixed] `step-time --then-pause` + `Wall clock:`.**
+   Read the handler before building: the verb never paused the tree, and the CLI
+   help said `Pause the tree and advance it` — a claim wider than the behaviour, in
+   the client's own `--help`. Fixed the help; added `then_pause` (pause the moment
+   the step lands, lifting a pre-existing pause for the step itself) and printed
+   the `elapsed_wall_ms` the reply already carried. Contract row asserts
+   `paused_after: true`, followed by an `unpause` row.
+4. **[plant-tower-defense:G-005 — fixed] `find-nodes --call METHOD`.** A zero-arg
+   getter read beside each hit; a missing method lands in `call_errors`, never
+   aborts. `check_find_nodes_calls()` asserts `get_class()=Button` on the fixture.
+5. **[H-046 — fixed] dotted paths read built-in struct components.**
+   `_resolve_property_path` gained a `_BUILTIN_COMPONENTS` table (Vector2/3/4,
+   Color, Rect2, Quaternion, Plane, AABB, Basis, Transform2D/3D, Projection) and
+   reads `value[segment]` — probed first: Variant indexing by member name works, `in`
+   does not (`Invalid operands 'String' and 'Vector3' in operator 'in'`, and the
+   probe hung on it, which is the CLAUDE.md gotcha exactly). `find-nodes` now
+   carries `property_errors` and prints `<unresolved: reason>` instead of `null`.
+   First `--full` run failed to PARSE: `PackedStringArray([...])` is not a constant
+   expression inside a `const` Dictionary — plain arrays are. Caught by stage 3, as
+   designed.
+6. **[plant-tower-defense:G-030 — fixed] `findings` / `validate-ui` persist the last
+   non-clean run** to `user://findings_last.json` and print the path when the count
+   is non-zero. `check_findings_aggregate` reads the file back and asserts its count
+   equals the reply's (the planted defects make the run non-clean by construction).
+7. **[dave-game:G-003 — fixed] `project-settings` verb** (`--filter PREFIX` /
+   `--name KEY`, a missing key exits 1 under `missing`). Two contract rows.
+8. **[BoomerShooter:G-101 / G-102 — reproduced, one already fixed, one improved.]**
+   G-101 (sequential `config --set` reverting earlier keys) reproduced clean on
+   0.31.0 — gh#7's guard fixed it in 0.20.0; closed as such. G-102 (a Git-Bash shell
+   shim recorded as `godot_bin`): step 11 already resolves a `#!` wrapper to its
+   exec target; what remained was `name_check.py --refresh-api` saying only
+   ``could not read `<path> --version` `` — it now appends the OSError, and names
+   "not a Win32 executable (a shell wrapper script?)" on WinError 193.
+9. **[H-064, new — fixed] `harness-version` reports the versions this machine can
+   offer** — `$CLAUDE_PLUGIN_ROOT`, the plugin cache (`installed_plugins.json`), the
+   marketplace clone — and says when one is newer than the project's install. Every
+   value is a file on disk; nothing asks the network, so it can only ever
+   under-claim. Verified against `plant-tower-defense`: `Machine: plugin cache
+   0.25.0, marketplace clone 0.25.0` — honest, and the reason nothing newer is
+   offered is the stale clone above.
+10. **Docs / PURPOSE / loop-closing.** `PURPOSE.md`: "It shares the machine" now
+   covers the working tree (H-061 / H-052) and the new delivery commitment.
+   `press` not clearing tooltips (plant G-020) is documented as a sharp edge in
+   `REFERENCE.md` and the cheat-sheet rather than emulated — a synthetic mouse event
+   would change what `press` *is*. gh#20's last open item (#3, static RefCounted
+   invisible to reach) has been answered by 0.29.0's self-report API; closed with a
+   comment. **[H-062 — fixed]** the three `--full` contract rows that failed on a
+   clean tree since 0.19.0–0.25.0: `clear_nodes` (the row expected success from a
+   class gh#15.2 now correctly refuses — split into a refusal row and a real
+   `RigidBody2D` row asserting `count: 0`), `reachable_ui` (4/3 → 11/6: the fixture
+   grew six Shop rows and `Overflowing`; the note now lists what each number is
+   made of), and `raycast` — **a real bug in the fixture, not the row**:
+   `harness_set_wall_2d(true)` looked the removed wall up by path, found nothing,
+   and returned quietly, so every row after `check_raycast_3d` ran on a tree with
+   no 2D collider. Held by reference now; the 2D row asserts `clear: false` and a
+   3D row was added beside it.
+
+**Considered and not done:** dave-game:G-004 (named-rect pixel baselines) — a
+real feature, larger than one turn, and `sample-pixels` + `pause` already make
+the manual version cheap; moving-in:G-052 (`collider-planes`) — three sightings,
+one project, 3D-placement-specific, and the placement-audit skill covers it
+outside the bus; plant G-031 (`asset_contract` coverage class) — naming a class no
+shipped checker fills would be a check that can only report UNCHECKED forever;
+plant G-028 / gh#20 #3 — declined for the reason 0.24.0 gave and answered by
+0.29.0's `mark_script_reached()`.
+
+- Gap: **the fixture's own restore helper was a silent no-op for seven releases,
+  and the stage that would have said so was opt-in.** `--full` was run this turn
+  because H-062 asked for it per release; the raycast row's failure had been read
+  as "row drift" and was actually `harness_set_wall_2d(true)` returning `false`
+  after `remove_child` made the wall unreachable by path. Nothing in the fixture
+  checked the helper's return value.
+  - [H-065] status: fixed | fixed-in: 0.32.0 | seen: 1 | harness: 0.32.0
+  - Improvement: shipped — hold the wall by reference; the row asserts `clear:
+    false` so a missing wall fails the row on content, not only on shape.
+
+- Gap: **no gap in the harness for this — a note on the machine.** The marketplace
+  clone is six releases stale and the plugin cache with it, so no project on this
+  box can be refreshed past 0.25.0 until `/plugin marketplace update
+  godot-selftest-harness` is run by the user; `harness-version` now says what it
+  can see, and cannot see further than that.
+
+**Validation run this turn:** `python tools/record_version.py --record` then
+`--check` — OK at 0.32.0, 14 shipped files, 56 bus verbs + 58 CLI commands
+documented. `python -m unittest discover -s tools` — 39 tests OK (35 + 4 new).
+`python tools/check_templates.py --full` — three runs: (1) FAILED at stage 3
+parse (`PackedStringArray([...])` in a `const` Dictionary is not a constant
+expression; fixed to plain arrays), (2) a batched 5-site mutation of
+`dev_tools.gd` (`git diff --stat` showed the mutation landed; `grep -c` 5)
+FAILED naming every mutated check — `find_nodes --call get_class should report
+'Button'`, `findings found 6 thing(s) but reported no last_findings_path`,
+`contract set_state: ... read back ["seed"] ... coerced is None, expected True`,
+`contract step_time: data['paused_after'] is False, expected True`, and H-046's
+mutation surfaced inside the find_nodes check as `position.x: None` — restore
+proved byte-identical by `cmp`, then (3) clean: OK, `stage 6 contract: 88/88 rows
+passed` (was 83/86 on a clean 0.31.0 tree). `name_check.py` on
+`plant-tower-defense` / `moving-in` / `findmyballs`: 0/1/3, 0/0/3, 2/24/23 —
+identical to master's counts, so the message change moved no finding.

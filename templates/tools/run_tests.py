@@ -51,8 +51,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-# harness-version: 0.31.0
-HARNESS_VERSION = "0.31.0"
+# harness-version: 0.32.0
+HARNESS_VERSION = "0.32.0"
 
 # The runtime-error prefixes Godot emits for a GDScript that raised mid-execution.
 # Deliberately narrower than import_check.py's FAILURE_SIGNALS: "Parse Error" /

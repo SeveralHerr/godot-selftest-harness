@@ -157,11 +157,11 @@ listed is silently ignored; `--offline` parses the scripts statically with no ga
 
 | Verb | Use |
 |---|---|
-| `get-state --node PATH [--property N ...]` | Read a node's properties. **Always pass `--property`** — an unfiltered `Label` is ~120 keys. Repeatable; dotted paths walk into Resources and Dictionaries (`slot_data.item.name`); unknown names are reported, not dropped |
+| `get-state --node PATH [--property N ...]` | Read a node's properties. **Always pass `--property`** — an unfiltered `Label` is ~120 keys. Repeatable; dotted paths walk into Resources, Dictionaries and struct components (`slot_data.item.name`, `position.x`, `modulate.a`); unknown names are reported, not dropped |
 | `scene-tree [--root PATH] [--depth N]` | Discover root scene name + node paths (don't assume names). Each node carries `script` and `scene_file`, so a changed file maps to the node that runs it |
-| `find-nodes [--class C\|--group G\|--method M] [--where N=V] [--property N]` | Locate nodes by what they *are*, not where they sit. `--class` takes a script `class_name` too (subclasses included) and **fails on a name that is neither**; `--where` is repeatable and takes dotted paths. Usually the right verb for identifying one node in a large tree |
+| `find-nodes [--class C\|--group G\|--method M] [--where N=V] [--property N] [--call M]` | Locate nodes by what they *are*, not where they sit. `--class` takes a script `class_name` too (subclasses included) and **fails on a name that is neither**; `--where` is repeatable and takes dotted paths; `--call METHOD` reads a zero-arg getter beside each hit, so an auto-named node is found and read in one trip. Usually the right verb for identifying one node in a large tree |
 | `run-method --node PATH --method N --args "[...]"` | Call a method — preferred over `set-state` when a signal should fire. Reports `returned_null` + `declared_return`, so a `-> void` that ran is distinguishable from a call that aborted |
-| `set-state --node PATH --property N --value V` | Set raw property (bypasses setters/signals) and print the read-back. Dotted paths write through — note that mutates the **Resource**, so a shared material changes for every node using it. Write `--value=-200,-296` with an `=` when it starts with `-` |
+| `set-state --node PATH --property N --value V` | Set raw property (bypasses setters/signals) and print the read-back. A JSON array is rebuilt as the property's typed Array (`Array[StringName]` works). Dotted paths write through — note that mutates the **Resource**, so a shared material changes for every node using it. Write `--value=-200,-296` with an `=` when it starts with `-` |
 | `node-bounds PATH` | Exact **screen-space** position/size — deterministic layout ground truth, ancestor `CanvasLayer` transforms applied. Prefer this over a screenshot |
 | `press --node PATH` | Emit `pressed` on the nearest `BaseButton` at or under PATH — a real press with no screen coordinates to guess. A disabled button is reported, not silently "pressed" |
 | `input press`/`release`/`tap` ACTION, `input state [ACTION ...]` | Simulate input actions; `state` polls what the game is actually seeing. `tap` releases on the NEXT frame and reports `pressed_during`/`pressed_after` |
@@ -177,11 +177,14 @@ paused state, cursor mode — "what IS the screen showing", not "is anything wro
 `aabb` (3D world-space bounds, `top_y`/`bottom_y`), `node-bounds`' 3D counterpart;
 `look-at --node PATH` (points the active Camera3D, or `--from-node`, at a target's
 AABB centre — orientation only, never repositions);
-`step-time`, `set-game-speed` (refuses a scale below 0.01 — that is a freeze, not a
-speed; use `pause`/`unpause` for a real freeze), `wait-frames` (advance time
-deterministically), `pause`/`unpause` (sets `SceneTree.paused` directly, bus keeps
-answering — catch a sub-second effect, poll for the moment, pause, then inspect at
-no rush);
+`step-time [--then-pause]` (`--then-pause` freezes the tree the moment the step lands,
+so step + read pairs carry no ambient drift), `set-game-speed` (refuses a scale below
+0.01 — that is a freeze, not a speed; use `pause`/`unpause` for a real freeze),
+`wait-frames` (advance time deterministically), `pause`/`unpause` (sets
+`SceneTree.paused` directly, bus keeps answering — catch a sub-second effect, poll for
+the moment, pause, then inspect at no rush);
+`project-settings [--filter PREFIX|--name KEY]` (ProjectSettings as the RUNNING game
+sees them — did the value written to `project.godot` actually land?);
 `raycast --from X,Y[,Z] --to X,Y[,Z]` (2D or 3D by arity; refuses a 2D ray on a
 3D-only tree), `sample-pixels`, `canvas-scale`, `set-resolution`;
 `fire-entry-point NAME` (fires a named `entry_points` entry on demand — switches
@@ -196,7 +199,8 @@ holders see it, no relaunch);
 `touch press`/`release`/`drag`/`clear`/`list` (the only way to exercise multi-touch);
 `set-feature --touchscreen` (makes touch UI show itself on desktop — set it *before*
 the scene loads); `clear-nodes --via-method` (free nodes through the game's own removal
-path); `scripts-seen`, `new-uid`, `logs`, `harness-version`, `cmd <verb>`.
+path); `scripts-seen`, `new-uid`, `logs`, `harness-version` (also says when a newer
+harness is already on this machine than this project runs), `cmd <verb>`.
 
 #### Gotchas
 - **One command at a time, enforced.** One command file / one result file. Requests
@@ -338,6 +342,11 @@ runtime, which the static checker cannot see) and `name_check_ignore` (path pref
   that is not stepping — call `unpause` if you paused it, or set `entry_hook` to
   advance past whatever's pausing it automatically on launch, before believing them.
 - `get-state` dumps ~120 keys for a `Label` — pass `--property NAME` (repeatable).
+- `findings` / `validate-ui` keep the records of the last non-clean run at
+  `user://findings_last.json` (path printed when the count is non-zero) — a transient
+  is diagnosable after the frame that produced it is gone.
+- `press` emits `pressed` without moving the mouse: an open tooltip stays open and can
+  appear in a screenshot taken straight after. `mouse-move` first if the picture matters.
 - Run `/verify` **inline**; don't wrap routine validation in subagents/workflows.
 - On Windows, probe Python by running it (`python3` may be a Store alias stub that
   exists and refuses to run).

@@ -86,8 +86,8 @@ from bisect import bisect_right
 from datetime import datetime, timezone
 from pathlib import Path
 
-# harness-version: 0.31.0
-HARNESS_VERSION = "0.31.0"
+# harness-version: 0.32.0
+HARNESS_VERSION = "0.32.0"
 
 EXIT_OK = 0
 EXIT_FINDINGS = 1
@@ -1010,11 +1010,26 @@ def save_index(index, path):
     os.replace(tmp, path)
 
 
+# Why the last godot_version() probe failed, for the caller's error line.
+# BoomerShooter:G-102: `command -v godot` resolved a `#!/bin/sh` wrapper that Bash
+# runs happily and CreateProcess rejects (WinError 193, "not a valid Win32
+# application"); the only message was "could not read `<path> --version`", and
+# the path itself being the problem took a manual `file` to find.
+_LAST_PROBE_ERROR = ""
+
+
 def godot_version(godot_path):
+    global _LAST_PROBE_ERROR
+    _LAST_PROBE_ERROR = ""
     try:
         proc = subprocess.run([str(godot_path), "--version"], capture_output=True,
                               text=True, timeout=60)
-    except (OSError, subprocess.SubprocessError):
+    except (OSError, subprocess.SubprocessError) as exc:
+        _LAST_PROBE_ERROR = "%s: %s" % (type(exc).__name__, exc)
+        if getattr(exc, "winerror", None) == 193 or "193" in str(exc):
+            _LAST_PROBE_ERROR += (" -- this path is not a Win32 executable (a shell "
+                                  "wrapper script?); point godot_bin / GODOT_BIN at the "
+                                  "real .exe")
         return None
     for line in (proc.stdout or "").splitlines() + (proc.stderr or "").splitlines():
         line = line.strip()
@@ -1032,7 +1047,8 @@ def refresh_index(godot_path, force=False, timeout=300):
     """
     version = godot_version(godot_path)
     if not version:
-        return None, "could not read `%s --version`" % godot_path
+        why = (" (%s)" % _LAST_PROBE_ERROR) if _LAST_PROBE_ERROR else " (it ran, but printed no version line)"
+        return None, "could not read `%s --version`%s" % (godot_path, why)
     dest = cache_path_for(version)
     if dest.is_file() and not force:
         index = load_index(dest)

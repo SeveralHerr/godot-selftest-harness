@@ -428,6 +428,30 @@ Notable behaviors:
   scale of 0 stops the game while the bus keeps answering well-formed stale values;
   `0.04` used to echo as `1.0 -> 0.0` from a 1-dp print. The reply names the floor;
   the client prints three decimals.
+- **`set_state` rebuilds a JSON array as the property's own typed Array** (0.32.0,
+  plant-tower-defense:G-019). Assigning a plain `Array` to an `Array[StringName]`
+  (or any typed array) property is a silent no-op in GDScript; the read-back already
+  caught that as `set had no effect`, but the write is what the caller wanted. The
+  value is now reconstructed with the target's element type (a String becomes a
+  StringName), reported as `coerced: true`, and an element that cannot convert fails
+  the whole write with a count — never a partial apply.
+- **`findings` / `validate_ui` keep the full records of the last NON-CLEAN run** at
+  `user://findings_last.json` (0.32.0, plant-tower-defense:G-030) — `{verb, count,
+  iso_time, process_frame, tree_paused, current_scene, records}` — and print the path
+  whenever the count is non-zero. A finding that fires once on a transient frame used
+  to leave nothing to investigate with: the verb re-run seconds later was a different
+  frame and said `[OK]`, and the only record was a count in a line already truncated.
+  A clean run writes nothing, so the file is always the most recent run that had
+  something to say (its timestamp tells you which).
+- **`harness-version` names the versions this MACHINE can offer** (0.32.0, H-064):
+  the plugin Claude Code is running from (`$CLAUDE_PLUGIN_ROOT`), the plugin cache
+  (`~/.claude/plugins/installed_plugins.json`) and the marketplace clone, and says
+  when any of them is newer than the project's install. A project stays on the
+  version it was scaffolded with until someone re-runs `/scaffold-godot-harness`, and
+  nothing used to say a newer one was already sitting on disk — two real projects
+  ran 0.21.0 and 0.25.0 through a day in which 0.26.0–0.31.0 shipped, and about half
+  the gaps their logs pooled upstream had been fixed releases earlier. Every value is
+  read from a file; nothing asks the network.
 - **`pause` / `unpause` set `SceneTree.paused` directly** (0.25.0, gh#26) — the thing
   `set_game_speed`'s own refusal message names but nothing implemented until now. The
   bridge autoload runs `PROCESS_MODE_ALWAYS`, so it keeps answering on a paused tree
@@ -895,7 +919,7 @@ set-game-speed, pause, unpause, wait-frames, clear-nodes, validate-ui, ui-snapsh
 node-bounds, save-ui-baseline, ui-snapshot-diff, tilemap-cells,
 tilemap-region, scripts-seen, canvas-scale, set-resolution,
 find-nodes, press, raycast, sample-pixels, reachable-ui, aabb, look-at, new-uid,
-mouse-move, reload, first-frame, fire-entry-point
+mouse-move, reload, first-frame, fire-entry-point, project-settings
 ```
 
 `new-uid` is the one subcommand that never touches the bus — see below.
@@ -923,12 +947,40 @@ Notable flags:
   ad-hoc filter. A name that doesn't exist is reported explicitly rather than silently
   omitted, so a typo can't look like a missing value. A **dotted** name walks into
   Resources and Dictionaries: `--property texture.region`,
-  `--property slot_data.item.name`.
+  `--property slot_data.item.name` — and, since 0.32.0 (H-046), into a built-in struct's
+  named components: `--property position.x`, `modulate.a`, `size.y`, `global_transform.origin`
+  read what the caller plainly means instead of refusing (`get-state`) or printing
+  `null` (`find-nodes`). Writes are still whole-value: `set-state --property position
+  --value 12,7`, never `position.x`.
 - `find-nodes [--class C] [--group G] [--method M] [--where NAME=VALUE] [--property NAME]
-  [--root PATH] [--limit N]` — `--where` and `--property` are repeatable and accept
-  dotted paths (`--where slot_data.item.name='Iron Bar'`). Use it instead of a
+  [--call METHOD] [--root PATH] [--limit N]` — `--where` and `--property` are repeatable
+  and accept dotted paths (`--where slot_data.item.name='Iron Bar'`). Use it instead of a
   `scene-tree` dump plus a `get-state` per child when the question is "which of these
-  is the one".
+  is the one". `--call METHOD` (0.32.0, plant-tower-defense:G-005) calls a zero-argument
+  method on every hit and prints the result beside the path (`get_hp()=12`), so a node
+  whose auto-generated name changes every launch can be identified and read in one
+  round-trip; a missing method lands in `call_errors`, it never aborts the reply. A
+  `--property` the resolver cannot read prints `<unresolved: reason>` instead of a bare
+  `null` (0.32.0, H-046) — `null` alone was indistinguishable from a property that holds
+  null.
+- `project-settings [--filter PREFIX] [--name KEY ...] [--json]` (0.32.0,
+  dave-game:G-003) — `ProjectSettings` as the **running** game sees them. A value
+  written into `project.godot` that never applied (a typo'd key, an editor overwrite,
+  a setting the engine ignores at runtime) had no gate at all: lint and `validate-all`
+  reported clean while the game rendered on the stock clear colour, and the only
+  detection was opening a PNG. `--name KEY` is exact and repeatable; a key no setting
+  has exits 1 and is listed under `missing`. `get-state` cannot answer this because
+  `ProjectSettings` is not a node.
+- `step-time --seconds N [--hold ACTION] [--then-pause]` — `--then-pause` (0.32.0,
+  plant-tower-defense:G-016) sets `SceneTree.paused = true` the moment the step lands
+  (lifting a pre-existing pause for the step itself), so a short-lived state can be
+  stepped *into* and then read at leisure: without it every step + read pair costs
+  unbounded ambient game time on top of the seconds requested, because the tree keeps
+  running between the reply and the next command. The reply's `elapsed_wall_ms` (printed
+  as `Wall clock:`) is the real time the step took, so "what I advanced" and "what
+  actually passed" are both visible. `unpause` resumes. Note the verb's own limit still
+  holds — nothing here is a manual tick; the tree is NOT paused *during* the step (the
+  0.31.0 CLI help said it was, and was wrong).
 - `press --node PATH [--toggle BOOL]` — emit `pressed` on the button at, or directly
   under, `PATH`.
 - `raycast --from X,Y[,Z] --to X,Y[,Z] [--mask N] [--areas] [--exclude NODE]` — two
@@ -1873,6 +1925,12 @@ Run it after any script/scene/gameplay change, before committing.
   Godot's `Tween` default — land within about one frame. Compare the returned
   `process_seconds` against `seconds_requested` rather than assuming, and use
   `TWEEN_PROCESS_PHYSICS` when the sample point actually matters.
+- **`press` fires `pressed`; it does not move the mouse.** (plant-tower-defense:G-020)
+  A tooltip already open stays open and renders over whatever the press created,
+  because a real click cancels the tooltip as part of the mouse event and the
+  bridge's emit does not. A screenshot taken straight after `press` can therefore
+  contain a popup a player would never see. If the picture matters, `mouse-move` onto
+  the button first, or take the screenshot a frame after moving the pointer away.
 - **`launch --isolated` isolates the bus, and only the bus.** Godot resolves `user://`
   inside the engine and honours no flag for it, so screenshots, save files and UI
   baselines are still shared with every other instance. The previous version printed a
