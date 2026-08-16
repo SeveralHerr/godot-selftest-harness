@@ -5455,7 +5455,7 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   someone had to already know, and it is nowhere in the harness docs. This is the
   same family as the vacuous-pass problem the runner already detects: an assertion
   that cannot fail.
-  - [plant-tower-defense:G-033] status: fixed | fixed-in: 0.24.0 | seen: 1 | harness: 0.23.0 | source: plant-tower-defense 2026-08-16
+  - [plant-tower-defense:G-033] status: fixed | fixed-in: 0.24.0 | seen: 2 | harness: 0.23.0 | source: plant-tower-defense 2026-08-16
   - Improvement: a `_T.text_width(label) -> float` helper that resolves the
     label's own theme font and measures the string, plus one line in the harness
     CLAUDE.md's gotchas naming `get_minimum_size()` on a clipping Label as a
@@ -5633,3 +5633,259 @@ scratch probe (three synthetic pids covering the recycled/genuine/unverifiable
 cases) since it needs no live Godot to exercise. gh#25's two fixes are prose
 instructions, not template code `check_templates.py` drives — validated by
 unit-testing their embedded logic in isolation instead.
+
+## 2026-08-16 - Upstreamed 2 open gap(s) from plant-tower-defense (harness 0.18.0, 0.19.0, 0.21.0, 0.23.0, 0.24.0)
+
+Pooled by `tools/upstream_gaps.py` from `C:\Users\gotmi\Documents\GitHub\plant-tower-defense\log-devtools.md`. Gap text is the project's,
+verbatim; only the id line is rewritten (qualified with the project name so
+ids from two projects cannot collide, plus a `source:` back-pointer).
+
+- Gap: **[G-034] `import_check.py` reports "Import OK" on a hard parse error.** New.
+  Reproduced deliberately, all four gates on the identical tree:
+  ```
+  name_check.py      -> exit 0   (correct; it does not compile)
+  import_check.py    -> exit 0   "Import OK: godot --import ran (exit 0) and its 28
+                                  line(s) of output contain no SCRIPT ERROR, Parse
+                                  Error, Failed to load script or Compilation failed."
+  lint_project.gd    -> exit 1   "lint: 2 error(s), 0 warning(s)"
+  run_tests.gd       -> exit 2   "Total: 164 | Passed: 149 | Failed: 15"
+  ```
+  The error text `SCRIPT ERROR: Parse Error: Assigned value for constant "OK_COLOR"
+  isn't a constant expression.` appears in `run_tests` output and in lint's findings,
+  but never in the import log import_check scans. Severity is bounded: lint catches it,
+  and lint runs alongside import in every `/verify` tier that reaches Phase 1, so
+  nothing ships broken. But import_check is documented as the gate that catches what
+  name_check cannot, and is positioned FIRST specifically so you fix the cause instead
+  of reading a cascade — and it was the one gate that missed. It also cost me the
+  detour above, because I had the diagnosis and dropped it when the gate disagreed.
+  - [plant-tower-defense:G-034] status: fixed | fixed-in: 0.24.0 | seen: 1 | harness: 0.23.0 | source: plant-tower-defense 2026-08-16 | dup-of: gh#23 (H-044 - two intake paths, no dedupe: this same defect was filed as a GitHub issue and fixed before this project-log copy was pooled)
+  - Improvement: either `godot --import` does not surface errors for scripts it does
+    not re-import (in which case import_check cannot claim "the project parses" and its
+    success message should say what it actually verified), or the scan needs to catch
+    this error class. The success string is the specific thing to change — it currently
+    asserts the absence of four phrases and reads as a compile verdict.
+
+- Gap: **could not pixel-sample the low-alpha instant** — tried `sample-pixels`
+  on the pip's computed screen position immediately after a forced fire, but
+  every attempt raced the bus round-trip against the 0.8s reload interval and
+  landed after most of the recovery had already happened (readiness read back
+  at 0.95-1.0 by the time the sample command reached the game), even after
+  slowing `set-game-speed` — because `Engine.time_scale` scales tick *rate*,
+  not per-tick delta, so a slow scale does not lengthen the real-time window a
+  low value is held at any better than 1.0x does once a command is already
+  in flight. `set-game-speed 0` is refused ("use the tree's pause for that");
+  there is no bus verb for a real `SceneTree.paused = true` freeze.
+  - [plant-tower-defense:G-036] status: fixed | fixed-in: 0.25.0 | seen: 1 | harness: 0.24.0 | source: plant-tower-defense 2026-08-16 | dup-of: gh#26 (H-044 - same pause/unpause request, filed as a GitHub issue and fixed before this project-log copy was pooled)
+  - Improvement: a `pause`/`unpause` verb (or a `--freeze-on` flag on
+    `set-game-speed`) that flips the actual tree pause rather than time_scale,
+    so a caller can catch a fast, sub-second state transition and hold it
+    indefinitely for a leisurely `sample-pixels`/`screenshot`, independent of
+    bus latency.
+
+## 2026-08-16 - Upstreamed 6 open gap(s) from moving-in (harness 0.11.0, 0.16.0, 0.19.0, 0.21.0)
+
+Pooled by `tools/upstream_gaps.py` from `C:\Users\gotmi\Documents\GitHub\moving-in\log-devtools.md`. Gap text is the project's,
+verbatim; only the id line is rewritten (qualified with the project name so
+ids from two projects cannot collide, plus a `source:` back-pointer).
+
+- Gap: **no way to observe a transient UI element** — a Control that shows for ~3s and
+  fades cannot be caught, because every verb is its own process round-trip (~1s) and the
+  bus serves one command at a time, so `fire` and `screenshot` are always seconds apart. I
+  lost the card four times: at `sleep 1`, at no sleep, and twice more at
+  `set-game-speed 0.08` (the card's tween is process-driven and did not slow with it).
+  What finally worked was giving up on the picture entirely and asserting `node-bounds`,
+  which is the right answer here but is not available for anything whose defect is genuinely
+  visual — a wrong colour, a clipped glyph, a z-order.
+  - [moving-in:G-041] status: likely-fixed | fixed-in: 0.25.0 (unconfirmed against this
+    project) | seen: 1 | harness: 0.21.0 | source: moving-in 2026-08-15 | same-mechanism-as:
+    gh#26 / plant-tower-defense:G-036, where the `pause`/`unpause` verbs shipped in 0.25.0
+    were confirmed to fix an identical ask (catch a fast fade, freeze it, inspect at no
+    rush). Not marked plain `fixed` because it needs the actual retry this project's own
+    discipline calls for (H-033) - poll for the card's on-screen frame, `pause`, then
+    `screenshot`/`node-bounds` at leisure - and that retry has to happen in `moving-in`,
+    not here. Left open until that project confirms; the `--after` verb below is still
+    worth building if the poll-then-pause workflow turns out to be too slow to reliably
+    catch a 3s window, but try the cheaper fix first.
+  - Improvement: a `--after` on `screenshot` that takes a verb to run first, executed and
+    captured inside ONE bus round-trip
+    (`screenshot --after 'run-method --node X --method show_card ...' --delay 0.4`).
+    The bus already serialises commands, so the game side could run the trigger, wait the
+    delay in engine frames, and capture — with no client round-trip in between. Failing
+    that, a `hold-next-frame` verb that pauses the tree N frames after the next command
+    completes would let a fired animation be frozen mid-flight and then photographed.
+
+- Gap: **`coverage_check.py` can only see a scene load written as a LITERAL.** Its
+  `_scan_scene_loads` matches a `res://…tscn` string inside `load()`/`preload()`, so the
+  sweep added here — which walks `res://`, finds every scene, and is strictly stronger than
+  any hardcoded load — left `scene_validation` reporting UNCHECKED. A project that
+  `preload`s one scene once is credited; a project that validates all of them is not.
+  The incentive points the wrong way: the cheapest way to turn the class green is to write
+  the weaker check.
+  - [moving-in:G-042] status: fixed | fixed-in: 0.24.0 | seen: 1 | harness: 0.21.0 | source: moving-in 2026-08-16 | dup-of: gh#21 / plant-tower-defense:G-029 (H-044 - same coverage_check sweep-credit request, fixed before this project-log copy was pooled)
+  - Improvement: also credit a dynamic sweep — a `.tscn` suffix test (`ends_with(".tscn")`,
+    `"*.tscn"`) in the same file as a `ResourceLoader.load`/`load` call, or any
+    `DirAccess` walk feeding one — and report it as a distinct, STRONGER evidence kind than
+    the literal (`sweeps res:// for .tscn` vs `loads res://x.tscn`). Failing that, say in
+    the `absent:` line that only literals count, so a session that just wrote a sweep is not
+    told its scenes are unchecked.
+
+- Gap: **`quit` reported a long-dead pid as "still alive"** — `python tools/devtools.py
+  quit` exited 1 with `WARNING: 1 process(es) this project launched EARLIER are still
+  alive (from launched.jsonl): pid 7176  launcher started 02:48:40  (start time
+  unverifiable - not auto-killed)`. `Get-Process -Id 7176` returns nothing: the process
+  died hours ago, in an earlier session. The pid is simply a stale line in
+  `.devtools/launched.jsonl` that nothing ever reconciles, and it will now be re-reported
+  on every single run of this project forever. Workaround: confirmed by hand with
+  `Get-Process` and ignored the exit code — which is the habit the check exists to
+  prevent. Distinct from [G-035], which is about a game that is genuinely still exiting.
+  - [moving-in:G-043] status: fixed | fixed-in: 0.25.0 | seen: 1 | harness: 0.21.0 | source: moving-in 2026-08-16 | dup-of: gh#24 (H-044 - same _ledger_survivors/pid-recycling defect, fixed before this project-log copy was pooled)
+  - Improvement: when a `launched.jsonl` pid cannot have its start time verified, probe
+    whether the pid exists at all before reporting it as alive, and prune the entry when
+    it does not — a warning that can never clear is one nobody reads. If the probe itself
+    is unreliable, say `unverifiable` rather than `still alive`, and do not exit 1 on it.
+
+- Gap: **no way to aim the camera at a node.** `aabb` gives the shower's exact world
+  centre (`3.321, 0.547, -2.650`) and `teleport_to_grid` takes grid coordinates, but
+  nothing converts between them or points the player at a known node, so framing a
+  fixture for a screenshot is guesswork about the heading convention. Four attempts —
+  `set_heading` 130, 200, and two teleports — produced a wall, a hallway and the kitchen,
+  and the visual check was recorded `blocked` (which correctly downgraded the run to
+  `partial`). Everything else about the shower was settled numerically; this was only the
+  cosmetic confirmation, but that is exactly the check a screenshot is for.
+  - [moving-in:G-044] status: open | seen: 2 | harness: 0.21.0 | source: moving-in 2026-08-16
+  - Improvement: a `look-at --node PATH [--from-node PATH] [--distance N]` verb that
+    places the observing camera (or the group-`player` node) at a sensible standoff and
+    orients it at the target's AABB centre. The engine already has `Node3D.look_at`; the
+    entire difficulty is that the caller has to rediscover the project's own heading
+    convention, which the harness can read off the node it is moving.
+
+- Gap: **`tools/plant.py --sub` is mangled by MSYS/Git-Bash path translation.** Running
+  `python tools/plant.py --file scripts/house_plan.gd --sub
+  's/Paintable.attach\(node3d, room_name, "ceiling"\)/Paintable.attach(node3d, room_name,
+  "floor")/'` reported `pattern '...\"ceiling\"\)/Paintable.attach(node3d, room_name,
+  "floor")C:/Program Files' matched nothing` — Git-Bash saw the `/` separating the two
+  halves as the start of a path and pasted a Windows prefix onto the end of the
+  expression. Workaround: prefix the command with `MSYS_NO_PATHCONV=1`, which works.
+  Same class as the already-documented `taskkill /F` -> `F:/` gotcha, so the shape is
+  known; it is the substitution syntax that is newly affected.
+  - [moving-in:G-045] status: open | seen: 1 | harness: 0.21.0 | source: moving-in 2026-08-16
+  - **Out of scope for this repo (2026-08-16):** `tools/plant.py` does not exist under
+    `templates/` or `tools/` here - `grep -rn "plant.py"` against `REFERENCE.md` and
+    `commands/*.md` finds nothing. It is a `moving-in`-local tool, not a harness-shipped
+    one, so there is no template-side fix to make. Left open in case a future scaffold
+    ships an equivalent substitution helper and inherits the same MSYS quoting trap.
+  - Improvement: accept an alternate delimiter (`s|old|new|`) so a substitution never has
+    to contain a bare `/`, and mention `MSYS_NO_PATHCONV=1` in `plant.py --help`. Cheaper
+    still: take `--from` and `--to` as two separate arguments and skip expression parsing
+    altogether — the `s///` shape buys nothing here, since the tool only ever does one
+    substitution.
+
+- Gap: **[G-044] again** — see its entry above, now `seen: 2`. Framing the painted room for
+  - [moving-in:auto-3fdcfc] status: open | seen: 1 | source: moving-in 2026-08-16
+  a screenshot took five attempts (two teleports, three camera rotations, one
+  `sample-pixels`) and never landed on the bathroom; the pixel sample came back `#7e6a43`,
+  the ceiling's own lit ochre, from somewhere that was not the room I had painted. The
+  player position read back correctly (`4.11, 0.82, -3.81`), so `teleport_to_grid` is
+  fine — what is missing is any way to point the camera AT a node. The visual judgement is
+  recorded `blocked`, which correctly downgraded the run to `partial`. A `look-at --node`
+  verb would have made this one call, and this is now the second consecutive cycle where
+  the only unanswered question was a framing one.
+
+- Gap: **`check_templates.py --full`'s stage 6 contract table has drifted from the
+  fixture and gone unnoticed** — spotted incidentally while validating the `look_at`
+  verb, which needed `--full` to exercise its new contract row. Three rows fail on a
+  perfectly clean tree, no mutation, nothing of mine touching any of the three:
+  `clear_nodes` (expects a script class `harness_check_no_such_class` that either was
+  renamed or never existed as written), `raycast` (expects a `CollisionObject2D` in
+  the scratch scene; the fixture currently has none, only a 3D one), `reachable_ui`
+  (expects `count: 4, reachable: 3`; the live scratch answers `11, 6`). `stage 6
+  contract: 74/77 rows passed` on a tree that should read 77/77. The default
+  (non-`--full`) run — the one every release in this log's validation lines actually
+  quotes — stays clean throughout, which is exactly how this went unnoticed: `--full`
+  is opt-in and nothing routine exercises it, so three genuine contract mismatches sat
+  unreported release after release. Not fixed this turn — three separate root causes,
+  each needing real investigation into what changed and when (H-035 already fired
+  here: a check that is not run is a check that is not passing, whichever the log
+  claims).
+  - [H-062] status: open | seen: 1 | harness: 0.25.0
+  - Improvement: run `check_templates.py --full` at least once per release cycle (a
+    line in the harness-release skill's §3, alongside the mutation-testing step),
+    not only when a new contract row happens to need it — the whole reason `--full`
+    exists is stage 6, and a stage that only runs when someone remembers is the
+    exact "reports success, is not running" shape this project keeps finding
+    elsewhere.
+
+## 2026-08-16 — 0.26.0: pooling caught its own duplicates, and a camera verb
+
+`tools/upstream_gaps.py` against `plant-tower-defense` and `moving-in` pooled 8
+gaps this cycle. Four were already fixed under GitHub issue numbers before this
+project-log copy was pooled — a live instance of H-044 (two intake paths, no
+dedupe), now with four fresh examples in one pass: `plant-tower-defense:G-034`
+(dup of gh#23), `G-036` (dup of gh#26), `moving-in:G-042` (dup of gh#21 /
+`plant-tower-defense:G-029`), `G-043` (dup of gh#24). All four marked `fixed`
+with `dup-of:` cross-references rather than re-implemented; H-044's bead
+(`godot-selftest-harness-7x5`) updated with the fresh evidence.
+
+Of the four genuinely new-to-this-repo gaps:
+
+- **[gh#28 / moving-in:G-044, seen twice the same day] no way to point a
+  camera at a node.** Framing a fixture for a screenshot meant guessing a
+  heading in degrees — four blind attempts on one real run (a wall, a hallway,
+  the kitchen), then a second consecutive session hitting the identical wall.
+  Added a generic `look_at --node PATH [--from-node PATH] [--up X,Y,Z]` verb:
+  orients `--from-node` (default `get_viewport().get_camera_3d()`, the active
+  camera — no project knowledge needed) toward the target's AABB centre (the
+  same measurement `aabb` reports), falling back to `global_position` for a
+  target with no geometry. Deliberately orientation-only, never repositions —
+  "a sensible standoff" would have made this verb a second source of guessing,
+  and the reported blocker was always heading, never position.
+
+  **Cost a real mistake worth recording.** The first implementation used
+  Python-style adjacent string literal concatenation (`"a " "b" % x`) across
+  five error messages — valid Python, NOT valid GDScript, and it does not fail
+  quietly: `check_templates.py` caught it immediately as `Parse Error: Expected
+  closing "}" after dictionary elements`, because GDScript has no such feature
+  at all. Fixed with explicit `+`/single-parenthesized-`%`, matching the
+  pattern two pre-existing `raycast` messages already used correctly. Worth
+  naming because it is exactly the class of defect this repo's own mutation
+  discipline exists to catch, and it worked: the FIRST `check_templates.py`
+  run after writing the verb failed, not the last one before shipping.
+
+  **Second mistake, same feature: a stale mutation-test backup.** After fixing
+  the parse error (with the register_command mutation still active from
+  testing), I restored from a backup taken BEFORE the string fix — silently
+  reintroducing the just-fixed bug. Caught by re-grepping for the broken
+  pattern rather than trusting the restore. `cp` before a mutation is only
+  safe backup if nothing legitimate changes the file between the backup and
+  the restore; here something did. Lesson for next time: take the backup
+  immediately before mutating, never earlier in the same session.
+
+  Along the way, **discovered `check_templates.py --full`'s stage 6 has three
+  pre-existing, unrelated contract-table mismatches** ([H-062] above) —
+  `clear_nodes`, `raycast`, `reachable_ui` all fail on a perfectly clean tree.
+  Not fixed this turn (three separate root causes); logged, and
+  `harness-release/SKILL.md` §3 now says to run `--full` every release rather
+  than only when a new verb needs it.
+
+- **[moving-in:G-041] no way to observe a transient UI element** — marked
+  `likely-fixed` (0.25.0's `pause`/`unpause`), not plain `fixed`: the mechanism
+  matches `plant-tower-defense:G-036` exactly (poll for the visible frame,
+  `pause`, inspect at no rush), but this repo cannot retry it against
+  `moving-in`'s actual fixture. Left open pending that project's own
+  confirmation, per H-033.
+
+- **[moving-in:G-045] `tools/plant.py` MSYS quoting** — confirmed out of scope:
+  `plant.py` does not exist anywhere under this repo's `templates/` or
+  `tools/`. It is a `moving-in`-local tool. Left open, noted as out of scope.
+
+**Validation run this turn:** `python tools/record_version.py --record` then
+`--check` — OK at 0.26.0, 13 shipped files, 54 bus verb(s) + 56 CLI command(s)
+(up from 53+55 — exactly `look_at`). `python -m unittest discover -s tools` —
+35 tests OK. `python tools/check_templates.py` (default) — OK, all stages,
+`check_look_at` passing with a real mutation-test cycle behind it (see above).
+`python tools/check_templates.py --full` — stage 6 contract table run for the
+first time this session; 74/77 rows pass, all 3 failures pre-existing and
+unrelated (H-062), confirmed by reproducing them against the clean tree before
+any of this turn's edits existed. `look_at`'s own contract row (added to
+`contract_rows()` alongside the two `pause`/`unpause` rows 0.25.0 should have
+had and did not) passes.

@@ -101,6 +101,9 @@ project-edited and starts getting backed up on every refresh.
 
 ```bash
 python tools/check_templates.py           # required if anything under templates/ changed
+python tools/check_templates.py --full    # required if a generic bus verb was added or
+                                           # changed - stage 6 exercises the full
+                                           # every-verb contract table
 python -m unittest discover -s tools      # scaffold/install unit tests
 ```
 
@@ -108,6 +111,14 @@ python -m unittest discover -s tools      # scaffold/install unit tests
 `C:\Users\gotmi\Documents\Godot_v4.7.1-stable_win64.exe` by default. If it prints
 `WARNING: no Godot binary found ... This is not a pass`, it returned **2** and you have
 verified nothing — do not proceed.
+
+**Run `--full` at least once per release, not only when a new verb needs it (H-062).**
+It is opt-in and nothing routine exercises it, which is exactly how three genuine
+contract-table mismatches (`clear_nodes`, `raycast`, `reachable_ui` all failing on a
+perfectly clean 0.25.0 tree) sat unreported release after release: the default run
+every past log entry quotes stayed clean throughout. A stage that only runs when
+someone remembers to ask for it is the "reports success, is not running" shape this
+project keeps finding everywhere else.
 
 `python3` on Windows is the Microsoft Store alias stub: it satisfies `command -v` and then
 refuses to run. Use `python`.
