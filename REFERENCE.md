@@ -1013,10 +1013,19 @@ Notable flags:
   - `--isolated` gives the instance a fresh session id **and its own bus directory**
     (passed as `-- --devtools-busdir <dir>`, which the autoload honours), then proves
     that bus answers a `ping` **before** printing the `--session … --userdata …`
-    follow-up command — a bus that never answered prints the stderr tail and exits 1
-    instead, because a follow-up command that would not work is worse than none. It
-    does not move `user://`; the output labels that line `SHARED`, and the sharp edge
-    below says why.
+    follow-up command — a bus that never answered exits 1 instead, because a
+    follow-up command that would not work is worse than none. **On that timeout it
+    leads with any Godot `ERROR:` line found in EITHER captured log** (0.31.0, gh#31)
+    — `launch_stdout.log` as well as `launch_stderr.log`, because Godot's own
+    destination for a startup-abort message (a native `OS.alert()` dialog: `Main
+    scene's path could not be resolved from UID. Make sure the project is imported
+    first. Aborting.`, from an `--import` that printed a clean-looking completion but
+    never wrote `uid_cache.bin`) is not reliably stderr. Before this only stderr was
+    tailed, so that exact line sat unread in the other log while the generic 20s
+    timeout read identically to the unrelated gh#28 missing-separator bug, and
+    diagnosing it took a PowerShell screen-scrape of the alert window. It does not
+    move `user://`; the output labels that line `SHARED`, and the sharp edge below
+    says why.
   - Everything after a bare `--` is forwarded to the Godot command line, so a run
     needing an engine flag no longer has to re-implement launching:
     `devtools.py launch --no-mute -- --write-movie out/frame.png --fixed-fps 30`.
@@ -1306,6 +1315,7 @@ python tools/name_check.py                  # every run after that, no engine
 | `unknown_global_ref` | warning | A PascalCase identifier used as `Name.` / `Name(` that is declared nowhere. This is the `Identifier "Types" not declared` cascade, reported once per name per file instead of once per line. |
 | `class_cache_stale` | warning | A `class_name` present in the source but absent from `.godot/global_script_class_cache.cfg` — read-only, so it stays safe with other agents running. Says the engine will disagree with your files until you import. |
 | `string_ref_unresolved` | advisory | The name inside `has_method("x")` / `connect("x", …)` and friends, matching `lint_project.gd`'s rule of the same name. Advisory for the same structural reason. |
+| `as_precedence` | error | `x as Type == y` (or `!=`) with no parentheses (0.31.0, moving-in:G-053). GDScript's `as` binds *looser* than `==`, so this parses as `x as (Type == y)` — a cast to a bool — and is a hard parse error that took a real suite from green to 48 failures on one line. The parenthesised `(x as Type) == y` is never wrong and never flagged. Only fires when the token after `as` is PascalCase (a Type shape); a lowercase operand is left alone rather than guessed at. Zero false positives across three real projects. |
 
 **A clean run is not a compile, and the tool now says so itself.** Every run that ends
 with zero errors prints a `NOT COVERED:` line, and `--json` carries the same text under

@@ -969,6 +969,15 @@ def stage_names(scratch, godot, cache):
         "func probe() -> void:",
         "\tprint(Node.NOTIFICATION_NOT_A_THING)",
         "",
+        "# moving-in:G-053: verbatim the `as` precedence trap that took a suite from",
+        "# green to 48 failures. `as` binds looser than `==`, so this casts to a bool.",
+        "# The parenthesised negative control below must NOT be flagged.",
+        "func as_trap(shape_node: Node3D) -> bool:",
+        "\treturn shape_node == null or shape_node.shape as ConcavePolygonShape3D == null",
+        "",
+        "func as_safe(shape_node: Node3D) -> bool:",
+        "\treturn (shape_node.shape as ConcavePolygonShape3D) == null",
+        "",
         "# moving-in:G-022: verbatim the override that passed name_check clean and",
         "# failed --import with 'The function signature doesn't match the parent'.",
         "func _set(action: Callable) -> void:",
@@ -1001,21 +1010,33 @@ def stage_names(scratch, godot, cache):
                 findings, rules = [], set()
                 ok = fail("stage 2.5 names: --json output not parseable: %s" % exc)
             expected = {"missing_preload", "unknown_type", "unknown_member",
-                        "virtual_signature_mismatch"}
+                        "virtual_signature_mismatch", "as_precedence"}
             if not expected <= rules:
                 ok = fail("stage 2.5 names: planted file should trigger %s, got %s"
                           % (sorted(expected), sorted(rules)))
             else:
                 virt = [f for f in findings if f["rule"] == "virtual_signature_mismatch"]
                 subjects = sorted(f.get("subject") for f in virt)
+                as_hits = [f for f in findings if f["rule"] == "as_precedence"]
                 if subjects != ["_set"]:
                     ok = fail("stage 2.5 names: virtual_signature_mismatch should name "
                               "exactly ['_set'] (the correct _process, the optional-arg "
                               "_notification and the inner class's _process are the "
                               "negative controls), got %s" % subjects)
+                elif len(as_hits) != 1 or "as ConcavePolygonShape3D == null" not in \
+                        as_hits[0].get("subject", "") or \
+                        as_hits[0].get("subject", "").startswith("("):
+                    # Exactly one: the unparenthesised as_trap line. as_safe, the
+                    # parenthesised form on the very next func, is the negative
+                    # control and must NOT fire (moving-in:G-053).
+                    ok = fail("stage 2.5 names: as_precedence should fire exactly once "
+                              "(the bare `as T == null` in as_trap) and NOT on the "
+                              "parenthesised as_safe, got %d hit(s): %s"
+                              % (len(as_hits), [f.get("subject") for f in as_hits]))
                 else:
                     print("stage 2.5 names: planted bad names -> exit 1, rules %s; "
-                          "virtual_signature_mismatch names _set only"
+                          "virtual_signature_mismatch names _set only; as_precedence "
+                          "fires on the bare cast only, not the parenthesised control"
                           % sorted(expected))
     finally:
         planted.unlink(missing_ok=True)
@@ -2923,6 +2944,67 @@ def check_launch_session_passthrough(godot, scratch):
     return True
 
 
+def check_launch_ping_timeout_surfaces_error(scratch):
+    """A ping timeout must name the Godot ERROR: line that actually explains the
+    hang, from EITHER captured stream (gh#31).
+
+    Before this, only launch_stderr.log was tailed - but import_check.py already
+    learned (for the identical reason) that Godot's destination for a startup-abort
+    message is not reliably stderr, and combines both streams for exactly that
+    reason. The reported case (an incomplete --import: uid_cache.bin absent despite
+    --import printing what looked like a clean completion) put its ERROR: line
+    somewhere the old code never looked, so a generic 20s timeout read identically
+    to gh#28's unrelated missing-separator bug.
+
+    Drives the extracted `launch_log_errors()` helper directly rather than a
+    stand-in binary, for a reason worth recording: a `.bat` wrapper launched with
+    DETACHED_PROCESS (which cmd_launch uses, correctly, for a real Godot .exe) does
+    not even execute its body on Windows - confirmed by a direct Popen probe, exit 1
+    with nothing written - so no batch-file stub can reach the timeout path with a
+    log to read. A real .exe is unaffected, and python.exe cannot stand in for one
+    because cmd_launch's own `--path` arg is python's first, which it rejects. The
+    helper is a pure function of the log paths, so testing it directly IS testing
+    the fix; the wiring into cmd_launch is one line.
+    """
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "devtools_gh31", str(scratch / "tools" / "devtools.py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    probe = scratch.parent / "gh31_probe"
+    probe.mkdir(exist_ok=True)
+    out_log = probe / "launch_stdout.log"
+    err_log = probe / "launch_stderr.log"
+
+    # The reported shape: the ERROR: line in STDOUT (the stream the old code never
+    # read), stderr holding only benign noise. Positive control on the stream that
+    # matters, negative control that non-ERROR lines are not reported.
+    out_log.write_text(
+        "Godot Engine v4.7.1.stable.official - https://godotengine.org\n"
+        "ERROR: Main scene's path could not be resolved from UID. "
+        "Make sure the project is imported first. Aborting.\n",
+        encoding="utf-8")
+    err_log.write_text("some benign stderr line with no error marker\n", encoding="utf-8")
+
+    found = mod.launch_log_errors(out_log, err_log)
+    if len(found) != 1:
+        return fail("launch_log_errors must find exactly the one ERROR: line across "
+                    "both logs, got %r" % found)
+    if "launch_stdout.log" not in found[0] or "could not be resolved from UID" not in found[0]:
+        return fail("the found line must be tagged with its file (stdout - the one "
+                    "the old code never read) and quote the message: %r" % found)
+
+    # Missing log files must be tolerated (a launch that died before writing).
+    if mod.launch_log_errors(probe / "nope_out.log", probe / "nope_err.log") != []:
+        return fail("launch_log_errors must return [] for missing logs, not raise")
+
+    print("stage 5 bridge: a ping timeout scans BOTH launch_stdout.log and "
+          "launch_stderr.log for a Godot ERROR: line (the stdout log is the one the "
+          "old code never read), tolerating a missing log")
+    return True
+
+
 def check_entry_hook_and_entry_points(godot, scratch):
     """`entry_hook` fires automatically at startup and `entry_points` fires on
     demand, both actually calling the configured node/method rather than
@@ -3217,6 +3299,7 @@ def stage_bridge(godot, scratch, full):
         ok = check_paused_bridge(client, scratch) and ok
         ok = check_pause_verb(client, scratch) and ok
         ok = check_launch_session_passthrough(godot, scratch) and ok
+        ok = check_launch_ping_timeout_surfaces_error(scratch) and ok
         ok = check_entry_hook_and_entry_points(godot, scratch) and ok
         ok = check_dispatch_reentrancy(client, scratch) and ok
 
