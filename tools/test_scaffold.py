@@ -534,6 +534,91 @@ class FullInstallCase(unittest.TestCase):
         self.assertEqual(cfg["main_scene"], "res://scenes/main.tscn")
 
 
+class VersionTransitionCase(unittest.TestCase):
+    """gh#32: an install says what it IS before touching anything, and refuses a
+    silent downgrade. The plugin's real version is whatever plugin.json says; the
+    project's is planted into _scaffold_defaults."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory(prefix="scaffver-")
+        self.project = Path(self._tmp.name) / "project"
+        self.project.mkdir()
+        (self.project / "project.godot").write_text("[application]\nconfig/name=\"v\"\n",
+                                                    encoding="utf-8")
+        self.plugin_ver = scaffold_install.plugin_version(REPO_ROOT)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def plant(self, version):
+        cfg = self.project / scaffold_install.CONFIG_REL
+        cfg.parent.mkdir(parents=True, exist_ok=True)
+        cfg.write_text(json.dumps({"main_scene": "", scaffold_install.SCAFFOLD_DEFAULTS_KEY: {
+            "harness_version": version, "values": {}, "owned": []}}), encoding="utf-8")
+
+    def transition(self, **kw):
+        with captured_stdout() as buf:
+            label, plug, proj, refused = scaffold_install.version_transition(
+                REPO_ROOT, self.project, **kw)
+        return label, proj, refused, buf.getvalue()
+
+    def test_fresh_install_is_named(self):
+        label, proj, refused, out = self.transition()
+        self.assertIsNone(proj)
+        self.assertTrue(label.startswith("fresh install of " + self.plugin_ver), label)
+        self.assertFalse(refused)
+        self.assertIn("[version] fresh install", out)
+
+    def test_same_version_is_a_refresh_not_an_upgrade(self):
+        self.plant(self.plugin_ver)
+        label, proj, refused, _ = self.transition()
+        self.assertTrue(label.startswith("already at " + self.plugin_ver), label)
+        self.assertIn("not an upgrade", label)
+        self.assertFalse(refused)
+
+    def test_upgrade_names_the_jump(self):
+        self.plant("0.1.0")
+        label, proj, refused, _ = self.transition()
+        self.assertEqual(label, "upgrade 0.1.0 -> " + self.plugin_ver)
+        self.assertFalse(refused)
+
+    def test_downgrade_is_refused_and_installs_nothing(self):
+        self.plant("99.0.0")
+        label, proj, refused, _ = self.transition()
+        self.assertTrue(label.startswith("DOWNGRADE 99.0.0 -> "), label)
+        self.assertTrue(refused)
+        with captured_stdout() as buf:
+            rc = scaffold_install.install_full(REPO_ROOT, self.project, {}, hook=False)
+        self.assertEqual(rc, 2, buf.getvalue())
+        self.assertFalse((self.project / "tools" / "devtools.py").exists(),
+                         "a refused downgrade must install nothing")
+
+    def test_allow_downgrade_proceeds(self):
+        self.plant("99.0.0")
+        _, _, refused, _ = self.transition(allow_downgrade=True)
+        self.assertFalse(refused)
+        with captured_stdout() as buf:
+            rc = scaffold_install.install_full(REPO_ROOT, self.project, {}, hook=False,
+                                               allow_downgrade=True)
+        self.assertEqual(rc, 0, buf.getvalue())
+        self.assertIn("[full] harness: DOWNGRADE 99.0.0 -> " + self.plugin_ver, buf.getvalue())
+
+    def test_stamp_fallback_when_no_record(self):
+        # An install older than the _scaffold_defaults record: read the stamp.
+        gd = self.project / "addons" / "godot_selftest" / "dev_tools.gd"
+        gd.parent.mkdir(parents=True)
+        gd.write_text("extends Node\n# harness-version: 0.4.0\n", encoding="utf-8")
+        self.assertEqual(scaffold_install.vendored_version(self.project), "0.4.0")
+
+    def test_full_cli_reports_transition_line(self):
+        proc = subprocess.run(
+            [sys.executable, str(REPO_ROOT / "tools" / "scaffold_install.py"), "full",
+             "--project", str(self.project), "--no-hook"],
+            capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("[full] harness: fresh install of " + self.plugin_ver, proc.stdout)
+
+
 class CliGuardCase(unittest.TestCase):
     def test_missing_project_godot_exits_1(self):
         with tempfile.TemporaryDirectory(prefix="scaffcli-") as tmp:

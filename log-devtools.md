@@ -6803,3 +6803,43 @@ proved byte-identical by `cmp`, then (3) clean: OK, `stage 6 contract: 88/88 row
 passed` (was 83/86 on a clean 0.31.0 tree). `name_check.py` on
 `plant-tower-defense` / `moving-in` / `findmyballs`: 0/1/3, 0/0/3, 2/24/23 —
 identical to master's counts, so the message change moved no finding.
+
+## 2026-08-16 — 0.33.0: gh#32 arrived while 0.32.0 was landing, and it is the same fact from the other side
+
+gh#32 was filed twenty minutes after 0.32.0's item 9 (H-064) went in, by a session
+that hit the same distribution lag from the scaffold side: the skill loads from a
+plugin cache pinned at one version and every path in it is interpolated from that
+root, so `/scaffold-godot-harness` "to upgrade" reinstalls 0.21.0 over 0.21.0 and
+reports `updated from 0.21.0 (unmodified - no backup needed)` on every file — and,
+sharper, a *stale* cache meeting a *newer* vendored harness downgrades it silently
+by construction, because a file matching `harness_history.json` is pristine and
+overwritten with no `.bak`. The reporter's diagnosis and fix were both right and
+both cheap; shipped as machinery rather than only prose, so CI, `check_templates.py`
+and a grader are protected too, not just a reader of the skill.
+
+**[gh#32 — fixed] `scaffold_install.py` names the transition before touching
+anything, and refuses a downgrade.** `version_transition()` runs first in `full`
+and `files`: plugin root's `plugin.json` against the project's
+`_scaffold_defaults.harness_version` (falling back to the installed
+`# harness-version:` stamp for a pre-record install) → `[version] fresh install of X`
+/ `already at X - this is a same-version refresh, not an upgrade (…the plugin root
+you are installing from is pinned at X…)` / `upgrade Y -> X` / `DOWNGRADE Y -> X`.
+A downgrade exits 2 with nothing written unless `--allow-downgrade`; `full` ends
+with `[full] harness: <transition>` — the reporter's "one line a reader wants".
+Step 3 and Step 13 of the slash command carry it into the summary. Seven tests in
+`tools/test_scaffold.py` (fresh / same / upgrade / refused-installs-nothing /
+allow-downgrade proceeds / stamp fallback / CLI round-trip prints the line).
+
+**Considered:** having the guard *fetch* the newest release and say "0.31.0 exists".
+No — every other line the tool prints is a fact about a file on disk, and one line
+that depends on the network would be the one a reader could not tell from the
+others when it was wrong. `harness-version` (0.32.0) already says what the machine
+holds; the guard says what this call is; the user does the update.
+
+- Gap: no new gap this turn.
+
+**Validation run this turn:** `python tools/record_version.py --record` then
+`--check` — OK at 0.33.0, 14 shipped files (stamps only; no template body changed).
+`python -m unittest discover -s tools` — 46 tests OK (39 + 7). `python
+tools/check_templates.py` — OK, all stages; its own stage 2 now prints `[version] fresh
+install of 0.33.0` through the same installer users get.

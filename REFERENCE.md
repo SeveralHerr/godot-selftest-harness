@@ -95,6 +95,18 @@ autoload-ordering rule existed only as a sentence, which is how the first rig pu
 check. Idempotent — a second run changes no byte, and refuses (rather than overwrites) a
 malformed `.claude/settings.json`.
 
+**It says what it IS before touching anything (0.33.0, gh#32).** The first line is
+`[version] fresh install of X` / `already at X - this is a same-version refresh, not an
+upgrade` / `upgrade Y -> X` / `DOWNGRADE Y -> X`, from the plugin root's `plugin.json`
+against the project's `_scaffold_defaults.harness_version` (or the installed
+`# harness-version:` stamp on a pre-record install). A downgrade is **refused with exit
+2 and nothing written** unless `--allow-downgrade` is passed: a file matching
+`harness_history.json` is pristine and overwritten without a `.bak`, so a backwards
+refresh is silent by construction — and the skill loads from a plugin cache pinned at
+one version, which is exactly how a stale cache meets a newer vendored harness. `full`
+ends with `[full] harness: <transition>`, the one line the per-file output never gave.
+`files` mode applies the same guard.
+
 `config --set` no longer reverts a scaffold-owned key it was **not** passed (0.20.0,
 gh#7): each call proposes the shipped default for every owned key, and a second call
 used to reset the `godot_bin` the first had just detected back to `""`. Owned keys now
