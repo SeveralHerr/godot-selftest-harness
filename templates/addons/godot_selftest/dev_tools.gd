@@ -14,14 +14,14 @@ extends Node
 ## extension loads AFTER the generic handlers, a project may override a generic
 ## verb by registering the same action string (last-writer-wins).
 
-# harness-version: 0.31.0
+# harness-version: 0.32.0
 # --- Constants ---
 
 ## Version of the godot-selftest-harness these files were copied from. Reported by the
 ## `harness_version` verb and stamped into every copied tool script, so a gap logged
 ## against a project can name the version it was seen on, and a refresh can tell a
 ## stale file from a customized one. Bump with .claude-plugin/plugin.json.
-const HARNESS_VERSION: String = "0.31.0"
+const HARNESS_VERSION: String = "0.32.0"
 
 ## Default bus filenames. With a session id (see _resolve_session) the id is spliced in
 ## before the extension, so two instances can each own a bus in the same user:// dir.
@@ -598,6 +598,7 @@ func _register_generic_handlers() -> void:
 	register_command("reachable_ui", _cmd_reachable_ui)
 	register_command("findings", _cmd_findings)
 	register_command("first_frame", _cmd_first_frame)
+	register_command("project_settings", _cmd_project_settings)
 
 
 func _load_extension() -> void:
@@ -1295,6 +1296,22 @@ func _resolve_property_path(root: Variant, path: String) -> Dictionary:
 					],
 				}
 			current = obj.get(segment)
+		elif _BUILTIN_COMPONENTS.has(typeof(current)):
+			# A built-in struct (Vector2/3, Color, Rect2, Transform...). `position.x`
+			# is plainly what the caller means, and Variant indexing by member
+			# name answers it (H-046: before this branch `find-nodes --property
+			# position.x` printed `null`, indistinguishable from a property that
+			# genuinely holds null, and get-state refused outright).
+			var members: Array = _BUILTIN_COMPONENTS[typeof(current)]
+			if not members.has(segment):
+				return {
+					"ok": false, "value": null,
+					"reason": "%s is a %s, which has no component .%s (has: %s)" % [
+						".".join(walked), type_string(typeof(current)), segment,
+						", ".join(PackedStringArray(members)),
+					],
+				}
+			current = current[segment]
 		else:
 			return {
 				"ok": false, "value": null,
@@ -1305,6 +1322,29 @@ func _resolve_property_path(root: Variant, path: String) -> Dictionary:
 		walked.append(segment)
 
 	return {"ok": true, "value": current, "reason": ""}
+
+
+## Named components readable off each built-in struct via Variant indexing
+## (`Vector2(1, 2)["x"]`). Consulted by _resolve_property_path so a dotted path may
+## end (or hop) inside a struct; writes still go through the whole-value path.
+const _BUILTIN_COMPONENTS: Dictionary = {
+	TYPE_VECTOR2: ["x", "y"],
+	TYPE_VECTOR2I: ["x", "y"],
+	TYPE_VECTOR3: ["x", "y", "z"],
+	TYPE_VECTOR3I: ["x", "y", "z"],
+	TYPE_VECTOR4: ["x", "y", "z", "w"],
+	TYPE_VECTOR4I: ["x", "y", "z", "w"],
+	TYPE_COLOR: ["r", "g", "b", "a", "r8", "g8", "b8", "a8", "h", "s", "v"],
+	TYPE_RECT2: ["position", "size", "end"],
+	TYPE_RECT2I: ["position", "size", "end"],
+	TYPE_QUATERNION: ["x", "y", "z", "w"],
+	TYPE_PLANE: ["x", "y", "z", "d", "normal"],
+	TYPE_AABB: ["position", "size", "end"],
+	TYPE_BASIS: ["x", "y", "z"],
+	TYPE_TRANSFORM2D: ["x", "y", "origin"],
+	TYPE_TRANSFORM3D: ["basis", "origin"],
+	TYPE_PROJECTION: ["x", "y", "z", "w"],
+}
 
 
 ## One member read off whatever _resolve_property_path() landed on. Dictionary and
@@ -1676,6 +1716,28 @@ func _cmd_set_state(args: Dictionary) -> Dictionary:
 				"data": {"property": property},
 			}
 		value = conversion["value"]
+		coerced = true
+	elif value is Array and current is Array and (current as Array).is_typed():
+		# plant-tower-defense:G-019: the bus carries a plain JSON Array, and
+		# assigning one to an `Array[StringName]` (or any typed array) property
+		# is a silent no-op in GDScript -- the read-back below catches that, but
+		# the caller wanted the write to WORK. Rebuild the value as the target's
+		# own typed array; Array's typed constructor converts each element (a
+		# String becomes a StringName) and drops the lot with an engine error
+		# when one cannot be converted, which the size check turns into a reply.
+		var typed: Array = current
+		var rebuilt: Array = Array(value, typed.get_typed_builtin(),
+			typed.get_typed_class_name(), typed.get_typed_script())
+		if rebuilt.size() != (value as Array).size():
+			return {
+				"success": false,
+				"message": "Cannot set %s.%s: %d element(s) do not convert to the property's element type %s" % [
+					node_path, property, (value as Array).size() - rebuilt.size(),
+					type_string(typed.get_typed_builtin()) if typed.get_typed_class_name().is_empty() else String(typed.get_typed_class_name()),
+				],
+				"data": {"property": property, "written": _serialize_variant(value)},
+			}
+		value = rebuilt
 		coerced = true
 
 	_write_member(target, leaf, value)
@@ -3057,6 +3119,18 @@ func _cmd_step_time(args: Dictionary) -> Dictionary:
 	if not hold_action.is_empty() and not InputMap.has_action(hold_action):
 		return {"success": false, "message": "Unknown input action for 'hold': %s" % hold_action}
 
+	# plant-tower-defense:G-016: every step + read pair used to cost unbounded
+	# ambient game time on top of the seconds requested, because the tree keeps
+	# running between the reply and the next command. `then_pause` freezes the
+	# tree the moment the step completes (and lifts a pre-existing pause for the
+	# step itself), so a short-lived state can be stepped INTO and then read at
+	# leisure. Nothing here is a manual tick -- see the limits above -- it only
+	# closes the gap AFTER the step. `unpause` (0.25.0) resumes.
+	var then_pause: bool = bool(args.get("then_pause", false))
+	var was_paused_before: bool = get_tree().paused
+	if then_pause and was_paused_before:
+		get_tree().paused = false
+
 	var ticks_per_second: int = Engine.physics_ticks_per_second
 	var target_physics_frames: int = ceili(seconds * float(ticks_per_second))
 	var previous_scale: float = Engine.time_scale
@@ -3105,6 +3179,8 @@ func _cmd_step_time(args: Dictionary) -> Dictionary:
 	var elapsed_ms: int = Time.get_ticks_msec() - start_msec
 	var tree_paused: bool = get_tree().paused
 	Engine.time_scale = previous_scale
+	if then_pause:
+		get_tree().paused = true
 
 	var data: Dictionary = {
 		"seconds_requested": seconds,
@@ -3119,6 +3195,8 @@ func _cmd_step_time(args: Dictionary) -> Dictionary:
 		"previous_time_scale": previous_scale,
 		"restored_time_scale": Engine.time_scale,
 		"tree_paused": tree_paused,
+		"paused_after": get_tree().paused,
+		"was_paused_before": was_paused_before,
 		"budget_exhausted": budget_exhausted,
 		"held_action": hold_action if not hold_action.is_empty() else null,
 	}
@@ -3128,6 +3206,8 @@ func _cmd_step_time(args: Dictionary) -> Dictionary:
 	]
 	if tree_paused:
 		message += " WARNING: get_tree().paused is true, so node processing did not actually advance."
+	if then_pause:
+		message += " Tree left PAUSED (then_pause); `unpause` resumes it."
 	if budget_exhausted:
 		message += " WARNING: frame budget exhausted before the target was reached -- the loop is starved."
 
@@ -3342,12 +3422,14 @@ func _cmd_validate_ui(args: Dictionary) -> Dictionary:
 			summary = "%d UI issues found" % issues.size()
 	if bool(baseline["written"]):
 		summary = "UI baseline written: %d finding(s) now pre-existing" % issues.size()
+	var last_path: String = _persist_last_findings("validate_ui", issues)
 
 	return {
 		"success": gating == 0,
 		"message": summary,
 		"data": {
 			"issues": issues,
+			"last_findings_path": last_path,
 			"baseline_in_use": baseline["in_use"],
 			"baseline_written": baseline["written"],
 			"baseline_path": baseline["path"],
@@ -4794,9 +4876,11 @@ func _cmd_fire_entry_point(args: Dictionary) -> Dictionary:
 ##         "group": String, "method": String,
 ##         "where": Dictionary (property -> expected value, dotted paths allowed),
 ##         "properties": Array[String] (extra properties to report per hit),
+##         "calls": Array[String] (zero-arg methods to call and report per hit),
 ##         "root": String (subtree to search, default the whole tree),
 ##         "limit": int (default 200) }
-## data keys: nodes (Array of {path, name, type, properties}), count, truncated.
+## data keys: nodes (Array of {path, name, type, properties[, property_errors]
+##            [, calls, call_errors]}), count, truncated.
 func _cmd_find_nodes(args: Dictionary) -> Dictionary:
 	var root: Node = get_tree().root
 	var root_path: String = args.get("root", "")
@@ -4811,6 +4895,9 @@ func _cmd_find_nodes(args: Dictionary) -> Dictionary:
 	var method: String = args.get("method", "")
 	var where: Dictionary = args.get("where", {}) if args.get("where") is Dictionary else {}
 	var report: Array = args.get("properties", []) if args.get("properties") is Array else []
+	# G-005: a getter read beside each hit, so identifying a node whose auto-name
+	# changes every launch and reading it are one round-trip, not two.
+	var calls: Array = args.get("calls", []) if args.get("calls") is Array else []
 	var limit: int = int(args.get("limit", 200))
 
 	# A class that names nothing is a typo, not an absence (gh#15.2). Refusing
@@ -4846,16 +4933,38 @@ func _cmd_find_nodes(args: Dictionary) -> Dictionary:
 			truncated = true
 			break
 		var props: Dictionary = {}
+		var prop_errors: Dictionary = {}
 		for entry: Variant in report:
 			var name: String = str(entry)
 			var walk: Dictionary = _resolve_property_path(node, name)
-			props[name] = _serialize_variant(walk["value"]) if walk["ok"] else null
-		hits.append({
+			if walk["ok"]:
+				props[name] = _serialize_variant(walk["value"])
+			else:
+				# `null` alone is indistinguishable from a property that genuinely
+				# holds null (H-046); carry the resolver's reason beside it.
+				props[name] = null
+				prop_errors[name] = walk["reason"]
+		var call_results: Dictionary = {}
+		var call_errors: Dictionary = {}
+		for entry: Variant in calls:
+			var name: String = str(entry)
+			if not node.has_method(name):
+				call_errors[name] = "%s has no method %s" % [node.get_class(), name]
+				continue
+			call_results[name] = _serialize_variant(node.call(name))
+		var hit: Dictionary = {
 			"path": str(node.get_path()),
 			"name": str(node.name),
 			"type": node.get_class(),
 			"properties": props,
-		})
+		}
+		if not prop_errors.is_empty():
+			hit["property_errors"] = prop_errors
+		if not calls.is_empty():
+			hit["calls"] = call_results
+			if not call_errors.is_empty():
+				hit["call_errors"] = call_errors
+		hits.append(hit)
 
 	# An empty result is the one answer that must never be silent: "no node has
 	# mouse_filter=0" and "nothing here has a property by that name" are opposite
@@ -5521,6 +5630,49 @@ func _nearest_scroll_container(control: Control) -> ScrollContainer:
 	return null
 
 
+## ProjectSettings as the RUNNING game sees them (dave-game:G-003). A setting
+## written into project.godot that did not apply -- a typo'd key, an editor
+## overwrite, a value the engine ignores at runtime -- had no gate at all: lint
+## and validate-all reported clean while the game rendered on the stock clear
+## colour, and the only detection was opening a PNG. get_state cannot answer it
+## because ProjectSettings is not a node.
+##
+## args: { "filter": String (prefix, e.g. "rendering/"; empty = every setting),
+##         "names": Array[String] (exact keys; wins over filter) }
+## data keys: settings ({name: value}), count, missing (names asked for that no
+##            setting has), filter.
+func _cmd_project_settings(args: Dictionary) -> Dictionary:
+	var prefix: String = str(args.get("filter", ""))
+	var names: Array = args.get("names", []) if args.get("names") is Array else []
+	var settings: Dictionary = {}
+	var missing: Array = []
+	if not names.is_empty():
+		for entry: Variant in names:
+			var key: String = str(entry)
+			if ProjectSettings.has_setting(key):
+				settings[key] = _serialize_variant(ProjectSettings.get_setting(key))
+			else:
+				missing.append(key)
+	else:
+		for info: Dictionary in ProjectSettings.get_property_list():
+			var key: String = str(info.get("name", ""))
+			if key.is_empty() or (not prefix.is_empty() and not key.begins_with(prefix)):
+				continue
+			if not ProjectSettings.has_setting(key):
+				continue
+			settings[key] = _serialize_variant(ProjectSettings.get_setting(key))
+	var message: String = "%d setting(s)" % settings.size()
+	if not prefix.is_empty():
+		message += " under %s" % prefix
+	if not missing.is_empty():
+		message += "; %d asked-for name(s) do not exist: %s" % [missing.size(), ", ".join(PackedStringArray(missing))]
+	return {
+		"success": missing.is_empty(),
+		"message": message,
+		"data": {"settings": settings, "count": settings.size(), "missing": missing, "filter": prefix},
+	}
+
+
 ## What a player would see right now, in one call (H-059 -- moving-in's second
 ## `G-027`, filed the same turn as its first and lost to an id collision because
 ## `upstream_gaps.py` keys on id: two entries with one id pool as one, and the
@@ -5801,12 +5953,14 @@ func _cmd_findings(args: Dictionary) -> Dictionary:
 		findings.size(), checks_run.size(), FINDINGS_CHECKS.size(), int(vp.x), int(vp.y)]
 	if not checks_skipped.is_empty():
 		message += " (%d skipped)" % checks_skipped.size()
+	var last_path: String = _persist_last_findings("findings", findings)
 
 	return {
 		"success": findings.is_empty(),
 		"message": message,
 		"data": {
 			"findings": findings,
+			"last_findings_path": last_path,
 			"counts": counts,
 			"checks_run": checks_run,
 			"checks_skipped": checks_skipped,
@@ -5819,6 +5973,38 @@ func _cmd_findings(args: Dictionary) -> Dictionary:
 			"geometry_caveat": caveat,
 		},
 	}
+
+
+## Writes the full records of a NON-CLEAN findings / validate_ui run to
+## user://findings_last.json and returns its absolute path; a clean run writes
+## nothing and returns "" (so the file always holds the most recent run that had
+## something to say). plant-tower-defense:G-030: a finding that fires once on a
+## transient frame left nothing to investigate with -- the verb re-run seconds
+## later was a different frame and said [OK], and the only record was a count in a
+## line the caller had already truncated. The records exist in memory at the
+## moment they are counted; this is the cheapest possible way to keep them.
+const LAST_FINDINGS_FILE: String = "user://findings_last.json"
+
+func _persist_last_findings(verb: String, records: Array) -> String:
+	if records.is_empty():
+		return ""
+	var payload: Dictionary = {
+		"verb": verb,
+		"count": records.size(),
+		"unix_time": Time.get_unix_time_from_system(),
+		"iso_time": Time.get_datetime_string_from_system(true),
+		"process_frame": Engine.get_process_frames(),
+		"physics_frame": Engine.get_physics_frames(),
+		"tree_paused": get_tree().paused,
+		"current_scene": str(get_tree().current_scene.scene_file_path) if get_tree().current_scene != null else "",
+		"records": records,
+	}
+	var file: FileAccess = FileAccess.open(LAST_FINDINGS_FILE, FileAccess.WRITE)
+	if file == null:
+		return ""
+	file.store_string(JSON.stringify(payload, "  "))
+	file.close()
+	return ProjectSettings.globalize_path(LAST_FINDINGS_FILE)
 
 
 ## validate_ui codes whose verdict is a screen-space position -- the ones a

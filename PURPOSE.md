@@ -19,9 +19,10 @@ Three things get installed, and they only matter together:
 ## Why it exists
 
 The interesting behavior of a game only exists at runtime, inside a scene tree that
-someone has to be looking at. Does the UI make sense? Does the recent change fit the style of the game? Does the user have the best possible experience here? That makes the two habits that work everywhere else fail
-here: an agent can't check its own work (it can read the diff, but not watch the thing
-move), and CI can't either. The usual fallback — a human clicking through the editor —
+someone has to be looking at. Does the UI make sense? Does the recent change fit the
+style of the game? Does the player have the best possible experience here? That makes
+the two habits that work everywhere else fail here: an agent can't check its own work
+(it can read the diff, but not watch the thing move), and CI can't either. The usual fallback — a human clicking through the editor —
 doesn't scale to "after every change."
 
 So the harness exposes the running scene tree over a file bus: spawn entities, inject
@@ -106,7 +107,22 @@ started and can name; the owner record and `ping` carry the checkout the game ru
 from, and a client refuses to send to a game from another one rather than reading its
 replies as its own. Each of these was learned from a session that debugged its own scene
 for a cycle while a neighbour's game answered — the failure never says "wrong game", it
-says `Root node not found`.
+says `Root node not found`. The same holds one level up, for the **working tree**: two
+sessions have converged on one checkout and edited it at once (H-061), so a release
+re-reads `git status` immediately before it commits, and a fan-out never runs a
+repo-wide git command — untracked work has no copy anywhere else (H-052).
+
+**A fix is delivered when the project runs it, not when it ships.** The gaps log
+feeds this repo, and this repo feeds the projects back only through
+`/scaffold-godot-harness`; a project stays on the version it was scaffolded with until
+someone re-runs that. Two real projects sat on 0.21.0 and 0.25.0 through a day in which
+0.26.0–0.31.0 shipped, and roughly half the gaps they pooled upstream that evening had
+been fixed releases earlier — real friction, faithfully logged, against a bug that no
+longer existed. So the tool says so from where the project stands: `harness-version`
+names the versions already on the machine (the plugin cache, the marketplace clone,
+this session's plugin) and says when one is newer than the install it is running in.
+The distribution lag is a property of the system, and a system that reports on itself
+must report that too.
 
 **The gaps log is the improvement pipeline.** Nearly every capability past v1 — the status
 provider, node-path normalization, `--property`, `step-time`, the touch verbs, the orphan

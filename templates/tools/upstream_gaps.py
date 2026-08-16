@@ -48,16 +48,23 @@ import re
 import sys
 from pathlib import Path
 
-# harness-version: 0.31.0
-HARNESS_VERSION = "0.31.0"
+# harness-version: 0.32.0
+HARNESS_VERSION = "0.32.0"
 
 DEFAULT_DEST = "log-devtools.md"
 
 _GAP_RE = re.compile(r"^- Gap\b")
 # A "no gaps this turn" line is the format's required explicit statement that the
 # harness had nothing missing - it is an absence marker, not a gap, and must never
-# be pooled upstream. Match on the normalized first line of the block.
-_NO_GAP_RE = re.compile(r"^-\s*Gap[^:]*:\s*\**no(\s+new)?\s+gaps?\s+this\s+turn\b", re.IGNORECASE)
+# be pooled upstream. Match on the normalized first line of the block. Sessions
+# write it several ways - `no gaps this turn`, `no new gap.`, `no new gaps -`,
+# `none this turn` - and 0.31.0 pooled two `**no new gap.**` bullets from a project
+# as `auto-<hash>` OPEN gaps because the pattern only knew the first spelling
+# (H-063). Anything that opens by declaring an absence is an absence marker.
+_NO_GAP_RE = re.compile(
+    r"^-\s*Gap[^:]*:\s*[\*_`\s]*(no(\s+new|\s+harness)?\s+gaps?(?![a-z])"
+    r"|none\s+(this|new|to\s+report)|nothing\s+(new|missing|to\s+report))(?![a-z])",
+    re.IGNORECASE)
 _HEADING_RE = re.compile(r"^##\s+(?P<text>.*)$")
 _FENCE_RE = re.compile(r"^\s*```")
 _ID_LINE_RE = re.compile(r"^(?P<indent>\s*)-\s*\[(?P<id>[^\]]+)\]\s*(?P<fields>.*)$")
@@ -222,18 +229,37 @@ def upstream(source, dest_path, project, include_fixed, dry_run):
 
     # Collapse repeat sightings within this one source first. A recurrence is
     # supposed to bump `seen:` on the original entry, but a log written before
-    # that rule (or by a hand that forgot it) carries the same id twice with
-    # different evidence. Upstreaming both would put one id on two destination
-    # entries and make every later bump ambiguous, so the first block wins and
-    # the highest `seen:` of the group rides with it.
+    # that rule (or by a hand that forgot it) carries the same id twice. Two
+    # shapes, told apart by the second block's own `seen:` field:
+    #   * a RECURRENCE (`seen: 2` or more on the later block) is the same gap
+    #     sighted again - the first block wins and the highest `seen:` rides
+    #     with it, so one id never lands on two destination entries;
+    #   * a COLLISION (both blocks `seen: 1`) is two different gaps that were
+    #     handed the same number by two sessions - moving-in's second `G-027`
+    #     (a `first-frame` verb) was silently dropped that way for a release
+    #     (H-059). The later block is kept under a suffixed id (`G-027b`) and
+    #     the run says so, rather than pooling the first and losing the second.
     selected = {}
+    suffixed = []
     for gap in gaps:
         status = gap["fields"].get("status", "open").lower()
         if status not in ("open", "") and not include_fixed:
             skipped.append("%s (status: %s)" % (gap["id"], status))
             continue
         key = "%s:%s" % (project, gap["id"])
-        if key in selected:
+        if key in selected and _seen(gap["fields"]) <= 1 and gap["id_index"] >= 0:
+            base = key
+            for suffix in "bcdefghijklmnopqrstuvwxyz":
+                key = base + suffix
+                if key not in selected:
+                    break
+            gap = dict(gap)
+            gap["fields"] = dict(gap["fields"])
+            gap["sightings"] = 1
+            selected[key] = gap
+            suffixed.append("%s -> %s (same id, different evidence, both seen: 1)"
+                            % (base, key))
+        elif key in selected:
             first = selected[key]
             merged = max(_seen(first["fields"]), _seen(gap["fields"]), first["sightings"] + 1)
             first["fields"]["seen"] = str(merged)
@@ -298,6 +324,7 @@ def upstream(source, dest_path, project, include_fixed, dry_run):
         "bumped": bumped,
         "present": present,
         "skipped": skipped,
+        "suffixed": suffixed,
         "changed": changed,
     }
 
@@ -349,6 +376,8 @@ def main():
             print("  = %s already upstreamed" % p)
         for s in r["skipped"]:
             print("  - %s skipped" % s)
+        for s in r["suffixed"]:
+            print("  ! %s" % s)
         if not (r["appended"] or r["bumped"] or r["present"] or r["skipped"]):
             print("  (no gaps found - check the log's format)")
 
