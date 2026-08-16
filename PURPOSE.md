@@ -19,7 +19,7 @@ Three things get installed, and they only matter together:
 ## Why it exists
 
 The interesting behavior of a game only exists at runtime, inside a scene tree that
-someone has to be looking at. That makes the two habits that work everywhere else fail
+someone has to be looking at. Does the UI make sense? Does the recent change fit the style of the game? Does the user have the best possible experience here? That makes the two habits that work everywhere else fail
 here: an agent can't check its own work (it can read the diff, but not watch the thing
 move), and CI can't either. The usual fallback — a human clicking through the editor —
 doesn't scale to "after every change."
@@ -61,6 +61,21 @@ nothing* rather than *it's clean*, and the status provider that rides on every r
 A check that can't tell "broken" from "fine" is worse than no check, because it is
 believed.
 
+**Coverage is reported, not implied.** Every pass names what it looked at — `Shaders: N
+of M`, `Assertions: N executed`, `Orphans: N of M public function(s)`, `reached N/M` —
+so "checked, found nothing" and "never looked" cannot print the same line. The corollary
+is that an advisory check runs by default and *reports*; it is not opt-in and silent.
+The orphan scan spent nine releases behind a flag because it is a heuristic, which
+justified not *failing* on it and never justified not *running* it: the default gate
+passed on a method nothing could call, and no line of output said the check existed. A
+verb obeys the same rule from the other side: it answers the question it was asked, and
+when it cannot — the selector matched nothing, the row is only reachable by scrolling,
+the geometry was measured headless — it says which, rather than returning a well-formed
+answer to a different question. The A/B study found the harness's one measured
+advantage over a hand-rolled selftest was an assertion the bespoke one omitted; its
+one measured *dis*advantage was a verb that lied. A tool that cannot be trusted loses to
+the selftest the model writes anyway.
+
 **Gate on the number that means something.** `orphan_max: 0` is unreachable — a fresh
 launch reports dozens — and a threshold nothing can satisfy trains you to skip the check.
 Growth-since-baseline is the number that means "this change leaks." Same reasoning behind
@@ -91,6 +106,13 @@ A session changes a gameplay script, runs `/verify`, and gets back a specific cl
 the running game — this node moved, this label reads that, orphan growth was 3 — instead
 of "the diff looks right." When `/verify` can't reach the changed code at runtime, it says
 so explicitly rather than reporting a code read as verification.
+
+It is also working when it declines. A rename, a pure-logic change with its own unit
+tests, a project with no main scene: the honest verdict there is `overkill` or
+`inconclusive`, and `/verify`'s tiering exists so the launch is skipped rather than run
+for the picture. Across the project logs roughly one run in seven is `overkill` (13 of 90 verdicts, August 2026), and every
+one of those entries is a session that could tell — the `Value:` block is what lets the
+tool say *use me less* as readily as *add a verb*.
 
 See `README.md` for the short introduction, `REFERENCE.md` for the full reference,
 `CLAUDE.md` for how to work in this repo, and

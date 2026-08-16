@@ -225,7 +225,7 @@ git stash && "$GODOT_BIN" --headless --path . --script res://tools/lint_project.
 
 Finding keys are `file|rule|subject` with no line numbers, so a finding survives unrelated edits to the same file.
 
-Optionally, `-- --find-orphans` warns about public functions whose only callers outside their own file live under `test_dir` — code that has passing unit tests and no reachable caller. It is a heuristic (advisory only, never fails the run) but it catches the case where both gates say "clean" and the system is simply never invoked.
+The orphan scan runs by default (0.21.0+, gh#11) and prints `Orphans: N of M public function(s) across S script(s) have no live reference` — a public function whose only callers outside its own file live under `test_dir`, or nowhere. It is a heuristic (advisory only, never fails the run) but it catches the case where both gates say "clean" and the system is simply never invoked. **Read its `WARN:` lines for any method the diff added**: a new public method with no live reference is a feature that cannot run. `-- --no-orphans` skips it.
 
 ```bash
 "$GODOT_BIN" --headless --path . --script res://tools/run_tests.gd > tests.log 2>&1; echo "exit=$?"
@@ -554,7 +554,7 @@ Report the promotion explicitly: `promoted 2 of 5 checks into test/unit/test_sel
 "$PY" tools/devtools.py quit; echo "exit=$?"
 ```
 
-`quit` waits for the process to actually go and **exits 1 if it survived** (`--wait SECONDS`, default 10), naming the survivor. Do not ignore that code: a Godot that outlived its `quit` still owns the bus, so the next run's `launch` refuses to start or — worse — a second instance answers the same command file and replies come back for the wrong request.
+`quit` waits for the process to actually go and **exits 1 if it survived** (`--wait SECONDS`, default 10), naming the survivor. It also sweeps every process this project launched earlier that is still alive (the `_console.exe` wrapper, an engine abandoned two launches ago) from `.devtools/launched.jsonl`, start-time verified. Do not ignore that code: a Godot that outlived its `quit` still owns the bus, so the next run's `launch` refuses to start or — worse — a second instance answers the same command file and replies come back for the wrong request. On a survivor, run `"$PY" tools/devtools.py quit --kill` (terminates exactly those pids — never kill by image name, other sessions run games on this machine); on Windows the printed fallback is `Stop-Process -Force -Id <pid>` in PowerShell, because `taskkill /F` through the Bash tool's MSYS layer becomes `F:/` and fails.
 
 **Check what the engine touched.** Diff the current git status against the Phase 2 snapshot; any file changed now that is **not** in your session's edit set is engine re-serialization (`.tscn`, `.tres`, `project.godot` are the usual suspects) — report those separately as "engine-touched (re-serialization)", and do not stage them blindly with your work:
 

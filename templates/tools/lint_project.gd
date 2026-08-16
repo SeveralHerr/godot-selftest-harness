@@ -19,9 +19,12 @@ extends SceneTree
 #   --baseline-write <p>  Write the current finding keys to <p> as JSON, exit 0.
 #   --baseline <p>        Compare against a written baseline: findings print as
 #                         NEW or PRE-EXISTING, and only NEW ones affect the exit code.
-#   --find-orphans        Opt-in heuristic scan for public functions nothing but
-#                         the tests calls. Warnings only - never fails the run,
-#                         not even under --strict.
+#   --no-orphans          Skip the orphan scan (public functions nothing but the
+#                         tests calls). It runs by default since 0.21.0 and prints
+#                         `Orphans: N of M public function(s) ...` as a denominator;
+#                         its WARNs are advisory and never fail the run, not even
+#                         under --strict (gh#11). --find-orphans is accepted as a
+#                         no-op for older callers.
 #
 # Exit codes. This script always calls quit() with its own finding count, so the
 # code is the lint verdict and never Godot's shutdown noise about leaked RIDs or
@@ -104,10 +107,10 @@ extends SceneTree
 # console. Redirect to a file and read it back. Every line this script emits goes
 # to stdout via print(), so one redirect captures the whole report.
 
-# harness-version: 0.20.0
+# harness-version: 0.21.0
 ## Harness revision these files were copied from. Printed in the header of every run so
 ## a lint result, and any gap logged from it, can name the version it was produced on.
-const HARNESS_VERSION: String = "0.20.0"
+const HARNESS_VERSION: String = "0.21.0"
 
 const CONFIG_PATH: String = "res://addons/godot_selftest/devtools_config.json"
 const DEFAULT_SCAN_ROOT: String = "res://"
@@ -165,7 +168,7 @@ func _initialize() -> void:
 	var uids_only := false
 	var warnings_only := false
 	var no_shaders := false
-	var find_orphans := false
+	var find_orphans := true
 	var baseline_read := ""
 	var baseline_write := ""
 	var arg_error := ""
@@ -190,7 +193,9 @@ func _initialize() -> void:
 			"--no-shaders":
 				no_shaders = true
 			"--find-orphans":
-				find_orphans = true
+				find_orphans = true  # the default since 0.21.0; kept for older callers
+			"--no-orphans":
+				find_orphans = false
 			"--baseline":
 				if i + 1 < args.size():
 					baseline_read = args[i + 1]
@@ -345,7 +350,12 @@ func _initialize() -> void:
 			entry["warnings"] = warnings
 			results["warnings"]["by_scene"].append(entry)
 
-	# Opt-in orphan scan. Advisory only: it is a heuristic and never gates a run.
+	# Orphan scan, on by default (gh#11). Advisory only: it is a heuristic and
+	# never gates a run. It used to be opt-in, which meant the default gate passed
+	# on a method nothing could ever call and nothing in the output said the
+	# check existed - the same failure mode string_ref_unresolved is always-on
+	# to prevent. What matters is the denominator line, so "checked, found none"
+	# and "never looked" cannot print the same.
 	if find_orphans:
 		results["orphans"] = _find_orphans(scan_root, test_dir)
 
@@ -431,8 +441,11 @@ func _initialize() -> void:
 					for w in r.warnings:
 						print("%s | %s: %s" % [r.scene, w.path, ", ".join(w.messages)])
 		if find_orphans:
-			for o in results["orphans"]:
+			var orph: Dictionary = results.get("orphans", {})
+			for o in orph.get("items", []):
 				print("WARN: %s: %s" % [o.file, o.message])
+			print("Orphans: %d of %d public function(s) across %d script(s) have no live reference (advisory; --no-orphans to skip)" % [
+				int(orph.get("count", 0)), int(orph.get("functions_checked", 0)), int(orph.get("scripts", 0))])
 		if baseline_read != "":
 			_print_baseline_groups(baseline_read, baseline_keys.size(), new_findings, old_findings)
 
@@ -1116,11 +1129,14 @@ func _check_duplicate_ids(p: String, out: Array) -> void:
 		_add_finding(p, "duplicate_resource_id", key, "error", msg)
 
 
-# --- Orphan API scan (heuristic, opt-in, advisory) ---
+# --- Orphan API scan (heuristic, on by default, advisory) ---
 # Flags public funcs whose only callers outside their own file live in tests.
 # Known false positives: signal callbacks wired in code, virtual overrides,
 # call()/callv() by a computed name, and @export/inspector-assigned hooks.
-func _find_orphans(scan_root: String, test_dir: String) -> Array:
+# Returns {items, count, functions_checked, scripts} so the caller can print a
+# denominator: an advisory pass that prints nothing when clean is
+# indistinguishable from one that never ran (gh#11).
+func _find_orphans(scan_root: String, test_dir: String) -> Dictionary:
 	var out: Array = []
 	var gd_files := _scan(scan_root, ["gd"])
 	var identifiers := {}      # file -> {identifier: true}
@@ -1133,6 +1149,13 @@ func _find_orphans(scan_root: String, test_dir: String) -> Array:
 		identifiers[f] = _identifier_set(text)
 		if _is_test_path(f, test_dir):
 			continue  # test-only funcs are called by name from the runner
+		if _is_harness_or_tool_path(f):
+			# Harness-owned and headless-tool scripts declare nothing here (they still
+			# count as CALLERS). On a real project 13 of 31 orphan lines were the
+			# harness talking about itself - run_tests.gd's assert_* helpers, "referenced
+			# only from tests", which is their entire job - and an always-on scan whose top
+			# lines are about the tool is one readers learn to skip (0.21.0, gh#11).
+			continue
 		for m in decl_re.search_all(text):
 			var fn := m.get_string(1)
 			if not declared_in.has(fn):
@@ -1148,10 +1171,12 @@ func _find_orphans(scan_root: String, test_dir: String) -> Array:
 
 	var names: Array = declared_in.keys()
 	names.sort()
+	var functions_checked := 0
 	for fn in names:
 		var owners: Array = declared_in[fn]
 		if owners.size() != 1:
 			continue  # duplicated name: an override or interface pattern, not an orphan
+		functions_checked += 1
 		if scene_names.has(fn):
 			continue
 		var owner: String = owners[0]
@@ -1175,7 +1200,11 @@ func _find_orphans(scan_root: String, test_dir: String) -> Array:
 			msg = "%s() has no reference outside its own file - heuristic, may be a callback or called by name" % fn
 		out.append({"file": owner, "func": fn, "test_callers": test_callers, "message": msg})
 		_add_finding(owner, "orphan_api", fn, "warning", msg, true)
-	return out
+	var scripts := 0
+	for f in gd_files:
+		if not _is_test_path(f, test_dir):
+			scripts += 1
+	return {"items": out, "count": out.size(), "functions_checked": functions_checked, "scripts": scripts}
 
 
 func _identifier_set(text: String) -> Dictionary:
@@ -1188,6 +1217,11 @@ func _identifier_set(text: String) -> Dictionary:
 	for m in _ident_re.search_all(text):
 		out[m.get_string(0)] = true
 	return out
+
+
+func _is_harness_or_tool_path(p: String) -> bool:
+	var n := _norm_path(p)
+	return n.begins_with("res://addons/") or n.begins_with("res://tools/") or n.begins_with("res://devtools_ext/")
 
 
 func _is_test_path(p: String, test_dir: String) -> bool:

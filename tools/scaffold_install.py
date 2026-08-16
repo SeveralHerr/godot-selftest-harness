@@ -465,9 +465,18 @@ def _copy_template(plugin_root, project, rel, *, only_if_absent):
 
 
 def create_extension(plugin_root, project):
-    """devtools_ext/: the stub the project OWNS (never overwritten) + the example."""
+    """devtools_ext/: the stub the project OWNS (never overwritten) + the example.
+
+    Both get a .uid sidecar minted (plant:G-002): these land OUTSIDE lint's
+    default `uid_check_ignore` (`res://addons/`, `res://tools/`), so a fresh
+    install used to fail its own step-12 smoke check with three missing-sidecar
+    warnings. `ensure_uid_sidecars` never rewrites an existing one.
+    """
     _copy_template(plugin_root, project, "devtools_ext/commands.gd", only_if_absent=True)
     _copy_template(plugin_root, project, "devtools_ext/commands.example.gd", only_if_absent=False)
+    ensure_uid_sidecars(plugin_root, project, [
+        p for p in (project / "devtools_ext" / "commands.gd",
+                    project / "devtools_ext" / "commands.example.gd") if p.is_file()])
     return 0
 
 
@@ -481,6 +490,9 @@ def seed_tests(plugin_root, project):
     else:
         _copy_template(plugin_root, project, "test/unit/test_selftest.gd", only_if_absent=True)
     _copy_template(plugin_root, project, "test/sequences/smoke.json", only_if_absent=False)
+    seed = unit / "test_selftest.gd"
+    if seed.is_file():
+        ensure_uid_sidecars(plugin_root, project, [seed])  # plant:G-002
     return 0
 
 

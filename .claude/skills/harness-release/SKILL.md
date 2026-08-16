@@ -134,9 +134,19 @@ cp "$TEMP/dev_tools.gd.orig" templates/addons/godot_selftest/dev_tools.gd
 git diff --stat templates/addons/godot_selftest/dev_tools.gd                  # prove the restore
 ```
 
+**Prove the mutation landed before you run.** Put `git diff --stat` (or a `grep` for
+the mutated line) *between* the edit and `check_templates.py`, and quote it beside the
+FAIL line in the log. In 0.21.0 a mutation written through a shell heredoc had its `	`
+/ `
+` escapes rewritten by the tool, the script asserted-out, and the run that followed
+printed every new check green against the pristine file — a mutation that did not
+apply reads exactly like a passing control ([H-057]). Write the mutation script with the
+file-write tool, not a heredoc, and check `s.count(anchor) == 1` inside it.
+
 **Do not edit the mutated file while the run is in flight** — the restore overwrites
 whatever is on disk. Do other work (docs, log) for the five minutes, and quote the FAIL
-line it printed in the log entry.
+line it printed in the log entry. Note that `bump_version.py` and any Windows-default
+write may leave a template CRLF; anchors must match the file's actual line ending.
 
 ## 4. Log the turn
 

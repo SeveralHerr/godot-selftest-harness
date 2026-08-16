@@ -137,14 +137,15 @@ import argparse
 import datetime
 import json
 import os
+import re
 import statistics
 import subprocess
 import sys
 from collections import defaultdict
 from pathlib import Path
 
-# harness-version: 0.20.0
-HARNESS_VERSION = "0.20.0"
+# harness-version: 0.21.0
+HARNESS_VERSION = "0.21.0"
 
 LEDGER_PATH = Path(".devtools") / "verify-runs.jsonl"
 
@@ -508,6 +509,97 @@ def implicit_scripts(root, cfg=None):
     return out
 
 
+_EXTENDS_RE = re.compile(r'^\s*extends\s+(?:"([^"]+)"|([A-Za-z_][A-Za-z0-9_]*))', re.M)
+_CLASS_NAME_RE = re.compile(r'^\s*class_name\s+([A-Za-z_][A-Za-z0-9_]*)', re.M)
+
+
+def _script_class_index(root):
+    """`class_name` -> normalized script path, for resolving `extends Foo`.
+
+    Reads .godot/global_script_class_cache.cfg when the project has been imported;
+    otherwise scans the project's .gd files for `class_name` lines, which is the
+    same declaration the cache is built from.
+    """
+    out = {}
+    cache = root / ".godot" / "global_script_class_cache.cfg"
+    if cache.is_file():
+        try:
+            text = cache.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            text = ""
+        for m in re.finditer(r'"class":\s*&?"([A-Za-z_][A-Za-z0-9_]*)"[^}]*?"path":\s*"([^"]+)"', text):
+            out[m.group(1)] = _norm(m.group(2))
+    if out:
+        return out
+    for path in root.rglob("*.gd"):
+        rel = path.relative_to(root).as_posix()
+        if rel.startswith(".godot/") or rel.startswith("addons/"):
+            continue
+        try:
+            head = path.read_text(encoding="utf-8", errors="replace")[:2000]
+        except OSError:
+            continue
+        m = _CLASS_NAME_RE.search(head)
+        if m:
+            out[m.group(1)] = _norm(rel)
+    return out
+
+
+def _extends_chain(script_rel, root, class_index, _seen=None):
+    """Every script ancestor of `script_rel` (normalized paths), nearest first.
+
+    Static read of the `extends` line: a quoted `res://` path, or a `class_name`
+    resolved through the class index. Stops at an engine class, an unresolvable
+    name, a missing file, or a cycle. Only the first `extends` in a file counts -
+    inner classes have their own and are not the file's base.
+    """
+    seen = _seen if _seen is not None else set()
+    out = []
+    current = script_rel
+    while current and current not in seen:
+        seen.add(current)
+        try:
+            text = (root / current).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            break
+        m = _EXTENDS_RE.search(text)
+        if not m:
+            break
+        if m.group(1):
+            base = _norm(m.group(1))
+        else:
+            base = class_index.get(m.group(2))
+        if not base:
+            break
+        out.append(base)
+        current = base
+    return out
+
+
+def _base_credits(observed, root, changed_rest):
+    """{changed script: the observed descendant that credits it} (gh#15.3).
+
+    A node reports only the script attached to it, never its ancestry, so a base
+    class was scored unreached whenever only subclasses were live - `_draw()` on
+    the base ran every frame and reach said NOT reached. This walks each observed
+    script's `extends` chain and credits every ancestor that is in the changed set.
+    Distinct bucket (`reached_base`), so an inherited credit stays distinguishable
+    from a direct observation the way `reached_alias` and `reached_implicit` do.
+    """
+    wanted = set(changed_rest)
+    if not wanted or not observed:
+        return {}
+    class_index = _script_class_index(root)
+    via = {}
+    for obs in sorted(observed):
+        if not obs.endswith(".gd"):
+            continue
+        for ancestor in _extends_chain(obs, root, class_index):
+            if ancestor in wanted and ancestor not in via:
+                via[ancestor] = obs
+    return via
+
+
 def _vouched_by(path, aliases, observed, vouching):
     """The first declared voucher for `path` that actually ran, or None."""
     for v in aliases.get(path, ()):
@@ -531,6 +623,11 @@ def split_reach(changed, observed, implicit, root, cfg=None):
                          treatment as implicit, and likewise never folded into reached
       reached_alias_via- {script: the voucher that credited it}, so the claim is
                          auditable rather than an anonymous bump in a count
+      reached_base     - not observed directly, but an observed script `extends` it
+                         (statically, through the class index); a base class whose
+                         only live instances are subclasses (gh#15.3). Never folded
+                         into reached
+      reached_base_via - {script: the observed descendant that credited it}
       unreached        - reachable-suffix files the run never loaded
       not_applicable   - files reach cannot speak to (wrong suffix, deleted, or a test)
       deleted          - subset of not_applicable: in the diff but gone from disk;
@@ -565,6 +662,8 @@ def split_reach(changed, observed, implicit, root, cfg=None):
             "reached_implicit": None,
             "reached_alias": None,
             "reached_alias_via": None,
+            "reached_base": None,
+            "reached_base_via": None,
             "unreached": None,
             "not_applicable": None,
             "deleted": None,
@@ -593,6 +692,8 @@ def split_reach(changed, observed, implicit, root, cfg=None):
         "reached_implicit": None,
         "reached_alias": None,
         "reached_alias_via": None,
+        "reached_base": None,
+        "reached_base_via": None,
         "unreached": None,
         "not_applicable": sorted(set(skipped) | excused),
         "deleted": deleted,
@@ -621,7 +722,11 @@ def split_reach(changed, observed, implicit, root, cfg=None):
             via[p] = voucher
     result["reached_alias"] = sorted(via)
     result["reached_alias_via"] = via
-    result["unreached"] = [p for p in rest if p not in via]
+    rest = [p for p in rest if p not in via]
+    base_via = _base_credits(observed, root, rest)
+    result["reached_base"] = sorted(base_via)
+    result["reached_base_via"] = base_via
+    result["unreached"] = [p for p in rest if p not in base_via]
     return result
 
 
@@ -641,6 +746,7 @@ def _sub_reach(split):
     """
     return {k: split[k] for k in
             ("reached", "reached_implicit", "reached_alias", "reached_alias_via",
+             "reached_base", "reached_base_via",
              "unreached", "not_applicable", "deleted", "test_scripts",
              "headless_tools", "changed_unavailable")}
 
@@ -907,10 +1013,12 @@ def _reach_line(split):
     implicit = split.get("reached_implicit") or []
     alias = split.get("reached_alias") or []
     via = split.get("reached_alias_via") or {}
+    base = split.get("reached_base") or []
+    base_via = split.get("reached_base_via") or {}
     tests = split.get("test_scripts") or []
     headless = split.get("headless_tools") or []
     unreached = split.get("unreached") or []
-    total = len(reached) + len(implicit) + len(alias) + len(unreached)
+    total = len(reached) + len(implicit) + len(alias) + len(base) + len(unreached)
     if total:
         detail = "reached %d/%d changed file(s)" % (len(reached), total)
     elif split.get("not_applicable"):
@@ -928,6 +1036,11 @@ def _reach_line(split):
         # the reader has to trust, and an alias is a project's claim, not an observation.
         detail += " (+%d by alias: %s)" % (
             len(alias), ", ".join("%s via %s" % (p, via.get(p, "?")) for p in alias))
+    if base:
+        # A static fact about the files, not a project claim: the observed subclass
+        # `extends` this one, so its code ran. Named so it stays auditable.
+        detail += " (+%d as base class: %s)" % (
+            len(base), ", ".join("%s extended by %s" % (p, base_via.get(p, "?")) for p in base))
     if tests:
         # Said out loud rather than quietly dropped from the denominator - a ratio that
         # improves without saying what left it is the kind of number this file exists
@@ -1005,9 +1118,15 @@ def cmd_reach(args, root):
         print("credited by reach_aliases (declared by this project, NOT observed - a "
               "claim the config makes, shown so you can disbelieve it): "
               + ", ".join("%s via %s" % (p, via.get(p, "?")) for p in u["reached_alias"]))
+    if u.get("reached_base"):
+        bv = u.get("reached_base_via") or {}
+        print("credited as base class (an observed script `extends` it - a static read "
+              "of the files, no config): "
+              + ", ".join("%s extended by %s" % (p, bv.get(p, "?")) for p in u["reached_base"]))
     if u["reached"] is not None and not u["reached"] \
             and not (u["reached_implicit"] or []) \
-            and not (u["reached_alias"] or []) and u["unreached"]:
+            and not (u["reached_alias"] or []) \
+            and not (u.get("reached_base") or []) and u["unreached"]:
         print("\nNo changed file was loaded at runtime. Phase 6 verdict is "
               "`insufficient`, not `warranted`, even if every check passed.")
     return 0
@@ -1051,6 +1170,7 @@ def cmd_stats(args, root):
     # Buckets added after 0.8.0: rows written before it have no such key, and `or []`
     # is what keeps a mixed-vintage ledger aggregating instead of raising.
     alias_n = 0
+    base_n = 0
     test_n = 0
     headless_n = 0
     wt_reached = wt_denom = 0        # worktree denominator (0.8.0+ rows)
@@ -1111,6 +1231,7 @@ def cmd_stats(args, root):
             unreached_n += len(u or [])
             implicit_n += len(reach.get("reached_implicit") or [])
             alias_n += len(reach.get("reached_alias") or [])
+            base_n += len(reach.get("reached_base") or [])  # 0.21.0+ key
             test_n += len(reach.get("test_scripts") or [])
             # .get on a key added in 0.13.0: every row written before it must still
             # parse, or stats silently mixes two populations in one average.
@@ -1168,6 +1289,9 @@ def cmd_stats(args, root):
         print("       %d file(s) credited by reach_aliases - declared by the project, "
               "not observed. If this outgrows the observed count, the number above is "
               "mostly the config talking." % alias_n)
+    if base_n:
+        print("       %d file(s) credited as base classes - an observed script extends "
+              "them (a static read of the files, 0.21.0+)" % base_n)
     if test_n:
         print("       %d changed test script(s) excluded - they ran in Phase 1, which "
               "is not something reach can see or vouch for" % test_n)
