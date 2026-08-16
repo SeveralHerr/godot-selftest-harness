@@ -86,8 +86,8 @@ from bisect import bisect_right
 from datetime import datetime, timezone
 from pathlib import Path
 
-# harness-version: 0.23.0
-HARNESS_VERSION = "0.23.0"
+# harness-version: 0.24.0
+HARNESS_VERSION = "0.24.0"
 
 EXIT_OK = 0
 EXIT_FINDINGS = 1
@@ -231,7 +231,10 @@ def _blank_strings_and_comments(text):
             while i < n:
                 if text[i] == "\\" and not raw and i + 1 < n:
                     if text[i + 1] == "\n":
-                        out.append("  ")
+                        # Length-preserving blank, but the newline the tracked `line`
+                        # counter depends on must survive too, or every finding after
+                        # a continued string literal is reported one line early.
+                        out.append(" \n")
                         line += 1
                     else:
                         out.append("  ")

@@ -5203,7 +5203,7 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   claimed to be about. The inverse error is the dangerous one and it is equally
   available: had I committed nothing, an agent's untouched files would have been
   silently counted as *my* denominator.
-  - [plant-tower-defense:G-027] status: open | seen: 1 | harness: 0.21.0 | source: plant-tower-defense 2026-08-15
+  - [plant-tower-defense:G-027] status: fixed | fixed-in: 0.24.0 | seen: 1 | harness: 0.21.0 | source: plant-tower-defense 2026-08-15
   - Improvement: let `record` take `--about PATH...` (or read it from the run.json)
     naming the files this run set out to verify, and compute reach against that
     intersected with the changed set. Absent that, `reach` should at least report
@@ -5311,3 +5311,241 @@ a dedicated `check_templates.py` stage — validated instead against real state
 files, above) and by the source-level correctness of the fix; adding contract-table
 coverage for them is follow-up work, not done this turn. `python -m unittest discover -s
 tools` — 35 tests OK.
+
+## 2026-08-15 - Upstreamed 1 open gap(s) from plant-tower-defense (harness 0.18.0, 0.19.0, 0.21.0, 0.23.0)
+
+Pooled by `tools/upstream_gaps.py` from `C:\Users\gotmi\Documents\GitHub\plant-tower-defense\log-devtools.md`. Gap text is the project's,
+verbatim; only the id line is rewritten (qualified with the project name so
+ids from two projects cannot collide, plus a `source:` back-pointer).
+
+- Gap: **a static-only class that demonstrably ran is invisible to `reach`** —
+  `record` reported `reached 2/4 changed file(s) … NOT reached: game/sfx.gd`.
+  `Sfx` is `class_name Sfx extends RefCounted` with static entry points, so it
+  owns no node and can never appear in a `scene-tree` snapshot — even though this
+  run *observed the `SfxPool` node that only `sfx.gd` creates*, which is stronger
+  evidence than reach normally has for anything. Worked around with a
+  `reach_aliases` entry (`game/sfx.gd` vouched for by `game/game.gd` and
+  `game/plant.gd`), which the harness correctly buckets as a declaration rather
+  than an observation. This is the same shape as G-015 (a base class invisible
+  because only a subclass owned the live node).
+  - [plant-tower-defense:G-028] status: open | seen: 2 | harness: 0.23.0 | source: plant-tower-defense 2026-08-15
+  - Improvement: `scripts-seen` already records every script the engine *loaded*,
+    which for a static-only class is exactly the right signal and is an
+    observation rather than a declaration. Reach consults it today only as a
+    fallback for scripts absent from the tree; crediting a `scripts-seen` hit as
+    `reached_loaded` — a third bucket beside `reached` and `reached_alias` —
+    would retire the whole class of alias entries projects are currently writing
+    for RefCounted helpers.
+  - **Not fixed this turn (0.24.0) — reproduced first, per H-033.** Read
+    `_cmd_scripts_seen` / `_seed_scripts_seen` in `dev_tools.gd`: the bridge only
+    records a `script.resource_path` when that script is attached to a *node*
+    (initial tree walk + `node_added`). A pure `RefCounted` with only static
+    entry points is never attached to anything, so it is invisible to
+    `scripts-seen` on exactly the same grounds it is invisible to a scene-tree
+    snapshot — the Improvement's premise ("scripts-seen already records every
+    script the engine loaded") doesn't hold; there is no existing bridge signal
+    for "this script was loaded/called" independent of node attachment. Closing
+    this for real needs either an engine-side hook on script load/parse (a
+    `ResourceLoader` load callback, if Godot 4 exposes one) or accepting
+    `reach_aliases` as the correct, permanent answer for this shape of file and
+    saying so in the docs instead of treating it as a workaround.
+
+## 2026-08-16 - Upstreamed 1 open gap(s) from plant-tower-defense (harness 0.18.0, 0.19.0, 0.21.0, 0.23.0)
+
+Pooled by `tools/upstream_gaps.py` from `C:\Users\gotmi\Documents\GitHub\plant-tower-defense\log-devtools.md`. Gap text is the project's,
+verbatim; only the id line is rewritten (qualified with the project name so
+ids from two projects cannot collide, plus a `source:` back-pointer).
+
+- Gap: **`coverage_check.py` credits `scene_validation` only for a `res://….tscn`
+  literal inside `load`/`preload`, so a discovery-based scene walk — which is
+  strictly stronger — scores as no coverage at all.** The first version of
+  `test_every_scene_in_the_project_actually_instantiates` walked `res://` with
+  `DirAccess` and instantiated every `.tscn` it found, including any added later
+  by anyone. The tool still printed `UNCHECKED scene_validation`, because
+  `_scan_scene_loads` requires the path to be a literal (`coverage_check.py:530`:
+  "the only strong scene_validation token"). The check that covers *more* scenes
+  and cannot rot is the one that scores zero, and the fix is to add a hard-coded
+  list beside it — i.e. the tool rewards the weaker pattern. I did add the two
+  literals, and they are defensible on their own as "these two scenes must exist",
+  but they were written to satisfy the scanner rather than because the walk needed
+  them.
+  - [plant-tower-defense:G-029] status: fixed | fixed-in: 0.24.0 | seen: 1 | harness: 0.23.0 | source: plant-tower-defense 2026-08-16
+  - Improvement: also credit an instantiation of a path that is not a literal when
+    the same file contains a directory walk reaching `.tscn` — or, more simply,
+    treat `PackedScene.instantiate()` / `can_instantiate()` in a `test_dir` file as
+    a strong token in its own right, since nothing else in a test suite calls it.
+    The current rule tests for a spelling, not for the behaviour it stands for.
+
+## 2026-08-16 - Upstreamed 1 open gap(s) from plant-tower-defense (harness 0.18.0, 0.19.0, 0.21.0, 0.23.0)
+
+Pooled by `tools/upstream_gaps.py` from `C:\Users\gotmi\Documents\GitHub\plant-tower-defense\log-devtools.md`. Gap text is the project's,
+verbatim; only the id line is rewritten (qualified with the project name so
+ids from two projects cannot collide, plus a `source:` back-pointer).
+
+- Gap: **a finding that fires once cannot be re-asked without re-creating the
+  frame that produced it.** `validate-ui` reports what is true at the instant it
+  samples, which is correct, but leaves nothing to investigate with: there is no
+  record of *which* node and rule fired, only a count in a consolidated line I had
+  already truncated. The verb re-run seconds later is a different frame and says
+  `[OK]`. Everything else in this harness is reproducible by construction — a
+  scene, a diff, a seed — and this is the one signal that is not.
+  - [plant-tower-defense:G-030] status: open | seen: 1 | harness: 0.23.0 | source: plant-tower-defense 2026-08-16
+  - Improvement: have `findings` and `validate-ui` write the full finding records
+    of the most recent non-clean run to `user://ui_findings_last.json` (node path,
+    rule, measured rect, timestamp), and print that path whenever the count is
+    non-zero. A transient would then be diagnosable after the fact instead of
+    being a number that has already gone. Cheap: the records exist in memory at
+    the moment they are counted.
+
+## 2026-08-16 - Upstreamed 1 open gap(s) from plant-tower-defense (harness 0.18.0, 0.19.0, 0.21.0, 0.23.0)
+
+Pooled by `tools/upstream_gaps.py` from `C:\Users\gotmi\Documents\GitHub\plant-tower-defense\log-devtools.md`. Gap text is the project's,
+verbatim; only the id line is rewritten (qualified with the project name so
+ids from two projects cannot collide, plus a `source:` back-pointer).
+
+- Gap: **the harness has no defect class for source-asset conformance at all.**
+  `coverage_check.py` enumerates eight classes — UI layout, UI reachability,
+  unconnected signals, orphan growth, input path, scene validation, shader
+  compile, name resolution — and every one is about code or a live tree. A project
+  whose art is authored to a written contract has no way to ask "does the source
+  conform" without rendering, which needs the engine, which is not parallel-safe.
+  This whole issue existed because of that hole.
+  - [plant-tower-defense:G-031] status: open | seen: 1 | harness: 0.23.0 | source: plant-tower-defense 2026-08-16
+  - Improvement: an `asset_contract` class in `coverage_check.py`, covered by any
+    project-local checker that reads asset sources and is credited the way
+    `name_resolution` credits `name_check.py`. The harness need not ship the
+    checker — sprite contracts are project-specific — but naming the class is what
+    makes its absence visible, which is the tool's whole job.
+
+## 2026-08-16 - Upstreamed 1 open gap(s) from plant-tower-defense (harness 0.18.0, 0.19.0, 0.21.0, 0.23.0)
+
+Pooled by `tools/upstream_gaps.py` from `C:\Users\gotmi\Documents\GitHub\plant-tower-defense\log-devtools.md`. Gap text is the project's,
+verbatim; only the id line is rewritten (qualified with the project name so
+ids from two projects cannot collide, plus a `source:` back-pointer).
+
+- Gap: **`name_check.py`'s string blanker drops a newline on a backslash
+  continuation, so every later finding in that file is reported one line early.**
+  At `tools/name_check.py:232-237`, a `\` + newline inside a string literal appends
+  `"  "` (two spaces) and increments the tracked `line`, but the blanked text it
+  builds `_line_starts` from is now one newline short. `coverage_check.py:213` has
+  the same shape. Latent in this project — no `.gd` here uses a continued string
+  literal, verified — so it costs nothing today and will silently mis-point
+  findings the moment one appears. Found by a checker I had written against this
+  blanker as a reference, which is the only reason it surfaced at all.
+  - [plant-tower-defense:G-032] status: fixed | fixed-in: 0.24.0 | seen: 1 | harness: 0.23.0 | source: plant-tower-defense 2026-08-16
+  - Improvement: one line —
+    `out.append(" \n" if text[i + 1] == "\n" else "  ")` — keeping the blank
+    length-preserving while restoring the newline the line index depends on.
+
+## 2026-08-16 - Upstreamed 1 open gap(s) from plant-tower-defense (harness 0.18.0, 0.19.0, 0.21.0, 0.23.0)
+
+Pooled by `tools/upstream_gaps.py` from `C:\Users\gotmi\Documents\GitHub\plant-tower-defense\log-devtools.md`. Gap text is the project's,
+verbatim; only the id line is rewritten (qualified with the project name so
+ids from two projects cannot collide, plus a `source:` back-pointer).
+
+- Gap: **`Control.get_minimum_size()` returns ~1px on any Label with
+  `clip_text`, so the natural way to ask "does this text fit its column" passes
+  unconditionally.** It is the obvious call to reach for — it is what a Container
+  uses to size a child — and on a clipping Label it reports the clip stub rather
+  than the text. Every value label on the post-mortem card sets `clip_text`, and
+  so do three of the four HUD stats readouts, so a width check written the obvious
+  way over either of those surfaces is decoration. The project's own
+  `test_no_readout_clips_its_own_worst_case` gets this right by measuring through
+  `Font.get_string_size` with the label's real theme font — but that is a thing
+  someone had to already know, and it is nowhere in the harness docs. This is the
+  same family as the vacuous-pass problem the runner already detects: an assertion
+  that cannot fail.
+  - [plant-tower-defense:G-033] status: fixed | fixed-in: 0.24.0 | seen: 1 | harness: 0.23.0 | source: plant-tower-defense 2026-08-16
+  - Improvement: a `_T.text_width(label) -> float` helper that resolves the
+    label's own theme font and measures the string, plus one line in the harness
+    CLAUDE.md's gotchas naming `get_minimum_size()` on a clipping Label as a
+    false-pass. The helper is four lines and removes the need to know the trap.
+    `findings`' `ui_text_trimmed` check already does this measurement internally,
+    so the code exists — it is just not reachable from a test.
+
+## 2026-08-16 — 0.24.0: four fixes from the still-open skill-feedback issues, one declined
+
+`gh issue list --state open` at session start named seven open reports (#17-23).
+Reading the code first, per H-033/0a: **#17, #18 and all four parts of #19 were
+already fixed on `release/0.23.0`** — each carries a "Fixed on release/0.23.0, not
+yet on master" comment from the session that closed it. Nothing to re-do; landing
+0.23.0 on master (separately, this session) closes them for real, per PURPOSE.md's
+"a fixed report gets closed the same turn it's fixed" commitment.
+
+Of the four still genuinely open, three shipped this turn and one was investigated
+and declined:
+
+1. **[gh#22 / plant-tower-defense:G-032] name_check.py / coverage_check.py's string
+   blanker drops a newline on a `\`-continued string literal.** The blank stayed
+   length-preserving (`"  "`, two spaces) but lost the newline the tracked `line`
+   counter depends on, so every finding after one continued string in a file was
+   reported one line early. One-line fix in both files: `" \n"` instead of `"  "`
+   on that branch. Latent in every project checked against it so far — no shipped
+   `.gd` uses a continued string literal — so this is a correctness fix with no
+   behavior change on any file seen in the wild yet.
+2. **[gh#23] import_check.py's success line overclaimed a full compile.** `--import`
+   only registers global class names; a `const` initializer that calls a method
+   (not a constant expression) passes it clean and is only caught by
+   `lint_project.gd`'s real compile. `Import OK: godot --import ran...` read as a
+   compile verdict it wasn't. Now states what was actually checked and adds a
+   `NOT COVERED:` line, matching `name_check.py`'s own convention for the same
+   problem. Severity was always bounded — lint runs alongside import in every
+   `/verify` tier that reaches Phase 1 — so this is an honesty fix, not a coverage
+   fix.
+3. **[gh#21 / plant-tower-defense:G-029] coverage_check.py credited a scene-load
+   literal but not a directory sweep for `scene_validation`.** A project that
+   walks `res://`, filters on `.tscn`, and loads whatever it finds — strictly
+   stronger than any hardcoded literal, since it can't go stale and covers scenes
+   added later — scored UNCHECKED, while adding one weaker literal flipped it to
+   COVERED. Added `_scan_scene_sweeps` as its own strong-evidence path (an
+   `ends_with`/`match` `.tscn` filter alongside a `load(`/`ResourceLoader.load(`
+   call in the same file), reported with its own evidence line rather than folded
+   into the literal scan.
+4. **[gh#20.2 / plant-tower-defense:G-027] `verify_ledger.py record`/`reach` graded
+   a fan-out run against the whole dirty tree.** A subagent that fully verified its
+   own file got `downgraded warranted -> insufficient` because a sibling agent's
+   still-uncommitted file was also in `git status`. Added `--about PATH` (repeatable)
+   to both subcommands: when given, the reach denominator narrows to that set
+   intersected with what actually changed, and the row records `about` for
+   auditability. A stray path (named but not actually in the changed set) warns on
+   stderr rather than silently doing nothing. Also fixes the inverse the report
+   named as more dangerous: without `--about`, an untouched sibling file used to be
+   silently eligible for a free credit it never earned.
+
+**Bonus, same investigation session: [gh#20-adjacent / plant-tower-defense:G-033]
+`_T.text_width(label)`.** `Label.get_minimum_size()` reports the clip stub (~1px)
+rather than the text on any Label with `clip_text` or a non-default
+`text_overrun_behavior`, so the obvious width assertion passes unconditionally on
+exactly the labels worth checking. Added a four-line static helper to `run_tests.gd`
+that measures through the label's own resolved theme font — the same measurement
+`dev_tools.gd`'s `ui_text_trimmed` finding already does internally, now reachable
+from a test — plus a gotcha line in `CLAUDE.harness.md`.
+
+**[plant-tower-defense:G-028] investigated and declined for this turn.** The
+Improvement text assumed `scripts-seen` "already records every script the engine
+loaded"; reading `_cmd_scripts_seen`/`_seed_scripts_seen` in `dev_tools.gd` shows it
+only records a script attached to a *node* — a pure `RefCounted` with static-only
+entry points is exactly as invisible to `scripts-seen` as it is to a scene-tree
+snapshot, for the same reason. There is no existing bridge signal for "this script
+was loaded/called" independent of node attachment; closing this needs either a real
+engine-side load hook or a documented acceptance that `reach_aliases` is the correct
+answer for this file shape, not a workaround. Left open with this note rather than
+shipping a fix built on a premise that doesn't hold. [gh#20.1 / plant-tower-defense
+G-025] (a parallel-safe compile gate) was scoped and left for a future turn — it is
+a real feature (`--project-copy` or a per-file `godot --check-only` mode), not a bug
+fix, and this turn's budget went to the four items above plus landing 0.23.0.
+
+**Validation run this turn:** `python tools/record_version.py --record` then
+`--check` — OK at 0.24.0, 13 shipped files, 51 bus verb(s) + 53 CLI command(s)
+documented. `python -m unittest discover -s tools` — 35 tests OK. `python
+tools/check_templates.py` — OK, all six stages, including stage 5's full bridge
+round-trip against a real launched Godot 4.7.1 instance; nothing in this release
+touches a stage-checked code path directly (the four fixes are in
+`name_check.py`/`coverage_check.py`'s string blanker, `import_check.py`'s message,
+`coverage_check.py`'s scene sweep evidence, and `verify_ledger.py`'s `--about`), so
+this run is a regression check rather than a new-defect-plant — each fix was instead
+verified directly: the blanker fix by feeding a continued-string sample through the
+regex and confirming the newline survives; the sweep-credit regex against three
+GDScript samples (two should-match, one should-not); `--about` against a scratch git
+repo with and without the flag, confirming the denominator narrows and a stray path
+warns. No gaps found in the harness itself this turn beyond the ones fixed above.

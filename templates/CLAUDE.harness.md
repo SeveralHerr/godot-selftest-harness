@@ -65,6 +65,12 @@ bridge check. Everything else — pure logic, resources, data tables, and any la
 runtime error inside a test aborts only that method and returns `""` for a `-> String`
 test, which is identical to a pass. `[ERR]` lines are the only signal.
 
+**Testing "does this text fit its box"?** `Label.get_minimum_size()` returns ~1px on
+any Label with `clip_text` or a non-default `text_overrun_behavior` — it reports the
+clip stub, not the text, so the obvious width assertion passes unconditionally on
+exactly the labels that need it checked. Use `_T.text_width(label) -> float` instead;
+it measures through the label's own resolved theme font.
+
 ### DEVELOPMENT RULE (REQUIRED)
 After **any** gameplay, script, or scene change, run **`/verify`** before considering
 the work complete — don't wait for a commit request. Headless gates need no running

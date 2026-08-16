@@ -91,8 +91,8 @@ import sys
 from bisect import bisect_right
 from pathlib import Path
 
-# harness-version: 0.23.0
-HARNESS_VERSION = "0.23.0"
+# harness-version: 0.24.0
+HARNESS_VERSION = "0.24.0"
 
 EXIT_OK = 0
 EXIT_FINDINGS = 1
@@ -209,8 +209,13 @@ def _blank_strings_and_comments(text):
             while i < n:
                 if text[i] == "\\" and not raw and i + 1 < n:
                     if text[i + 1] == "\n":
+                        # Length-preserving blank, but the newline the tracked `line`
+                        # counter depends on must survive too, or every finding after
+                        # a continued string literal is reported one line early.
+                        out.append(" \n")
                         line += 1
-                    out.append("  ")
+                    else:
+                        out.append("  ")
                     i += 2
                     continue
                 if text.startswith(quote, i):
@@ -244,6 +249,11 @@ RE_ASSERT = re.compile(r"\b_T\s*\.\s*assert\w*\s*\(")
 # A load/preload of a scene, matched in blanked code; the path comes back off the
 # preserved string list by line.
 RE_SCENE_LOAD = re.compile(r"\b(preload|load)\s*\(\s*[\"']")
+# A directory sweep that filters on ".tscn" and then loads what it finds (gh#21 /
+# plant-tower-defense:G-029) -- not a literal, so RE_SCENE_LOAD can't see it, but it
+# is stronger evidence than any literal: it can't go stale and covers scenes added
+# after it was written.
+RE_TSCN_SWEEP_SUFFIX = re.compile(r'''(?:ends_with|match)\(\s*["']\*?\.tscn["']''')
 
 
 # ---------------------------------------------------------------------------
@@ -411,8 +421,9 @@ CLASSES = [
         "absent": "nothing loads a res:// scene, so a broken .tscn is only found by "
                   "running the game",
         "cheapest_cover": "python tools/devtools.py validate-all",
-        # Matched by a dedicated pass (a res:// .tscn literal inside load/preload), not
-        # by a bare token: see _scan_scene_loads.
+        # Matched by two dedicated passes, not by a bare token: a res:// .tscn literal
+        # inside load/preload (_scan_scene_loads), or a directory sweep that filters on
+        # .tscn and loads what it finds (_scan_scene_sweeps, gh#21).
         "strong": [],
         "weak": [
             (_tok("PackedScene", r"\bPackedScene\b"),
@@ -547,6 +558,26 @@ def _scan_scene_loads(rel, src):
     return hits
 
 
+def _scan_scene_sweeps(rel, src):
+    """A filesystem walk that filters on `.tscn` and then loads what it finds.
+
+    gh#21 / plant-tower-defense:G-029: `_scan_scene_loads` only matches a `res://...tscn`
+    string literal, so a project that walks `res://` at runtime and loads every scene it
+    finds -- strictly stronger than any hardcoded literal, since it cannot go stale and
+    covers scenes added after it was written -- scored UNCHECKED. Credited as its own
+    strong hit rather than folded into the literal scan, so the two look different in
+    the `--fmt json` evidence even though both count as COVERED.
+    """
+    m = RE_TSCN_SWEEP_SUFFIX.search(src.code)
+    if not m:
+        return []
+    if not re.search(r"\b(?:ResourceLoader\s*\.\s*)?load\s*\(", src.code):
+        return []
+    line = src.line_of(m.start())
+    return [evidence("test", "%s:%d" % (rel, line),
+                      "sweeps res:// for .tscn and loads what it finds")]
+
+
 # The methods the harness itself ships in test/unit/test_selftest.gd (and, on
 # installs predating 0.19.0, test_example.gd). They are a working example of the
 # assertion API, not a statement about this project.
@@ -620,6 +651,7 @@ def collect_test_evidence(results, files):
                         "test", "%s:%d" % (rel, line), label, why))
             if spec["id"] == "scene_validation":
                 res.strong.extend(_scan_scene_loads(rel, src))
+                res.strong.extend(_scan_scene_sweeps(rel, src))
 
 
 # --- 2. input sequences -----------------------------------------------------

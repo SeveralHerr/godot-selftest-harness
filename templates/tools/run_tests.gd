@@ -91,10 +91,10 @@ extends SceneTree
 ## (res://addons/godot_selftest/devtools_config.json key "test_dir", default
 ## "res://test/unit") for files named test_*.gd.
 
-# harness-version: 0.23.0
+# harness-version: 0.24.0
 ## Harness revision these files were copied from. See lint_project.gd / the
 ## `harness_version` bus verb; bump with .claude-plugin/plugin.json.
-const HARNESS_VERSION: String = "0.23.0"
+const HARNESS_VERSION: String = "0.24.0"
 
 const CONFIG_PATH: String = "res://addons/godot_selftest/devtools_config.json"
 const DEFAULT_TEST_DIR: String = "res://test/unit"
@@ -899,3 +899,27 @@ static func free_ui(node: Node) -> void:
 	if parent != null:
 		parent.remove_child(target)
 	target.free()
+
+
+## The widest line of `label.text`, in px, under the label's own resolved theme
+## font/size (gh#20 / plant-tower-defense:G-033).
+##
+## `Control.get_minimum_size()` is NOT this measurement on a Label with
+## `clip_text` or a non-default `text_overrun_behavior`: it reports the clip
+## stub (~1px), not the text, so a width assertion written the obvious way
+## ("does this text fit its column?") over any clipping/trimming Label passes
+## unconditionally - the same shape as `ui_text_trimmed`'s own check in
+## `dev_tools.gd`, which measures the same way rather than trusting the
+## Control's own minimum size. Per line, not the whole string:
+## `get_string_size()` lays a string holding "\n" out as ONE line.
+static func text_width(label: Label) -> float:
+	var font: Font = label.get_theme_font("font")
+	if font == null:
+		return 0.0
+	var font_size: int = label.get_theme_font_size("font_size")
+	if font_size <= 0:
+		font_size = label.get_theme_default_font_size()
+	var widest: float = 0.0
+	for line: String in label.text.split("\n"):
+		widest = maxf(widest, font.get_string_size(line, HORIZONTAL_ALIGNMENT_LEFT, -1, font_size).x)
+	return widest
