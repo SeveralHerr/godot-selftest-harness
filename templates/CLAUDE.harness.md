@@ -125,7 +125,10 @@ that `name_check` reports clean, because every name in it resolves. Only
 If `name_check` was the only gate you could run, hand the work back saying that — not
 "verified". It prints this itself as a `NOT COVERED:` line. If it prints
 `engine index: NONE` the engine-name half was **skipped, not passed**; run
-`python tools/name_check.py --refresh-api` once.
+`python tools/name_check.py --refresh-api` once. `--require-compile FILE [FILE...]`
+closes the gap for named files without losing parallelism — one `godot --check-only`
+per file, verified read-only against `.godot/` — but needs the project imported once
+already, or a cross-file `class_name` false-positives as unresolved.
 
 **`capture.gd` must NOT be run headless** — note the missing `--headless` above.
 Headless has no renderer, so it exits `2` naming the fix rather than writing a blank

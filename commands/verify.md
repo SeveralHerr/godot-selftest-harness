@@ -171,6 +171,14 @@ across the whole project, which is what a fan-out agent wants; `--strict` counts
 `--baseline`/`--baseline-write` adopt the checker on a project with pre-existing findings
 so only NEW ones gate.
 
+**`--require-compile FILE [FILE ...]` closes the type-inference gap above, for named
+files, without losing parallelism** (0.26.0). It shells one `godot --check-only` per
+file — verified read-only against `.godot/`, safe alongside siblings still mid-task —
+so name a fan-out agent's own changed file(s) and get an actual compile check instead
+of the `NOT COVERED` caveat. Needs the project already imported once (this project's
+own, or any earlier launch in the checkout) or a `class_name` from another file
+false-positives as unresolved — it reads the shared cache, it does not build one.
+
 ### Import gate (after names, before lint)
 
 `godot --headless --path . --import` **exits 0 while printing parse errors.** Real captured output:

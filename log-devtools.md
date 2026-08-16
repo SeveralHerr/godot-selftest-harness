@@ -5161,7 +5161,7 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   this honestly and worked around it by porting `_git_identity` line-for-line to
   Python and running that against the repo instead. That workaround happened to be
   sound, and is not one the next agent should have to invent.
-  - [plant-tower-defense:G-025] status: open | seen: 1 | harness: 0.21.0 | source: plant-tower-defense 2026-08-15
+  - [plant-tower-defense:G-025] status: fixed | fixed-in: 0.27.0 | seen: 1 | harness: 0.21.0 | source: plant-tower-defense 2026-08-15 | dup-of: gh#20.1
   - Improvement: a `--project-copy` mode on `lint_project.gd` / `run_tests.gd` that
     imports into a private `.godot/` under a temp dir, so N agents can type-check
     and run tests concurrently. Failing that, `name_check --require-compile` that
@@ -5889,3 +5889,76 @@ unrelated (H-062), confirmed by reproducing them against the clean tree before
 any of this turn's edits existed. `look_at`'s own contract row (added to
 `contract_rows()` alongside the two `pause`/`unpause` rows 0.25.0 should have
 had and did not) passes.
+
+## 2026-08-16 — 0.27.0: the parallel compile gate, reproduced before implemented
+
+No new GitHub issues and nothing new pooled from `plant-tower-defense` or
+`moving-in` this cycle (both re-checked; `moving-in` had already confirmed
+`G-044` — last cycle's `look_at` — fixed on their own end, the first live
+confirmation of a fix from this repo). With nothing new externally, used the
+cycle on gh#20.1 / `plant-tower-defense:G-025`, deferred twice already as "a
+real feature, out of scope this turn": a parallel-safe compile gate.
+
+**Reproduced the mechanism before implementing, per H-033 — the proposal's
+"failing that" fallback (`name_check --require-compile` shelling one
+`godot --check-only` per file) turned out to need real verification, not
+assumption, on exactly the property that matters: does it touch `.godot/`.**
+Tested directly against `plant-tower-defense` (a real project, not the scratch
+fixture): `--check-only --script` on a single file writes **nothing** under
+`.godot/` — confirmed by file-list-plus-mtime diff before/after, single call
+and three concurrent calls, byte-identical either way. Positive control: a
+deliberately broken script (`const X := SomeUndeclaredMethod()`) caught
+correctly, exit 1, real script; a good one passes, exit 0. Also tested, and
+this mattered: a project that has **never** been imported at all works fine
+and still creates no `.godot/` — but a file referencing another file's
+`class_name` **false-positives** `Could not find type` without a prior import,
+because `--check-only` reads the existing class cache, it does not build one.
+That caveat is real and is documented everywhere the flag is, not discovered
+and then dropped.
+
+Implemented `name_check.py --require-compile FILE [FILE ...]`: shells the
+verified-safe call per file, reports failures as `compile_error` findings
+alongside the static ones, names files that passed in a `compiled OK:` line
+(coverage reported, not implied, per PURPOSE.md), and narrows rather than
+suppresses the `NOT COVERED` caveat for exactly the files that got compiled.
+Given a `check_templates.py` stage-2.5 control with a negative control built
+in: the planted defect (`const` initializer calling a real, resolvable engine
+method) is invisible to plain `name_check` — asserted directly, 0 findings —
+and only catchable by `--require-compile`, which is the whole point of the
+flag. Mutation-tested: forcing the pass/fail decision to always report success
+made the new check fail correctly (`must exit 1, got 0`), reverted and
+reran clean.
+
+**Also closed `godot-selftest-harness-1tq` (H-045), a different bead than the
+GitHub issue but the same underlying ask** — its acceptance criteria named a
+specific regression (`Basis.get_column()`, absent in Godot 4.7, shipped
+undetected in 0.18.0) and two proposed fixes (teach `name_check.py` to
+resolve members on builtin-typed locals, or bolt on a third-party parser).
+`--require-compile` is a third path neither bead considered, and it is
+stronger than either proposed fix: re-created the exact regression
+(`func probe(b: Basis) -> Vector3: return b.get_column(0)`) and confirmed
+`--check-only` catches it — `Cannot find member "get_column" in base "Basis"`,
+exit 1 — which a parse-only tool structurally cannot (it has no member table)
+and which the builtin-locals fix would have covered only for that one class of
+error. One fix closed two tracked reports that arrived by different paths and
+never realized they were the same ask (H-044's shape again, this time within
+this repo's own tracking rather than across the intake-path boundary).
+
+**`plant-tower-defense:G-025` marked fixed as `dup-of: gh#20.1`.** gh#20's
+remaining sub-finding (`G-028`, the static-only `RefCounted` invisible to
+`reach`) stays open — investigated and explicitly declined last cycle because
+the Improvement's premise didn't hold; commented on the GitHub issue with the
+updated status rather than closing it, since one of its four findings is
+still genuinely unresolved.
+
+**Validation run this turn:** `python tools/record_version.py --record` then
+`--check` — OK at 0.27.0, 13 shipped files (`--require-compile` is a flag on
+an existing tool, not a new bus verb, so the verb/CLI counts are unchanged
+from 0.26.0). `python -m unittest discover -s tools` — 35 tests OK. `python
+tools/check_templates.py` — OK, all stages including the new
+`check_require_compile` stage-2.5 control, run twice: once mutated (the
+pass/fail decision forced to always succeed) to prove the control fails
+correctly, once clean after a verified restore. The parallel-safety claim
+itself was proved outside `check_templates.py`, against a real project with
+an established import cache, before any of this turn's code existed —
+the empirical work, not the unit test, is what makes the claim trustworthy.
