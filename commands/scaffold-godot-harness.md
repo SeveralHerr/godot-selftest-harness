@@ -79,7 +79,14 @@ grep -n 'config/features' "$ROOT/project.godot" || echo "WARN: no config/feature
      CUR="$(git -C "$ROOT" rev-parse --abbrev-ref HEAD)"
      if [ ! -f "$ROOT/addons/godot_selftest/dev_tools.gd" ]; then
        echo "Fresh install on $CUR - no refresh branch needed."
-     elif [ -n "$(git -C "$ROOT" status --porcelain)" ]; then
+     elif [ -n "$(git -C "$ROOT" status --porcelain -- . ':!.beads')" ]; then
+       # ':!.beads' (gh#25.2): a beads-tracked project auto-exports
+       # .beads/issues.jsonl / interactions.jsonl on every `bd update --claim`,
+       # so a fan-out session's tree reads dirty from that churn alone almost
+       # every time a refresh runs during real work - degrading this branch
+       # protection to "apply directly on current branch" in exactly the
+       # sessions most likely to want a reviewable diff. Real code WIP still
+       # trips this check; beads' own export does not.
        echo "WARN: uncommitted changes on $CUR. Staying here so the refresh is not mixed"
        echo "      into your work-in-progress; review with 'git diff' before committing."
      elif case "$CUR" in harness/refresh-*) true;; *) false;; esac; then
@@ -99,6 +106,43 @@ grep -n 'config/features' "$ROOT/project.godot" || echo "WARN: no config/feature
 
    **Never commit on the user's behalf**, here or anywhere in this command. The branch
    exists so the change can be *read*; whether it lands is theirs to decide.
+
+6. **On a refresh, confirm this plugin install is not OLDER than what's already
+   installed (gh#25.1).** `${CLAUDE_PLUGIN_ROOT}` is a cached copy — a stale
+   marketplace cache can sit behind the project's own installed version for hours.
+   Nothing downstream checks this: step 4's pristine-file test only asks "does this
+   match *a* released version," so a real, current file matches
+   `harness_history.json` and gets silently overwritten with an OLDER one, no
+   backup, no warning, and `full` reports it as a clean refresh. Check before
+   running `full`, not after:
+
+   ```bash
+   MANIFEST="$ROOT/addons/godot_selftest/.harness_manifest.json"
+   if [ -f "$MANIFEST" ] && [ -n "$PY" ]; then
+     INSTALLED_VER="$("$PY" -c "import json;print(json.load(open('$MANIFEST')).get('harness_version',''))" 2>/dev/null)"
+     PLUGIN_VER="$("$PY" -c "import json;print(json.load(open('${CLAUDE_PLUGIN_ROOT}/.claude-plugin/plugin.json')).get('version',''))" 2>/dev/null)"
+     if [ -n "$INSTALLED_VER" ] && [ -n "$PLUGIN_VER" ]; then
+       OLDER="$("$PY" -c "
+a = tuple(int(x) for x in '$PLUGIN_VER'.split('.'))
+b = tuple(int(x) for x in '$INSTALLED_VER'.split('.'))
+print('yes' if a < b else 'no')" 2>/dev/null)"
+       if [ "$OLDER" = "yes" ]; then
+         echo "ABORT: this plugin install is $PLUGIN_VER, but the project already has"
+         echo "  $INSTALLED_VER installed. Running 'full' now would DOWNGRADE every"
+         echo "  shipped file with no warning (step 4's pristine check can't tell newer"
+         echo "  from older, only 'released' from 'project-edited')."
+         echo "  Update the plugin source this command is running from (refresh its"
+         echo "  marketplace cache, or pull the repo if sideloaded), restart, then"
+         echo "  re-invoke this command. NOT proceeding with step 3."
+       fi
+     fi
+   fi
+   ```
+
+   Compare as version tuples, not strings — `"0.9.0" > "0.10.0"` lexically, wrongly.
+   Absent a manifest (fresh install) or an unreadable version on either side, this
+   check has nothing to compare and is silently skipped — that is the normal case,
+   not a failure. If it prints ABORT, stop: do not run step 3's installer.
 
 ## Step 2 — Parse project identity (for reporting only)
 

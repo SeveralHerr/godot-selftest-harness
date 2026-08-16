@@ -382,7 +382,7 @@ get_ui_snapshot, get_node_bounds, save_ui_baseline, ui_snapshot_diff,
 list_commands, touch_press, touch_release, touch_drag, touch_clear, touch_list,
 set_feature, tilemap_cells, tilemap_region, scripts_seen, canvas_scale,
 set_resolution, harness_version, find_nodes, press, raycast, sample_pixels,
-reachable_ui, findings, mouse_move, reload, first_frame
+reachable_ui, findings, mouse_move, reload, first_frame, pause, unpause
 ```
 
 Notable behaviors:
@@ -419,6 +419,15 @@ Notable behaviors:
   scale of 0 stops the game while the bus keeps answering well-formed stale values;
   `0.04` used to echo as `1.0 -> 0.0` from a 1-dp print. The reply names the floor;
   the client prints three decimals.
+- **`pause` / `unpause` set `SceneTree.paused` directly** (0.25.0, gh#26) — the thing
+  `set_game_speed`'s own refusal message names but nothing implemented until now. The
+  bridge autoload runs `PROCESS_MODE_ALWAYS`, so it keeps answering on a paused tree
+  (`ping`'s `paused` field already relies on this). Meant for catching a sub-second
+  effect that races the bus round-trip — a fade, a hit-flash, a cooldown tween:
+  trigger it, poll for the moment you want, `pause`, then take as long as you like
+  over `sample-pixels`/`screenshot`/`node-bounds` without racing anything, `unpause`
+  to resume. Idempotent either direction; the reply's `was_paused` says what state it
+  found.
 - **`raycast` is 2D or 3D by arity** (0.22.0, moving-in:G-023): `[x,y]` queries the 2D
   space, `[x,y,z]` the 3D space (`layer_names/3d_physics`), `data.space` says which.
   A 2D query on a tree whose only colliders are `CollisionObject3D`s is **refused**
@@ -839,7 +848,7 @@ ping, screenshot, scene-tree, validate, validate-all, get-state, set-state,
 run-method, curve, performance, quit, logs, harness-version, launch,
 input <press|release|tap|clear|list|sequence|state>, key,
 touch <press|release|drag|clear|list>, set-feature, step-time,
-set-game-speed, wait-frames, clear-nodes, validate-ui, ui-snapshot,
+set-game-speed, pause, unpause, wait-frames, clear-nodes, validate-ui, ui-snapshot,
 node-bounds, save-ui-baseline, ui-snapshot-diff, tilemap-cells,
 tilemap-region, scripts-seen, canvas-scale, set-resolution,
 find-nodes, press, raycast, sample-pixels, reachable-ui, aabb, new-uid,
@@ -909,7 +918,12 @@ Notable flags:
   launch that stopped polling without exiting — is checked alive-and-same-start-time
   and listed; `--kill` terminates exactly those. Never by image name (other sessions run
   games on this machine); a recycled pid whose creation time does not match the record
-  is left alone. On Windows the
+  is left alone — including the pid that was readable at launch time and is not
+  readable at all now (0.25.0, gh#24): that is the same recycling, one layer earlier,
+  where Windows reused the number for a process this tool cannot even query. Only a
+  genuinely unverifiable survivor (never readable, not a recycling signature) is
+  reported without moving the exit code — `verified: null` never fails the run, only
+  `verified: true` does, so the code stays worth reading. On Windows the
   liveness check uses `OpenProcess`/`GetExitCodeProcess` (0.20.0, gh#6): `os.kill(pid, 0)`
   raises `WinError 87` for a **dead** pid, which read as "alive", so `quit` on Windows
   used to warn `STILL ALIVE` after every wait and name a pid `tasklist` no longer had.

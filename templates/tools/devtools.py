@@ -89,11 +89,11 @@ from pathlib import Path
 from typing import Optional  # noqa: F401
 
 
-# harness-version: 0.24.0
+# harness-version: 0.25.0
 # Version of the godot-selftest-harness this client was copied from. Compared against
 # the running game's own stamp by the `harness-version` verb, so a half-refreshed
 # install (new client, old autoload) is visible instead of mysterious.
-HARNESS_VERSION = "0.24.0"
+HARNESS_VERSION = "0.25.0"
 
 COMMANDS_FILE = "devtools_commands.json"
 RESULTS_FILE = "devtools_results.json"
@@ -458,8 +458,11 @@ def _ledger_survivors(project_path: Path, exclude=()):
 
     Alive-and-same-start-time is the test: a recycled pid whose creation time
     is not within a few seconds of the recorded one is someone else's process
-    and is left alone. A pid whose start time cannot be read at all is reported
-    with `verified=False` and never killed automatically.
+    and is left alone. A pid whose start time cannot be read at all, having
+    been readable when the ledger recorded it, is the same case one layer
+    earlier (gh#24) - not left alone, not reported at all. Only a pid that was
+    NEVER readable (never `started_verified`) is genuinely ambiguous; that one
+    is reported with `verified=None` and never killed automatically.
     """
     path = _launch_ledger_path(project_path)
     if not path.is_file():
@@ -484,8 +487,17 @@ def _ledger_survivors(project_path: Path, exclude=()):
             continue
         now_started = _pid_started_unix(pid)
         recorded = float(row.get("started_unix") or 0)
+        if now_started is None and row.get("started_verified"):
+            # We could read this pid's start time when we launched it (gh#24).
+            # That we cannot now - not even to query it - is not ambiguity: on
+            # Windows, OpenProcess with PROCESS_QUERY_LIMITED_INFORMATION uses
+            # the same access right pid_alive() just used to call this pid
+            # alive, so if it were still OUR process the query would still
+            # succeed. It is someone else's process recycled onto the same pid
+            # number - not ours, not a survivor, not reported.
+            continue
         if now_started is None or not row.get("started_verified"):
-            verified = None  # cannot tell; report, never kill
+            verified = None  # genuinely cannot tell; report, never kill
         else:
             verified = abs(now_started - recorded) < 5.0
             if not verified:
@@ -1744,6 +1756,11 @@ def cmd_quit(args, project_path: Path):
     owner_row = {"pid": pid, "role": "owner", "started_unix": _pid_started_unix(pid) or time.time(),
                  "verified": True}
     all_rows = [owner_row] + others
+    # gh#24: --kill only ever touches verified rows (_kill_survivors skips the
+    # rest), so a kill hint or a "STILL ALIVE" tally built from ALL rows can
+    # name a pid that command was never going to act on. The owner itself is
+    # always verified here - pid_alive(pid) already gated this whole branch.
+    verified_rows = [r for r in all_rows if r["verified"]]
     print(f"\nWARNING: pid {pid} is STILL ALIVE {args.wait + grace:g}s after quit.\n"
           "A survivor answers the bus alongside any new instance, and the symptom "
           "is empty replies, not an error.", file=sys.stderr)
@@ -1752,13 +1769,13 @@ def cmd_quit(args, project_path: Path):
               % (len(others), _describe_survivors(others)), file=sys.stderr)
     if getattr(args, "kill", False):
         gone = _kill_survivors(all_rows)
-        left = [r["pid"] for r in all_rows if r["pid"] not in gone]
+        left = [r["pid"] for r in verified_rows if r["pid"] not in gone]
         print("--kill: terminated %s%s" % (
             ", ".join(str(p) for p in gone) or "nothing",
             ("; STILL ALIVE: %s" % ", ".join(str(p) for p in left)) if left else ""),
             file=sys.stderr)
         sys.exit(1 if left else 0)
-    print("Kill before launching again:\n" + _kill_hint([r["pid"] for r in all_rows]),
+    print("Kill before launching again:\n" + _kill_hint([r["pid"] for r in verified_rows]),
           file=sys.stderr)
     sys.exit(1)
 
@@ -1770,16 +1787,24 @@ def _quit_sweep(args, project_path: Path, exclude) -> None:
     `_console.exe` wrapper that spawned the engine, and any engine from an
     earlier launch that stopped polling (so `launch` treated it as stale and
     moved on) without exiting. Reported always; killed only under --kill.
+
+    gh#24: an all-`verified=None` sweep exits 0, not 1. `verified=None` means
+    genuinely unknowable AND never auto-killed - the docstring on
+    `_ledger_survivors` says so - so there was nothing the caller could ever do
+    about that exit code, which is exactly how an exit code stops being read.
+    A row with `verified=True` still exits 1: that one names a real, killable
+    survivor.
     """
     rows = _ledger_survivors(project_path, exclude=exclude)
     if not rows:
         return
+    verified_rows = [r for r in rows if r["verified"]]
     print("\nWARNING: %d process(es) this project launched EARLIER are still alive "
           "(from %s):\n%s" % (len(rows), _launch_ledger_path(project_path).name,
                                 _describe_survivors(rows)), file=sys.stderr)
     if getattr(args, "kill", False):
         gone = _kill_survivors(rows)
-        left = [r["pid"] for r in rows if r["pid"] not in gone]
+        left = [r["pid"] for r in verified_rows if r["pid"] not in gone]
         print("--kill: terminated %s%s" % (
             ", ".join(str(p) for p in gone) or "nothing",
             ("; STILL ALIVE: %s" % ", ".join(str(p) for p in left)) if left else ""),
@@ -1787,9 +1812,11 @@ def _quit_sweep(args, project_path: Path, exclude) -> None:
         if left:
             sys.exit(1)
         return
+    if not verified_rows:
+        return  # unverifiable only: a note, never auto-killed, never exit 1
     print("They answer the bus alongside the next instance (crossed replies, `Node not "
           "found` on a node scene-tree just listed). Kill them:\n"
-          + _kill_hint([r["pid"] for r in rows]), file=sys.stderr)
+          + _kill_hint([r["pid"] for r in verified_rows]), file=sys.stderr)
     sys.exit(1)
 
 
@@ -2344,6 +2371,26 @@ def cmd_set_game_speed(args, project_path: Path):
         data = result["data"]
         # 3 dp: a 1-dp print echoed 0.04 as "1.0 -> 0.0" (moving-in:G-019).
         print(f"Game speed: {data['previous_scale']:.3f} -> {data['current_scale']:.3f}")
+    else:
+        print(f"Failed: {result['message']}", file=sys.stderr)
+        sys.exit(1)
+
+
+def cmd_pause(args, project_path: Path):
+    """Pause SceneTree.paused directly (gh#26)."""
+    result = send_command(project_path, "pause", {})
+    if result["success"]:
+        print(result["message"])
+    else:
+        print(f"Failed: {result['message']}", file=sys.stderr)
+        sys.exit(1)
+
+
+def cmd_unpause(args, project_path: Path):
+    """Unpause SceneTree.paused directly (gh#26)."""
+    result = send_command(project_path, "unpause", {})
+    if result["success"]:
+        print(result["message"])
     else:
         print(f"Failed: {result['message']}", file=sys.stderr)
         sys.exit(1)
@@ -4036,6 +4083,13 @@ def main():
     p = subparsers.add_parser("set-game-speed", help="Set game speed (time scale)")
     p.add_argument("scale", type=float, help="Time scale (0=pause, 1=normal, 10=fast)")
     p.set_defaults(func=cmd_set_game_speed)
+
+    # pause / unpause
+    p = subparsers.add_parser(
+        "pause", help="Pause SceneTree.paused (the bus keeps answering)")
+    p.set_defaults(func=cmd_pause)
+    p = subparsers.add_parser("unpause", help="Reverse `pause`")
+    p.set_defaults(func=cmd_unpause)
 
     # wait-frames
     p = subparsers.add_parser("wait-frames", help="Wait for N physics frames")

@@ -2514,6 +2514,50 @@ def check_paused_bridge(client, scratch):
     return True
 
 
+def check_pause_verb(client, scratch):
+    """The generic `pause`/`unpause` verbs actually flip SceneTree.paused (gh#26).
+
+    Before this verb existed, `check_paused_bridge` above could only reach a paused
+    tree through a project fixture's own `harness_set_paused` method - proof that no
+    generic path existed at all. `set_game_speed`'s own refusal message named "the
+    tree's pause" as the answer to a scale of 0; this is what makes that message true
+    rather than a promise pointing nowhere. Idempotency is asserted both directions,
+    because a second pause/unpause silently doing nothing is exactly the bug an
+    always-true return value would hide.
+    """
+    def call(action, args=None):
+        return client.send_command(scratch, action, args or {}, timeout=15.0)
+
+    try:
+        r1 = call("pause")
+        if not r1.get("success") or r1.get("data", {}).get("was_paused") is not False \
+                or r1.get("data", {}).get("paused") is not True:
+            return fail("pause on an unpaused tree must succeed with was_paused=False, "
+                        "paused=True, got %r" % r1)
+        if call("ping").get("data", {}).get("paused") is not True:
+            return fail("ping must report paused=True after the `pause` verb")
+        r2 = call("pause")  # idempotent: pausing an already-paused tree is not an error
+        if not r2.get("success") or r2.get("data", {}).get("was_paused") is not True:
+            return fail("a second `pause` call must still succeed, reporting "
+                        "was_paused=True, got %r" % r2)
+        r3 = call("unpause")
+        if not r3.get("success") or r3.get("data", {}).get("was_paused") is not True \
+                or r3.get("data", {}).get("paused") is not False:
+            return fail("unpause on a paused tree must succeed with was_paused=True, "
+                        "paused=False, got %r" % r3)
+        if call("ping").get("data", {}).get("paused") is not False:
+            return fail("ping must report paused=False after the `unpause` verb")
+        r4 = call("unpause")  # idempotent the other direction too
+        if not r4.get("success") or r4.get("data", {}).get("was_paused") is not False:
+            return fail("a second `unpause` call must still succeed, reporting "
+                        "was_paused=False, got %r" % r4)
+        print("stage 5 bridge: pause/unpause verbs flip SceneTree.paused directly "
+              "(ping reflects both transitions), idempotent both directions")
+    finally:
+        call("unpause")  # never leave the scratch project paused for a later check
+    return True
+
+
 def check_dispatch_reentrancy(client, scratch):
     """A command arriving mid-await must be DEFERRED, not run on top (H-038).
 
@@ -2721,6 +2765,7 @@ def stage_bridge(godot, scratch, full):
         ok = check_mouse_move(client, scratch) and ok
         ok = check_reload(client, scratch) and ok
         ok = check_paused_bridge(client, scratch) and ok
+        ok = check_pause_verb(client, scratch) and ok
         ok = check_dispatch_reentrancy(client, scratch) and ok
 
         if full:
