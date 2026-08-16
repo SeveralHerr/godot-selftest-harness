@@ -441,6 +441,24 @@ Notable behaviors:
   scale of 0 stops the game while the bus keeps answering well-formed stale values;
   `0.04` used to echo as `1.0 -> 0.0` from a 1-dp print. The reply names the floor;
   the client prints three decimals.
+- **`launch --snapshot-userstate [GLOB ...]` / `quit` restore** (0.35.0,
+  plant-tower-defense:G-047). `--isolated` isolates the bus and only the bus, so a
+  live check that presses a key whose handler calls `_save()` writes the developer's
+  real `user://highscore.save`, and putting it back was a discipline nothing enforced
+  — a crash mid-check skipped it. The flag copies every `user://` file matching the
+  globs (default `*.save`) under `.devtools/userstate_snapshot/` before the game
+  starts; `quit` copies them back and **removes files the run created** under those
+  globs, so "did not exist before" holds after; a snapshot left by a game that died is
+  restored by the next `launch` before anything else. Needs no `user://` isolation.
+- **`scene-tree` ends with `N node(s) in this subtree`** on stderr (0.35.0,
+  moving-in:G-056) — each node prints a `name` and a `path` line, so `| grep -c` over
+  the JSON reads one node as two, i.e. as exactly the duplicate a reader was testing
+  for. The denominator is the house style; JSON on stdout stays parseable.
+- **`import_check.py` retries a crashing `--import` while it still makes progress**
+  (0.35.0, plant-tower-defense:G-044, fifth sighting) — the observed failure needed
+  two retries and the cap was one. Now up to 4 attempts, each allowed only if the
+  previous crash grew `.godot/imported` or moved the last `reimport | file` line; a
+  crash that gained nothing twice running is reported, not retried forever.
 - **`harness-version --client` never opens the bus** (0.34.0, moving-in:G-055) — the
   log-entry format wants the installed version on every turn, most of them with no
   game running, and the bus-first path printed a `game not running` warning before

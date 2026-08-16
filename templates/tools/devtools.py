@@ -89,11 +89,11 @@ from pathlib import Path
 from typing import Optional  # noqa: F401
 
 
-# harness-version: 0.34.0
+# harness-version: 0.35.0
 # Version of the godot-selftest-harness this client was copied from. Compared against
 # the running game's own stamp by the `harness-version` verb, so a half-refreshed
 # install (new client, old autoload) is visible instead of mysterious.
-HARNESS_VERSION = "0.34.0"
+HARNESS_VERSION = "0.35.0"
 
 COMMANDS_FILE = "devtools_commands.json"
 RESULTS_FILE = "devtools_results.json"
@@ -1284,10 +1284,28 @@ def cmd_scene_tree(args, project_path: Path):
         cmd_args["properties"] = args.properties
     result = send_command(project_path, "scene_tree", cmd_args)
     if result["success"]:
-        print(json.dumps(result["data"], indent=2))
+        data = result["data"]
+        print(json.dumps(data, indent=2))
+        # moving-in:G-056: every node prints a "name" AND a "path" line, so
+        # `| grep -c` over-counts by two - and read as a duplicated node, which is
+        # exactly what the reader was testing for. Every other verb ends with a
+        # denominator; so does this one, on stderr so the JSON stays parseable.
+        print(f"{_count_tree_nodes(data)} node(s) in this subtree "
+              f"(depth {args.depth}; do not count JSON lines - each node prints several)",
+              file=sys.stderr)
     else:
         print(f"Failed: {result['message']}", file=sys.stderr)
         sys.exit(1)
+
+
+def _count_tree_nodes(data) -> int:
+    """Nodes in a scene_tree reply: every dict carrying a "path" key, recursively."""
+    if isinstance(data, dict):
+        own = 1 if "path" in data and "name" in data else 0
+        return own + sum(_count_tree_nodes(v) for v in data.values())
+    if isinstance(data, list):
+        return sum(_count_tree_nodes(v) for v in data)
+    return 0
 
 
 def cmd_curve(args, project_path: Path):
@@ -1717,6 +1735,98 @@ def cmd_ping(args, project_path: Path):
         sys.exit(1)
 
 
+# ==================== USER:// STATE SNAPSHOT (plant-tower-defense:G-047) ====================
+#
+# --isolated isolates the bus and only the bus; user:// is shared, so a live check
+# that presses a key whose handler calls _save() writes the developer's real save
+# file, and putting it back is a discipline nothing enforced - a crash mid-check
+# skipped it. `launch --snapshot-userstate` copies the matching files aside
+# before the game starts and `quit` puts them back (a file that did not exist is
+# removed again). A snapshot left behind by a game that died is restored by the
+# next `launch`, so the developer's state is never more than one launch away.
+
+USERSTATE_DIR = "userstate_snapshot"
+USERSTATE_MANIFEST = "manifest.json"
+USERSTATE_DEFAULT_GLOB = "*.save"
+
+
+def _userstate_dir(project_path: Path) -> Path:
+    return project_path / ".devtools" / USERSTATE_DIR
+
+
+def userstate_snapshot(project_path: Path, user_dir: Path, patterns) -> dict:
+    """Copy user_dir files matching `patterns` under .devtools/, write a manifest.
+
+    Records every file the patterns match NOW, and every pattern, so restore can
+    also delete files the game creates during the run (a save that did not
+    exist before must not exist after). Returns the manifest.
+    """
+    import shutil
+    dest = _userstate_dir(project_path)
+    if dest.exists():
+        shutil.rmtree(dest)
+    dest.mkdir(parents=True)
+    files = []
+    for pattern in patterns:
+        for src in sorted(user_dir.glob(pattern)):
+            if not src.is_file():
+                continue
+            rel = src.relative_to(user_dir).as_posix()
+            copy_to = dest / rel
+            copy_to.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, copy_to)
+            files.append(rel)
+    manifest = {
+        "user_dir": str(user_dir),
+        "patterns": list(patterns),
+        "files": files,
+        "taken_unix": time.time(),
+        "harness_version": HARNESS_VERSION,
+    }
+    (dest / USERSTATE_MANIFEST).write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    return manifest
+
+
+def userstate_restore(project_path: Path, reason: str) -> "dict | None":
+    """Put the snapshot back and delete it. Returns the manifest, or None if there
+    was nothing to restore. Prints one line either way it acted."""
+    import shutil
+    dest = _userstate_dir(project_path)
+    manifest_path = dest / USERSTATE_MANIFEST
+    if not manifest_path.is_file():
+        return None
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        print(f"userstate: snapshot manifest unreadable ({exc}); leaving {dest} in place "
+              "for a human", file=sys.stderr)
+        return None
+    user_dir = Path(manifest["user_dir"])
+    restored, removed = 0, 0
+    if not user_dir.is_dir():
+        print(f"userstate: {user_dir} no longer exists; leaving {dest} in place", file=sys.stderr)
+        return None
+    # Anything matching the patterns now that was NOT in the snapshot was created
+    # by the run: remove it, so "did not exist before" holds after too.
+    before = set(manifest["files"])
+    for pattern in manifest["patterns"]:
+        for cur in sorted(user_dir.glob(pattern)):
+            if cur.is_file() and cur.relative_to(user_dir).as_posix() not in before:
+                cur.unlink()
+                removed += 1
+    for rel in manifest["files"]:
+        src = dest / rel
+        if src.is_file():
+            target = user_dir / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, target)
+            restored += 1
+    shutil.rmtree(dest, ignore_errors=True)
+    print(f"userstate: restored {restored} file(s) and removed {removed} created during the "
+          f"run ({reason}; patterns {', '.join(manifest['patterns'])}) into {user_dir}")
+    return manifest
+
+
 def cmd_quit(args, project_path: Path):
     """Quit the running instance and WAIT for the process to actually go.
 
@@ -1744,6 +1854,7 @@ def cmd_quit(args, project_path: Path):
     if not isinstance(pid, int):
         print("  (no owner file, so there is no pid to confirm the exit against)")
         _quit_sweep(args, project_path, exclude=())
+        userstate_restore(project_path, "quit")
         return
 
     deadline = time.time() + max(1.0, args.wait)
@@ -1751,6 +1862,7 @@ def cmd_quit(args, project_path: Path):
         if not pid_alive(pid):
             print(f"  pid {pid} exited")
             _quit_sweep(args, project_path, exclude=(pid,))
+            userstate_restore(project_path, "quit")
             return
         time.sleep(0.2)
 
@@ -1768,6 +1880,7 @@ def cmd_quit(args, project_path: Path):
             print(f"  pid {pid} exited (slower than the {args.wait:g}s --wait, but it is gone; "
                   f"pass --wait {int(args.wait) + int(grace) + 2} to stop seeing this)")
             _quit_sweep(args, project_path, exclude=(pid,))
+            userstate_restore(project_path, "quit")
             return
         time.sleep(0.2)
 
@@ -3439,6 +3552,23 @@ def cmd_launch(args, project_path: Path):
     else:
         popen_kwargs["start_new_session"] = True
 
+    # plant-tower-defense:G-047: a snapshot left behind by a game that died is put
+    # back before anything else starts; then, if asked, take a fresh one.
+    userstate_restore(project_path, "previous launch never quit cleanly")
+    snapshot_patterns = getattr(args, "snapshot_userstate", None)
+    if snapshot_patterns is not None:
+        try:
+            snap_user_dir = get_user_data_path(project_path)
+        except FileNotFoundError as exc:
+            print(f"Error: --snapshot-userstate needs the user:// directory: {exc}",
+                  file=sys.stderr)
+            sys.exit(2)
+        patterns = snapshot_patterns or [USERSTATE_DEFAULT_GLOB]
+        manifest = userstate_snapshot(project_path, snap_user_dir, patterns)
+        print(f"userstate: snapshotted {len(manifest['files'])} file(s) matching "
+              f"{', '.join(patterns)} from {snap_user_dir}; `quit` restores them "
+              f"(files the run creates under those patterns are removed again)")
+
     with out_log.open("w", encoding="utf-8") as out_f, \
             err_log.open("w", encoding="utf-8") as err_f:
         proc = subprocess.Popen(cmd, stdout=out_f, stderr=err_f, env=env,
@@ -4137,6 +4267,13 @@ def main():
                    help="Private session id AND a private bus directory, verified before "
                         "the follow-up command is printed. user:// itself is still shared - "
                         "Godot has no switch for it.")
+    p.add_argument("--snapshot-userstate", dest="snapshot_userstate", nargs="*",
+                   metavar="GLOB", default=None,
+                   help="Copy user:// files matching GLOB(s) (default *.save) aside before "
+                        "the game starts; `quit` puts them back and removes any the run "
+                        "created. --isolated does not isolate user://, so a live check "
+                        "that presses a key whose handler saves writes the developer's "
+                        "real file - this makes that safe by default")
     p.add_argument("--no-mute", action="store_true",
                    help="Do not pass --mute (a --write-movie run records the audio bus, "
                         "and a muted run captures silence)")

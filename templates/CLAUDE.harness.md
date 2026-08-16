@@ -158,7 +158,7 @@ listed is silently ignored; `--offline` parses the scripts statically with no ga
 | Verb | Use |
 |---|---|
 | `get-state --node PATH [--property N ...]` | Read a node's properties. **Always pass `--property`** — an unfiltered `Label` is ~120 keys. Repeatable; dotted paths walk into Resources, Dictionaries and struct components (`slot_data.item.name`, `position.x`, `modulate.a`); unknown names are reported, not dropped |
-| `scene-tree [--root PATH] [--depth N]` | Discover root scene name + node paths (don't assume names). Each node carries `script` and `scene_file`, so a changed file maps to the node that runs it |
+| `scene-tree [--root PATH] [--depth N]` | Discover root scene name + node paths (don't assume names). Each node carries `script` and `scene_file`, so a changed file maps to the node that runs it. Ends with `N node(s)` on stderr — don't `grep -c` the JSON, each node prints several lines |
 | `find-nodes [--class C\|--group G\|--method M] [--where N=V] [--property N] [--call M]` | Locate nodes by what they *are*, not where they sit. `--class` takes a script `class_name` too (subclasses included) and **fails on a name that is neither**; `--where` is repeatable and takes dotted paths; `--call METHOD` reads a zero-arg getter beside each hit, so an auto-named node is found and read in one trip. Usually the right verb for identifying one node in a large tree |
 | `run-method --node PATH --method N --args "[...]"` | Call a method — preferred over `set-state` when a signal should fire. Reports `returned_null` + `declared_return`, so a `-> void` that ran is distinguishable from a call that aborted |
 | `set-state --node PATH --property N --value V` | Set raw property (bypasses setters/signals) and print the read-back. A JSON array is rebuilt as the property's typed Array (`Array[StringName]` works). Dotted paths write through — note that mutates the **Resource**, so a shared material changes for every node using it. Write `--value=-200,-296` with an `=` when it starts with `-` |
@@ -346,6 +346,9 @@ runtime, which the static checker cannot see) and `name_check_ignore` (path pref
 - `findings` / `validate-ui` keep the records of the last non-clean run at
   `user://findings_last.json` (path printed when the count is non-zero) — a transient
   is diagnosable after the frame that produced it is gone.
+- A live check that touches persisted state (a key whose handler saves) writes the
+  developer's real `user://` file — `--isolated` does not isolate `user://`. Use
+  `launch --isolated --snapshot-userstate` so `quit` puts it back.
 - `press` emits `pressed` without moving the mouse: an open tooltip stays open and can
   appear in a screenshot taken straight after. `mouse-move` first if the picture matters.
 - Run `/verify` **inline**; don't wrap routine validation in subagents/workflows.
