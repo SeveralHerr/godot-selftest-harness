@@ -14,14 +14,14 @@ extends Node
 ## extension loads AFTER the generic handlers, a project may override a generic
 ## verb by registering the same action string (last-writer-wins).
 
-# harness-version: 0.29.0
+# harness-version: 0.30.0
 # --- Constants ---
 
 ## Version of the godot-selftest-harness these files were copied from. Reported by the
 ## `harness_version` verb and stamped into every copied tool script, so a gap logged
 ## against a project can name the version it was seen on, and a refresh can tell a
 ## stale file from a customized one. Bump with .claude-plugin/plugin.json.
-const HARNESS_VERSION: String = "0.29.0"
+const HARNESS_VERSION: String = "0.30.0"
 
 ## Default bus filenames. With a session id (see _resolve_session) the id is spliced in
 ## before the extension, so two instances can each own a bus in the same user:// dir.
@@ -120,6 +120,13 @@ const DEFAULT_CONFIG: Dictionary = {
 	"safe_area_inset": {"left": 0, "top": 0, "right": 0, "bottom": 0},
 	"main_scene": "",
 	"entry_hook": {"node_path": "", "method": ""},
+	# Named alternates to entry_hook, each {scene, node_path, method, args, match}.
+	# scene/method/args/match all optional; node_path required. Nothing here fires on
+	# its own - a caller reaches one by name via the fire_entry_point verb. `/verify`
+	# picks the one whose `match` substrings hit the diff (commands/verify.md), so a
+	# change to a boss/shop/level script gets a runtime path instead of only a code
+	# read. {} means none configured.
+	"entry_points": {},
 	"mute": true,
 	# Read by tools/verify_ledger.py, not by this core. Maps a script that reach can
 	# never observe -- a RefCounted or Resource that is never any node's script -- to
@@ -181,6 +188,17 @@ var _devtools_set_speed: Variant = null
 ## (G-074b/G-068): the existing tree is walked once at _ready to seed it, then
 ## `node_added` keeps it current. Keys are paths; values are `true`.
 var _scripts_seen: Dictionary = {}
+## entry_hook outcome, reported on every `ping` reply (gh#29): a config key that
+## silently did nothing was worse than an absent one, because the project LOOKED
+## configured. "not_configured" (default), "fired", or an error string naming what
+## went wrong ("node not found: X", "no such method: X.Y", "misconfigured: ...").
+## Never anything else, so a caller can branch on it without parsing prose.
+var _entry_hook_status: String = "not_configured"
+## The entry method's own return value, if it returned one. null otherwise -
+## including when the method legitimately returned null, which `ping`'s
+## entry_hook_result key cannot distinguish from "did not fire"; entry_hook_status
+## is what answers that question.
+var _entry_hook_result: Variant = null
 ## The "id" of the command currently being served, echoed verbatim onto its reply
 ## ("" when the request carried none).
 ##
@@ -273,6 +291,10 @@ func _ready() -> void:
 	if not _passive:
 		_clear_stale_files()
 		_write_owner_file()
+		# Fire-and-forget (gh#29): a --script runner has no real game to enter play
+		# on, so entry_hook only fires for an actual launch. Does not block the
+		# rest of _ready() - see _start_entry_hook().
+		_start_entry_hook()
 
 	# Script census (G-074b): seed from whatever is already in the tree (autoload
 	# order means the main scene is usually not up yet), then track every node
@@ -562,6 +584,7 @@ func _register_generic_handlers() -> void:
 	register_command("canvas_scale", _cmd_canvas_scale)
 	register_command("aabb", _cmd_aabb)
 	register_command("look_at", _cmd_look_at)
+	register_command("fire_entry_point", _cmd_fire_entry_point)
 	register_command("set_resolution", _cmd_set_resolution)
 	register_command("save_ui_baseline", _cmd_save_ui_baseline)
 	register_command("ui_snapshot_diff", _cmd_ui_snapshot_diff)
@@ -864,6 +887,10 @@ func _cmd_ping(_args: Dictionary) -> Dictionary:
 			# Where this game's res:// is on disk, so a client can tell a
 			# worktree sibling's game from its own (plant-tower-defense:G-018).
 			"project_path": ProjectSettings.globalize_path("res://"),
+			# gh#29: "not_configured", "fired", or an error naming what went
+			# wrong - never silent. See _start_entry_hook().
+			"entry_hook_status": _entry_hook_status,
+			"entry_hook_result": _serialize_variant(_entry_hook_result),
 		},
 	}
 
@@ -4609,6 +4636,142 @@ func _cmd_scripts_seen(_args: Dictionary) -> Dictionary:
 		"success": true,
 		"message": "%d distinct script%s seen since launch" % [scripts.size(), "" if scripts.size() == 1 else "s"],
 		"data": {"scripts": scripts, "count": scripts.size()},
+	}
+
+
+# --- Entry hook / entry points (gh#29) ---
+#
+# Before this, `entry_hook` accepted a value, validated fine, and was read by
+# nothing - the harness's own worst failure mode (a check that could not run must
+# be NAMED, not silently absent) applied to its own config. A project set it,
+# `ping` kept reporting the title screen, and the natural conclusion was that the
+# GAME was at fault. _entry_hook_status exists so that never happens again:
+# "not_configured" and "fired" are both facts a caller can act on, and a typo'd
+# node_path or method name is now an error, not silence.
+
+## How long _resolve_entry_hook keeps retrying before reporting "node not found".
+## Autoloads run before the main scene is instantiated, so the target usually does
+## not exist at _ready() - this is not a bug in the caller's config. Polled rather
+## than driven off node_added, so it terminates even if the scene tree stops
+## changing entirely (a genuine typo never fires another node_added to wake it).
+const ENTRY_HOOK_TIMEOUT_SEC: float = 10.0
+const ENTRY_HOOK_POLL_SEC: float = 0.2
+
+## Fire-and-forget from _ready(): does not block bridge startup on a scene that
+## might take seconds to load, or might never contain the configured node at all.
+func _start_entry_hook() -> void:
+	var hook: Variant = _config.get("entry_hook", {})
+	if not (hook is Dictionary):
+		return
+	var node_path: String = str(hook.get("node_path", ""))
+	var method: String = str(hook.get("method", ""))
+	if node_path.is_empty() and method.is_empty():
+		return  # "not_configured" is already the default; nothing to do.
+	if node_path.is_empty() or method.is_empty():
+		_entry_hook_status = ("misconfigured: both node_path and method are "
+			+ "required (got node_path=%r method=%r)") % [node_path, method]
+		push_error("DevTools: entry_hook " + _entry_hook_status)
+		return
+	_resolve_and_fire_hook(node_path, method, [])
+
+
+func _resolve_and_fire_hook(node_path: String, method: String, args: Array) -> void:
+	var elapsed: float = 0.0
+	var resolved: Dictionary = _resolve_node(node_path)
+	while resolved["node"] == null and elapsed < ENTRY_HOOK_TIMEOUT_SEC:
+		await get_tree().create_timer(ENTRY_HOOK_POLL_SEC).timeout
+		elapsed += ENTRY_HOOK_POLL_SEC
+		resolved = _resolve_node(node_path)
+	var node: Node = resolved["node"]
+	if node == null:
+		_entry_hook_status = "node not found: %s (waited %.0fs)" % [node_path, ENTRY_HOOK_TIMEOUT_SEC]
+		push_error("DevTools: entry_hook " + _entry_hook_status)
+		return
+	if not node.has_method(method):
+		_entry_hook_status = "no such method: %s.%s" % [node_path, method]
+		push_error("DevTools: entry_hook " + _entry_hook_status)
+		return
+	_entry_hook_result = node.callv(method, args)
+	_entry_hook_status = "fired"
+	print("DevTools: entry_hook fired %s.%s()%s" % [
+		node_path, method,
+		(" -> %s" % _entry_hook_result) if _entry_hook_result != null else ""])
+
+
+## `entry_points`: named alternates to entry_hook, reached on demand rather than
+## fired automatically - a boss/shop/level's own runtime path instead of only a
+## code read (see commands/verify.md for when an agent should reach for one).
+## Wire contract - args: {"name": String}. data keys: name, node_path, method,
+## result (the method's own return value, or null), scene_changed (bool).
+func _cmd_fire_entry_point(args: Dictionary) -> Dictionary:
+	var name: String = str(args.get("name", ""))
+	if name.is_empty():
+		return {"success": false, "message": "fire_entry_point requires 'name'", "data": {}}
+	var points: Variant = _config.get("entry_points", {})
+	if not (points is Dictionary) or not points.has(name):
+		var known: Array = (points.keys() if points is Dictionary else [])
+		known.sort()
+		return {"success": false,
+			"message": "no entry_point named %r in devtools_config.json. Known: %s"
+				% [name, ", ".join(known) if not known.is_empty() else "(none configured)"],
+			"data": {}}
+	var point: Variant = points[name]
+	if not (point is Dictionary):
+		return {"success": false,
+			"message": "entry_points.%s is not an object" % name, "data": {}}
+	var node_path: String = str(point.get("node_path", ""))
+	var method: String = str(point.get("method", ""))
+	if node_path.is_empty() or method.is_empty():
+		return {"success": false,
+			"message": ("entry_points.%s is misconfigured: both node_path and "
+				+ "method are required (got node_path=%r method=%r)")
+				% [name, node_path, method],
+			"data": {}}
+	var args_list: Array = point.get("args", [])
+	if not (args_list is Array):
+		args_list = []
+
+	var scene_changed: bool = false
+	var scene_path: String = str(point.get("scene", ""))
+	if not scene_path.is_empty():
+		var current: Node = get_tree().current_scene
+		var current_path: String = current.scene_file_path if current != null else ""
+		if current_path != scene_path:
+			var err: int = get_tree().change_scene_to_file(scene_path)
+			if err != OK:
+				return {"success": false,
+					"message": "entry_points.%s: change_scene_to_file(%s) failed: %s"
+						% [name, scene_path, error_string(err)],
+					"data": {}}
+			scene_changed = true
+			# The new scene is not in the tree yet even after a successful
+			# change_scene_to_file() call - it is deferred to the end of the
+			# frame. Same reasoning as _resolve_and_fire_hook: poll, don't guess
+			# a frame count.
+			var elapsed: float = 0.0
+			var resolved: Dictionary = _resolve_node(node_path)
+			while resolved["node"] == null and elapsed < ENTRY_HOOK_TIMEOUT_SEC:
+				await get_tree().create_timer(ENTRY_HOOK_POLL_SEC).timeout
+				elapsed += ENTRY_HOOK_POLL_SEC
+				resolved = _resolve_node(node_path)
+
+	var resolved: Dictionary = _resolve_node(node_path)
+	var node: Node = resolved["node"]
+	if node == null:
+		return {"success": false,
+			"message": "entry_points.%s: node not found: %s" % [name, node_path],
+			"data": {"scene_changed": scene_changed}}
+	if not node.has_method(method):
+		return {"success": false,
+			"message": "entry_points.%s: no such method: %s.%s" % [name, node_path, method],
+			"data": {"scene_changed": scene_changed}}
+	var result: Variant = node.callv(method, args_list)
+	return {
+		"success": true,
+		"message": "entry_points.%s fired %s.%s()%s" % [
+			name, node_path, method, (" -> %s" % result) if result != null else ""],
+		"data": {"name": name, "node_path": node_path, "method": method,
+			"result": _serialize_variant(result), "scene_changed": scene_changed},
 	}
 
 

@@ -729,6 +729,21 @@ def stage_assemble(scratch, user_dir_name):
         "\tget_node(\"/root/DevTools\").call(\"mark_script_reached\", path)",
         "",
         "",
+        "## gh#29: entry_hook/entry_points targets. Records how many times each",
+        "## fired and with what args, so the control can assert BOTH that it fired",
+        "## and what it was actually called with.",
+        "var entry_hook_calls: int = 0",
+        "var entry_point_calls: Array = []",
+        "",
+        "func harness_entry_hook_probe() -> String:",
+        "\tentry_hook_calls += 1",
+        "\treturn \"entry_hook_probe_result\"",
+        "",
+        "func harness_entry_point_probe(n: int) -> int:",
+        "\tentry_point_calls.append(n)",
+        "\treturn n * 2",
+        "",
+        "",
         "func _on_go() -> void:",
         "\tpresses += 1",
         "",
@@ -1804,6 +1819,12 @@ def contract_rows():
         ("unpause", {}, True, "behaviour and idempotency asserted by check_pause_verb()"),
         ("look_at", {"node": "/root/Main/Prop3D"}, True,
          "default-camera resolution and effect asserted by check_look_at()"),
+        ("fire_entry_point", {"name": "no_such_entry_in_default_config"}, False,
+         "the default scratch config has no entry_points; success=false with a "
+         "clear message is the correct envelope here. Real behaviour (fires the "
+         "named node/method, surfaces the result, refuses an unknown name) is "
+         "asserted by check_entry_hook_and_entry_points() against its own "
+         "dedicated launch with entry_points actually configured."),
         ("step_time", {"seconds": 0.2}, True, ""),
         ("wait_frames", {"count": 5}, True, ""),
         ("get_node_bounds", {"node_path": "/root/Main"}, False,
@@ -2902,6 +2923,88 @@ def check_launch_session_passthrough(godot, scratch):
     return True
 
 
+def check_entry_hook_and_entry_points(godot, scratch):
+    """`entry_hook` fires automatically at startup and `entry_points` fires on
+    demand, both actually calling the configured node/method rather than
+    accepting the config and doing nothing (gh#29).
+
+    Before this, entry_hook validated fine, was read by nothing, and the only
+    symptom was the game looking unconfigured forever - the harness's own
+    "a check that could not run must be named" rule, broken by its own config.
+    A dedicated launch is required because entry_hook fires once at _ready(),
+    before the main scratch instance (already running under the default
+    session) ever read this config - mutating devtools_config.json for it and
+    restoring it afterward does not disturb that instance, which cached its
+    own config at its own _ready() long before this runs.
+    """
+    config_path = scratch / "addons" / "godot_selftest" / "devtools_config.json"
+    original = config_path.read_text(encoding="utf-8")
+    py = str(scratch / "tools" / "devtools.py")
+    session = "checktest_gh29"
+    try:
+        config = json.loads(original)
+        config["entry_hook"] = {"node_path": "/root/Main", "method": "harness_entry_hook_probe"}
+        config["entry_points"] = {
+            "probe": {"node_path": "/root/Main", "method": "harness_entry_point_probe",
+                      "args": [21]},
+        }
+        config_path.write_text(json.dumps(config, indent=2), encoding="utf-8")
+
+        launch = subprocess.run(
+            [sys.executable, py, "-p", str(scratch), "launch", "--godot", str(godot),
+             "--", "--devtools-session", session],
+            capture_output=True, text=True, timeout=GODOT_TIMEOUT)
+        if launch.returncode != 0 or "bus answered" not in launch.stdout:
+            return fail("launch for the entry_hook probe failed, exit %d:\n%s"
+                        % (launch.returncode, launch.stdout))
+
+        ping = subprocess.run(
+            [sys.executable, py, "-p", str(scratch), "--session", session, "--json", "ping"],
+            capture_output=True, text=True, timeout=15)
+        if ping.returncode != 0:
+            return fail("ping after entry_hook launch failed, exit %d:\n%s"
+                        % (ping.returncode, ping.stdout))
+        try:
+            ping_data = (json.loads(ping.stdout).get("data") or {})
+        except ValueError as exc:
+            return fail("ping --json did not parse: %s\n%s" % (exc, ping.stdout))
+        if ping_data.get("entry_hook_status") != "fired":
+            return fail("entry_hook must report status 'fired' after startup, got %r"
+                        % ping_data.get("entry_hook_status"))
+        if ping_data.get("entry_hook_result") != "entry_hook_probe_result":
+            return fail("entry_hook's own return value must surface on ping, got %r"
+                        % ping_data.get("entry_hook_result"))
+
+        fire = subprocess.run(
+            [sys.executable, py, "-p", str(scratch), "--session", session,
+             "fire-entry-point", "probe"],
+            capture_output=True, text=True, timeout=15)
+        if fire.returncode != 0 or "-> 42" not in fire.stdout:
+            return fail("fire-entry-point probe (args=[21], returns n*2) must succeed "
+                        "and report 42, got exit %d:\n%s" % (fire.returncode, fire.stdout))
+
+        # Negative control: an unconfigured name must fail naming what's known,
+        # not silently do nothing.
+        missing = subprocess.run(
+            [sys.executable, py, "-p", str(scratch), "--session", session,
+             "fire-entry-point", "no_such_entry"],
+            capture_output=True, text=True, timeout=15)
+        missing_out = missing.stdout + missing.stderr  # cmd_fire_entry_point prints to stderr
+        if missing.returncode == 0 or "no entry_point named" not in missing_out:
+            return fail("fire-entry-point on an unconfigured name must fail naming "
+                        "the problem, got exit %d:\n%s"
+                        % (missing.returncode, missing_out))
+    finally:
+        config_path.write_text(original, encoding="utf-8")
+        subprocess.run([sys.executable, py, "-p", str(scratch), "--session", session,
+                        "quit", "--kill"], capture_output=True, text=True, timeout=30)
+
+    print("stage 5 bridge: entry_hook fires automatically at startup (status 'fired', "
+          "return value surfaced on ping) and entry_points fires named entries on "
+          "demand with args, refusing an unconfigured name by naming the problem")
+    return True
+
+
 def check_dispatch_reentrancy(client, scratch):
     """A command arriving mid-await must be DEFERRED, not run on top (H-038).
 
@@ -3114,6 +3217,7 @@ def stage_bridge(godot, scratch, full):
         ok = check_paused_bridge(client, scratch) and ok
         ok = check_pause_verb(client, scratch) and ok
         ok = check_launch_session_passthrough(godot, scratch) and ok
+        ok = check_entry_hook_and_entry_points(godot, scratch) and ok
         ok = check_dispatch_reentrancy(client, scratch) and ok
 
         if full:

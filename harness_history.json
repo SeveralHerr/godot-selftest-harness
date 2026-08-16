@@ -345,5 +345,21 @@
     "tools/import_check.py": "47c70d1e7b5f282a141507b7577736c235451b9ab84a5f268d84376d435beef3",
     "tools/name_check.py": "3f529e66e5b82e2ac0728c85b8953ee2214174b191f90d226da6753f7a68f16e",
     "tools/coverage_check.py": "843c55031f45d17bee186514bc2813caf32b95db279af9c9257e61934278c5a2"
+  },
+  "0.30.0": {
+    "addons/godot_selftest/dev_tools.gd": "f4410c3a1b96a4be922927f6331e15d8627c084d7add8537da00ff9706d14198",
+    "addons/godot_selftest/scene_validator.gd": "b2f3c275f7f230443fec87a2fabd74858860c02653a22e0300c819d65d8582fb",
+    "tools/lint_project.gd": "c899ce26b7c9dcd939de7c4d283dc5a81547cc4f1fd0b4b044fb9c1deac61d60",
+    "tools/run_tests.gd": "a98d61c3aa7be8b942c65e4272b9618e5f0f5f90c2b63c08d1f735ec7fa26a88",
+    "tools/run_tests.py": "48483cd6b954d08c5157409d2efea60a634e6db8d395f01ff7f435a571c531b2",
+    "tools/eval.gd": "59245e71aed3bbb5a2756df586318519197ce623373b04bcf54617064021b88f",
+    "tools/capture.gd": "f24ef77bb61d6d9730c8f5d557335f6c7511888d3076784dc586f8c9ced07ea1",
+    "tools/devtools.py": "aa82a8e724088960f71098e7e22e1f3f3ff138f58187a5c43d4642887007e41b",
+    "tools/check_devtools_log.py": "61233892603b741a9f440b7e294d330f8001d4ee635b8efe736c271dadc8afe8",
+    "tools/upstream_gaps.py": "d1ca12c34b0a95dfba620a77f12254a3acc4b1f1912726d0ba2de491d45e7322",
+    "tools/verify_ledger.py": "0e2e2bed13dda0fba8ce39b1c1a6212de414ba626545b04cdd23cfda95bb780a",
+    "tools/import_check.py": "a9ae78a0e48b5e7088fd8e50b1c4cfe618b885e2b686f96651e0b1bf92c39503",
+    "tools/name_check.py": "ae1b96705e4d2547d01b1de4dab3617369f9dd431938f651e19d718ded333e66",
+    "tools/coverage_check.py": "f1bda212e9ad9bd001ceecaa52681a39b8cb3b47b08b36655cbd1669dc5c41b1"
   }
 }

@@ -356,7 +356,7 @@ Then re-check `scene-tree` and confirm the root scene changed to the expected pl
 "$PY" tools/devtools.py ping | grep -i "PAUSED" && echo "TREE IS PAUSED - stop"
 ```
 
-A `tree is PAUSED` here **stops the run**. The bridge is `PROCESS_MODE_ALWAYS`, so every verb keeps answering on a frozen game and the numbers look healthy: `performance` reports a plausible FPS for a tree that is not stepping (it now says `TREE IS PAUSED` first, but a run that reads only the exit code will not see it), `validate-all` passes, `screenshot` captures a still frame, and every Phase 4 assertion about a tween, a timer or a `queue_free` fails for a reason that has nothing to do with the diff. This is the common case for a project that boots behind a title screen with `get_tree().paused = true` and has no `entry_hook` — the pause is exactly what the hook exists to undo, so an empty hook plus a paused tree means the config is **incomplete**, not that the game is fine. Set `entry_hook` to the menu's own start handler (or `pause false` if the project has no such handler) and re-run; do not carry a paused tree into Phase 3.
+A `tree is PAUSED` here **stops the run**. The bridge is `PROCESS_MODE_ALWAYS`, so every verb keeps answering on a frozen game and the numbers look healthy: `performance` reports a plausible FPS for a tree that is not stepping (it now says `TREE IS PAUSED` first, but a run that reads only the exit code will not see it), `validate-all` passes, `screenshot` captures a still frame, and every Phase 4 assertion about a tween, a timer or a `queue_free` fails for a reason that has nothing to do with the diff. This is the common case for a project that boots behind a title screen with `get_tree().paused = true` and has no `entry_hook` — the pause is exactly what the hook exists to undo, so an empty hook plus a paused tree means the config is **incomplete**, not that the game is fine. Set `entry_hook` to the menu's own start handler and re-launch (it fires automatically), or call `unpause` directly if the project has no such handler; do not carry a paused tree into Phase 3.
 
 ### Named entry points (diff-aware)
 
@@ -374,7 +374,13 @@ A single `entry_hook` reaches only the default playable scene, so a change to a 
 }
 ```
 
-Selection: after reading the diff (Phase 4 Step 1), if any changed path contains one of an entry point's `match` substrings, use that entry point instead of the default `entry_hook` — load its `scene` (`cmd start_game --args '{"scene": "..."}'` or the project's own scene-loading verb, discovered via `list-commands`), then call its `node_path`/`method`. If several match, run the phase once per matching entry point. If none match, use the default `entry_hook`.
+Selection: after reading the diff (Phase 4 Step 1), if any changed path contains one of an entry point's `match` substrings, use that entry point instead of the default `entry_hook`:
+
+```bash
+"$PY" tools/devtools.py fire-entry-point boss
+```
+
+`fire-entry-point NAME` (0.30.0) is generic — it switches to `scene` first if one is configured and the current scene differs (polling for the target node, since a scene change is deferred to the end of the frame), then calls `node_path`/`method` with `args` and reports the method's own return value. Refuses by name when `NAME` is not in `entry_points`, or when `node_path`/`method` cannot be resolved — never silent. If several entry points match, run the phase once per matching one. If none match, use the default `entry_hook` (already fired automatically at launch — check `ping`'s `entry_hook_status` rather than re-firing it).
 
 Note the difference from `entry_hook`: reaching a scene is rarely enough. A boss room that loads with the boss hidden until an intro sequence runs is *not* in a testable state — the entry point's `method` must be whatever the game itself calls to actually start the encounter. If a changed script has no reachable entry point, say so explicitly in the summary rather than reporting the change as verified.
 

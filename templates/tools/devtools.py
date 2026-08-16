@@ -89,11 +89,11 @@ from pathlib import Path
 from typing import Optional  # noqa: F401
 
 
-# harness-version: 0.29.0
+# harness-version: 0.30.0
 # Version of the godot-selftest-harness this client was copied from. Compared against
 # the running game's own stamp by the `harness-version` verb, so a half-refreshed
 # install (new client, old autoload) is visible instead of mysterious.
-HARNESS_VERSION = "0.29.0"
+HARNESS_VERSION = "0.30.0"
 
 COMMANDS_FILE = "devtools_commands.json"
 RESULTS_FILE = "devtools_results.json"
@@ -1347,7 +1347,10 @@ def cmd_performance(args, project_path: Path):
         # Lead with the fact rather than burying it after the metrics.
         if data.get("tree_paused"):
             print("TREE IS PAUSED - every number below describes a game that is not "
-                  "stepping. Unpause (or set entry_hook) before reading these as health.")
+                  "stepping. Call `unpause` if you paused it yourself, or set "
+                  "entry_hook in devtools_config.json to advance past a menu/title "
+                  "screen automatically on launch - check `ping`'s entry_hook_status "
+                  "if you already did and it is still paused.")
         elif "tree_paused" not in data:
             print("performance: the reply carried no 'tree_paused' key (installed harness "
                   "older than this client); whether the tree is paused is UNKNOWN - "
@@ -1683,6 +1686,18 @@ def cmd_ping(args, project_path: Path):
                     print(f"  WARNING: the answering game runs from {data['project_path']}, "
                           f"NOT {os.path.abspath(str(project_path))} - a different checkout "
                           "(git worktree?) is on this bus")
+            # gh#29: entry_hook must never again accept a value and do nothing -
+            # "not_configured" is silent on purpose (the common, correct case);
+            # anything else is worth a line, success included, since "fired" is
+            # the caller's confirmation the config actually did something.
+            hook_status = data.get("entry_hook_status")
+            if hook_status and hook_status != "not_configured":
+                if hook_status == "fired":
+                    result_val = data.get("entry_hook_result")
+                    suffix = f" -> {result_val}" if result_val is not None else ""
+                    print(f"  entry_hook: fired{suffix}")
+                else:
+                    print(f"  WARNING: entry_hook {hook_status}")
         else:
             print("DevTools responded but with error")
             sys.exit(1)
@@ -2389,6 +2404,24 @@ def cmd_look_at(args, project_path: Path):
     result = send_command(project_path, "look_at", cmd_args)
     if result["success"]:
         print(result["message"])
+    else:
+        print(f"Failed: {result['message']}", file=sys.stderr)
+        sys.exit(1)
+
+
+def cmd_fire_entry_point(args, project_path: Path):
+    """Fire a named entry_points entry from devtools_config.json (gh#29).
+
+    45s, not the usual 30: a scene-changing entry point polls for its node up to
+    ENTRY_HOOK_TIMEOUT_SEC (10s) game-side on top of however long the scene itself
+    takes to load.
+    """
+    result = send_command(project_path, "fire_entry_point", {"name": args.name}, timeout=45.0)
+    if result["success"]:
+        print(result["message"])
+        data = result.get("data") or {}
+        if data.get("scene_changed"):
+            print(f"  scene changed to reach {data.get('node_path')}")
     else:
         print(f"Failed: {result['message']}", file=sys.stderr)
         sys.exit(1)
@@ -4278,6 +4311,13 @@ def main():
     p.add_argument("--up", type=coord_2_or_3, metavar="X,Y,Z",
                    help="Up vector (default 0,1,0)")
     p.set_defaults(func=cmd_look_at)
+
+    # fire-entry-point
+    p = subparsers.add_parser(
+        "fire-entry-point",
+        help="Fire a named entry_points entry from devtools_config.json")
+    p.add_argument("name", help="Key under entry_points in devtools_config.json")
+    p.set_defaults(func=cmd_fire_entry_point)
 
     args = parser.parse_args(_glue_leading_dash_values(sys.argv[1:]))
 
