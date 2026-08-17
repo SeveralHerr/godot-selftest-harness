@@ -529,6 +529,15 @@ def stage_assemble(scratch, user_dir_name):
         "\tbutton.size = Vector2(160, 56)",
         "\tbutton.pressed.connect(_on_go)",
         "\tadd_child(button)",
+        "\t# Stage 5b (windowed): a rect of one known colour, far from everything else,",
+        "\t# so sample_pixels --expect has a planted colour to find and a planted one to miss.",
+        "\tvar swatch := ColorRect.new()",
+        '\tswatch.name = "Swatch"',
+        "\tswatch.color = Color(\"3fa7d6\")",
+        "\tswatch.position = Vector2(900, 520)",
+        "\tswatch.size = Vector2(40, 40)",
+        "\tswatch.mouse_filter = Control.MOUSE_FILTER_IGNORE",
+        "\tadd_child(swatch)",
         "\tvar sprite := Sprite2D.new()",
         '\tsprite.name = "Blip"',
         "\tvar sprite_image := Image.create_empty(8, 8, false, Image.FORMAT_RGBA8)",
@@ -3986,6 +3995,75 @@ class _StageDone(Exception):
     """--stage 2.5 stops before --import; raised to reach the shared cleanup."""
 
 
+def stage_windowed(godot, scratch):
+    """Stage 5b (0.51.0, bead az2): the framebuffer verbs, under the gate.
+
+    Stage 5 is headless and has no framebuffer, so `sample_pixels --expect`'s counting
+    (0.49.0) was proved by a hand-run windowed probe. This launches the scratch game
+    WITH a window, samples the planted 40x40 #3fa7d6 swatch (present) and #ff00ff
+    (absent), reads two named points, and quits. Needs a display: where the window
+    cannot open it reports SKIPPED, exactly like the windowed capture stage.
+    """
+    client = load_client(scratch)
+    out_log = scratch / "game_windowed_stdout.log"
+    err_log = scratch / "game_windowed_stderr.log"
+    try:
+        proc = subprocess.Popen(
+            [str(godot), "--path", str(scratch), "--position", "0,0"],
+            stdout=out_log.open("w", encoding="utf-8"),
+            stderr=err_log.open("w", encoding="utf-8"))
+    except OSError as exc:
+        print("stage 5b windowed: SKIPPED (could not start a windowed Godot: %s)" % exc)
+        return True
+    ok = True
+    try:
+        time.sleep(1.5)
+        if proc.poll() is not None:
+            print("stage 5b windowed: SKIPPED (windowed Godot exited %s at once - no display?)"
+                  % proc.returncode)
+            return True
+        try:
+            wait_for_ping(client, scratch)
+        except RuntimeError as exc:
+            print("stage 5b windowed: SKIPPED (bridge never answered: %s)" % exc)
+            return True
+        time.sleep(1.0)  # a couple of frames so the swatch has been drawn
+        reply = client.send_command(scratch, "sample_pixels",
+                                    {"rect": [900, 520, 40, 40], "expect": ["3fa7d6", "ff00ff"],
+                                     "tolerance": 8}, timeout=15.0)
+        d = reply.get("data") or {}
+        if not reply.get("success"):
+            return fail("stage 5b: sample_pixels over the planted swatch failed: %s" % reply.get("message"))
+        exp = {e.get("color"): e for e in (d.get("expected") or [])}
+        if "3fa7d6" not in exp or exp["3fa7d6"].get("count", 0) < 800 or exp["3fa7d6"].get("absent"):
+            return fail("stage 5b: the planted #3fa7d6 swatch must be found in most of its own 1600 px, "
+                        "got %r (message: %s)" % (exp.get("3fa7d6"), reply.get("message")))
+        if "ff00ff" not in exp or not exp["ff00ff"].get("absent") or exp["ff00ff"].get("count") != 0:
+            return fail("stage 5b: #ff00ff was never drawn and must read ABSENT, got %r" % exp.get("ff00ff"))
+        if d.get("absent") is not True:
+            return fail("stage 5b: data.absent must be True when one expected colour is missing")
+        pts = client.send_command(scratch, "sample_pixels",
+                                  {"points": [[920, 540], [5, 5]], "expect": ["3fa7d6"]}, timeout=15.0)
+        pd = pts.get("data") or {}
+        got = pd.get("points") or []
+        if len(got) != 2 or (pd.get("expected") or [{}])[0].get("count") != 1:
+            return fail("stage 5b: two named points, exactly one inside the swatch, got points=%r expected=%r"
+                        % (got, pd.get("expected")))
+        print("stage 5b windowed: sample_pixels found the planted #3fa7d6 swatch (%d of 1600 px), "
+              "#ff00ff ABSENT, points read (%s, %s)" % (
+                  exp["3fa7d6"]["count"], got[0].get("color"), got[1].get("color")))
+    finally:
+        try:
+            client.send_command(scratch, "quit", {}, timeout=5.0)
+        except Exception:
+            pass
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+    return ok
+
+
 def stage_bridge(godot, scratch, full):
     client = load_client(scratch)
     out_log = scratch / "game_stdout.log"
@@ -4196,6 +4274,8 @@ def main():
             ok = stage_runners(godot, scratch) and ok
         if only in (None, "5"):
             ok = stage_bridge(godot, scratch, args.full) and ok
+        if only in (None, "5"):
+            ok = stage_windowed(godot, scratch) and ok
     except _StageDone:
         pass
     finally:

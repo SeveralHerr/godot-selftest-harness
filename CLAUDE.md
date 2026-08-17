@@ -88,6 +88,11 @@ files; the extension loads last so a project can override a generic verb.
    `validate_ui` baseline round-trip against **planted** UI defects and pauses a real
    tree, because both of those pass trivially against an implementation that does
    nothing.
+5b. Launch it again **with a window** (0.51.0) and drive the framebuffer verbs —
+   `sample_pixels --expect` against a planted 40×40 `#3fa7d6` swatch (present) and
+   `#ff00ff` (absent), two named points — then quit. Needs a display; where the window
+   cannot open it prints SKIPPED, like the windowed capture stage. Before this, a verb
+   that needs a framebuffer could only have its *argument contract* proved by the gate.
 
 **Every stage must plant the defect it claims to detect** ([H-035]). This has now caught
 three checks that reported clean while doing nothing — `name_check.py`'s string-literal
