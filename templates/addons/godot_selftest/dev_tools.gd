@@ -14,14 +14,14 @@ extends Node
 ## extension loads AFTER the generic handlers, a project may override a generic
 ## verb by registering the same action string (last-writer-wins).
 
-# harness-version: 0.44.0
+# harness-version: 0.45.0
 # --- Constants ---
 
 ## Version of the godot-selftest-harness these files were copied from. Reported by the
 ## `harness_version` verb and stamped into every copied tool script, so a gap logged
 ## against a project can name the version it was seen on, and a refresh can tell a
 ## stale file from a customized one. Bump with .claude-plugin/plugin.json.
-const HARNESS_VERSION: String = "0.44.0"
+const HARNESS_VERSION: String = "0.45.0"
 
 ## Default bus filenames. With a session id (see _resolve_session) the id is spliced in
 ## before the extension, so two instances can each own a bus in the same user:// dir.
@@ -3542,13 +3542,16 @@ func _cmd_validate_ui(args: Dictionary) -> Dictionary:
 ## Returns { in_use, written, path, new_count, pre_existing_count }, and stamps
 ## each issue with "baseline": "new" | "pre_existing".
 func _apply_ui_baseline(issues: Array, args: Dictionary,
-		path: String = "user://ui_findings_baseline.json") -> Dictionary:
-	# Plain user://, like the layout baseline next door: a findings baseline is a
-	# property of the project, not of one bus session, so N sessions share it.
-	# `path` is a parameter since 0.40.0 (gh#41): the signal_unconnected check
-	# keeps its own file, keyed on (script, signal) rather than a node path.
+		name: String = "ui_findings_baseline.json") -> Dictionary:
+	# `name` (a bare file name since 0.45.0, gh#48 / moving-in:G-066; a `user://`
+	# path since 0.40.0 for the signal check) resolves through _baseline_file():
+	# the project's `.devtools/` first - committable, so an accepted baseline
+	# travels to a clone, a second developer and CI, where `user://` did not - then
+	# the legacy `user://` copy so every existing install still reads its own.
+	# Writes go to `.devtools/` unless `baseline_dir` says otherwise.
 	var write_mode: bool = bool(args.get("baseline_write", false))
 	var use: bool = bool(args.get("use_baseline", true))
+	var path: String = _baseline_file(name.get_file(), args, write_mode)
 
 	if write_mode:
 		var keys: Array = []
@@ -3556,6 +3559,11 @@ func _apply_ui_baseline(issues: Array, args: Dictionary,
 			keys.append(_ui_finding_key(issue))
 			issue["baseline"] = "pre_existing"
 		var file: FileAccess = FileAccess.open(path, FileAccess.WRITE)
+		if file == null and path.begins_with("res://"):
+			# An exported build's res:// is read-only; fall back to user:// and say so
+			# in the path the reply carries.
+			path = "user://" + name.get_file()
+			file = FileAccess.open(path, FileAccess.WRITE)
 		if file == null:
 			return {
 				"in_use": false, "written": false, "path": path,
@@ -3607,6 +3615,31 @@ func _apply_ui_baseline(issues: Array, args: Dictionary,
 		"in_use": in_use, "written": false, "path": path,
 		"new_count": new_count, "pre_existing_count": pre_existing,
 	}
+
+
+## Where a findings baseline lives (gh#48 / moving-in:G-066, 0.45.0). `args.baseline_dir`
+## (a `res://`-relative directory such as ".devtools", or an absolute/`user://` path)
+## pins it; otherwise reads prefer `res://.devtools/<name>` and fall back to the
+## legacy `user://<name>`, and writes go to `res://.devtools/<name>` (created on
+## demand). The verdict of an adjudication belongs where the evidence lives - in
+## the repo - or a fresh clone sees eleven accepted findings as eleven new ones.
+func _baseline_file(name: String, args: Dictionary, write_mode: bool) -> String:
+	var dir_arg: String = str(args.get("baseline_dir", ""))
+	if not dir_arg.is_empty():
+		var dir_path: String = dir_arg
+		if not (dir_path.begins_with("res://") or dir_path.begins_with("user://") or dir_path.is_absolute_path()):
+			dir_path = "res://" + dir_path.trim_prefix("./")
+		if write_mode:
+			DirAccess.make_dir_recursive_absolute(dir_path)
+		return dir_path.path_join(name)
+	var repo_path: String = "res://.devtools/" + name
+	var legacy: String = "user://" + name
+	if write_mode:
+		DirAccess.make_dir_recursive_absolute("res://.devtools")
+		return repo_path
+	if FileAccess.file_exists(repo_path):
+		return repo_path
+	return legacy
 
 
 ## Stable identity of a UI finding: the rule that fired and the node it fired
@@ -6043,6 +6076,8 @@ func _cmd_findings(args: Dictionary) -> Dictionary:
 			ui_args["baseline_write"] = bool(args["baseline_write"])
 		if args.has("use_baseline"):
 			ui_args["use_baseline"] = bool(args["use_baseline"])
+		if args.has("baseline_dir"):
+			ui_args["baseline_dir"] = str(args["baseline_dir"])
 		var ui: Dictionary = _cmd_validate_ui(ui_args)
 		var ui_data: Dictionary = ui.get("data", {})
 		baseline_in_use = bool(ui_data.get("baseline_in_use", false))
@@ -6132,8 +6167,10 @@ func _cmd_findings(args: Dictionary) -> Dictionary:
 		sig_args["baseline_write"] = bool(args["baseline_write"])
 	if args.has("use_baseline"):
 		sig_args["use_baseline"] = bool(args["use_baseline"])
+	if args.has("baseline_dir"):
+		sig_args["baseline_dir"] = str(args["baseline_dir"])
 	var sig_base: Dictionary = _apply_ui_baseline(signal_issues, sig_args,
-		"user://signal_findings_baseline.json")
+		"signal_findings_baseline.json")
 	var signal_baseline_in_use: bool = bool(sig_base.get("in_use", false))
 	var signal_new: int = 0
 	var signal_pre: int = 0

@@ -7864,7 +7864,7 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   Both halves of the information were present in the same invocation and never met. `tier`,
   `phases` and `notes` were dropped the same way. The warning is good and it is what made
   me look; what it cannot do is say *you supplied this under the wrong name*.
-  - [plant-tower-defense:G-058] status: fixed | fixed-in: 0.44.0 | seen: 1 | harness: 0.38.0 | source: plant-tower-defense 2026-08-17 | dup-of: gh#46
+  - [plant-tower-defense:G-058] status: fixed | fixed-in: 0.44.0 | seen: 2 | harness: 0.38.0 | source: plant-tower-defense 2026-08-17 | dup-of: gh#46
   - Process note, recorded because it nearly cost something: I wrote the issue's
     Environment line claiming the code was unchanged at 0.42.0 BEFORE checking it,
     then checked. It holds (`checks = run.get("checks") or []` at 0.42.0:1031, and
@@ -7924,3 +7924,107 @@ suspect case; a `--dry-run` for `record`; the bus-side beads (unchanged).
 `check_templates.py` — OK, all stages (`dev_tools.gd` stamp-only since 0.43.0's
 `--full`). `run_tests.gd` unchanged this tick, so no real-suite run (per CLAUDE.md the
 rule is for changes around/between tests).
+
+## 2026-08-17 - Upstreamed 2 open gap(s) from moving-in (harness 0.43.0)
+
+Pooled by `tools/upstream_gaps.py` from `C:\Users\gotmi\Documents\GitHub\moving-in\log-devtools.md`. Gap text is the project's,
+verbatim; only the id line is rewritten (qualified with the project name so
+ids from two projects cannot collide, plus a `source:` back-pointer).
+
+- Gap: **`upstream_gaps.py` mints a new id for a repeat sighting that names its own id.**
+  ```
+  $ python tools/upstream_gaps.py log-devtools.md --into /tmp/sink.md
+    + moving-in:auto-04954d appended      <- `aabb ...` (no id line: correct to mint)
+    + moving-in:auto-674313 appended      <- `**[G-021] performance reports one ...**`
+    + moving-in:auto-30e69f appended      <- `**[G-024] the bridge cannot pin the camera ...**`
+    + moving-in:auto-ec6688 appended      <- `**[G-025] every engine-side gate ...**`
+    + moving-in:auto-3fdcfc appended      <- `**[G-025] ...**` again, same id, second sighting
+    + moving-in:auto-aeb2e8 appended      <- `**[G-044] again**`
+    - G-002 (status: fixed) skipped
+  ```
+  Four of those five carry a `[G-NNN]` in the Gap title and a `status:` on the wrapped
+  continuation line; the parser only reads `- [G-NNN] status:` as its own list item. Two of
+  them are the SAME gap (`G-025`, seen 2 and seen 3) and got different auto ids, so the
+  dedupe the tool advertises — "deduped by id, re-running is a no-op" — silently does not
+  apply to the entries most likely to matter, which are the ones seen more than once.
+  - [moving-in:G-065] status: fixed | fixed-in: 0.45.0 | seen: 1 | harness: 0.43.0 | source: moving-in 2026-08-17 | dup-of: gh#47
+  - Improvement: fall back to a `\[G-\d{3}\]` match anywhere in the gap's first line before
+    minting an `auto-` id, and treat a `status:` found anywhere in the paragraph as the
+    entry's status. Both are one regex each, and either alone kills four of the five.
+    Failing that, the tool should say what it did — `minted auto-674313 (no id line found;
+    the title mentions G-021 — is that the same gap?)` — because the current output looks
+    identical whether it deduped correctly or not.
+
+- Gap: **`--baseline-write` puts the acceptance somewhere it cannot be committed.**
+  ```
+  $ python tools/devtools.py findings --no-scenes --baseline-write
+    Signal baseline: written to user://signal_findings_baseline.json - 11 pair(s) accepted.
+  $ python tools/devtools.py findings --no-scenes ; echo $?
+    0 finding(s) across 4 of 5 checks
+    0
+  $ git check-ignore -v .../app_userdata/moving-in/signal_findings_baseline.json
+    fatal: ... is outside repository
+  $ python tools/devtools.py findings --help | grep baseline
+    [--no-baseline] [--baseline-write]        # no path argument
+  ```
+  The gate is green **on this machine only**. A fresh clone, a second developer or CI sees
+  eleven findings again with no record that they were ever adjudicated — and the whole
+  point of an accepted baseline is that the adjudication is durable. Note the asymmetry
+  this creates: the *reasons* are versioned in the repo (`MULTIPLY_DECLARED`,
+  `FIRE_AND_FORGET`, both asserted total) and only the *acceptance* is not, so the
+  evidence survives and the verdict does not.
+  - [moving-in:G-066] status: fixed | fixed-in: 0.45.0 | seen: 1 | harness: 0.43.0 | source: moving-in 2026-08-17 | dup-of: gh#48
+  - Improvement: `--baseline-write [PATH]`, defaulting to `.devtools/` — which this
+    project already commits, for exactly this reason, since `verify-runs.jsonl` lives
+    there and the harness's own docs say to commit it. `lint_project.gd` already takes
+    `--baseline PATH` / `--baseline-write PATH`, so the flag shape exists one tool over;
+    this is making `findings` match its sibling rather than inventing anything.
+
+## 2026-08-17 — 0.45.0: loop tick thirteen — the first project on a current build, and what it found
+
+Reviewed: 13 open beads, two NEW issues (gh#47, gh#48), `PURPOSE.md`, both project logs.
+**moving-in refreshed 0.36.0 → 0.43.0 this tick** — the first sibling project on a
+build newer than 0.38.0 — and both issues came from that session running the tool as
+shipped. Its log also arrived with four `auto-` gaps that were not gaps: repeat sightings
+whose id sat in the Gap title. Pooling was rerun after the parser fix; the pooled log
+gained two real gaps (G-065, G-066), not six.
+
+- **[gh#47.2 / moving-in G-065 — fixed] `upstream_gaps.py` reads the id from the Gap
+  title and `status:` from the wrapped paragraph** before minting; the output says
+  `(id read from the Gap title)` / `(minted: no id anywhere in the entry)`. Re-pooling
+  the reporter's log: the four sightings resolved to G-021/G-024/G-025/G-044 (three
+  skipped as fixed, one already present) — verified against the earlier bogus run in
+  this same tick. Unit-tested.
+- **[gh#47.1 — addressed, and the report's premise corrected] `scaffold_install.py
+  version` and one version record.** The reporter inferred that running the loaded
+  0.33.0 body would have installed 0.33.0 over 0.36.0 "with no objection"; it would
+  not — `full` has refused `DOWNGRADE` (exit 2, nothing touched) since 0.33.0 itself
+  (gh#32, `da94ffe`), and I said so in the close rather than let a wrong premise stand.
+  What was real: two records of the project's version (config vs manifest) that could
+  drift, a manual pre-flight the doc presented as the only guard, and a command body
+  that never said its own version. Now `vendored_version` takes the newest of config /
+  manifest / stamps; `version` mode prints the transition, the body's own version and
+  the newest on the machine, exit 3 `STALE COMMAND BODY` when the loaded skill is
+  behind the cache; step 1.4b of the command runs it first; step 6 says the installer
+  refuses regardless.
+- **[gh#48 / moving-in G-066 — fixed] findings baselines live in the project's
+  `.devtools/`**, not `user://`: `--baseline-write` writes there (committable, like the
+  ledger), reads prefer it and fall back to the legacy `user://` copy, `--baseline-dir`
+  pins another, an exported build falls back to `user://` and the reply says so. Stage
+  5 asserts both baseline files land under the scratch project's `.devtools/`. The
+  reporter's asymmetry — "the evidence survives a clone and the verdict does not, which
+  is exactly backwards" — is the whole argument.
+
+**Distribution, again.** moving-in on 0.43.0 filed two issues in its first session on
+it; plant is still on 0.38.0. Every issue this week came from a session that had just
+refreshed or was about to. That is the pipeline working: a project that refreshes finds
+things a scratch project cannot. The cost is that they arrive as issues rather than as
+`--full` failures, and (H-070) the real-suite step that would move some of them earlier
+is still a bead.
+
+- Gap: no new gap this turn.
+
+**Validation run this turn:** `record_version.py --record` then `--check` OK at 0.45.0
+(14 files, 57 verbs + 60 CLI). `unittest discover -s tools` — 84 OK (2 new).
+`check_templates.py --full` — OK, all stages, `baseline lives at res://.devtools/ (committable)`, `stage 6 contract: 90/90`. `run_tests.gd` unchanged this tick (no
+real-suite run needed).

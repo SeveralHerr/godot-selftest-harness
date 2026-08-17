@@ -119,6 +119,43 @@ class GapsBySource(unittest.TestCase):
         self.assertEqual(upstream_gaps.gaps_by_source(text), {"gather": 2, "plant": 1, "harness": 1})
 
 
+class TitleEmbeddedIds(unittest.TestCase):
+    """gh#47.2 / moving-in:G-065: a repeat sighting carries its id in the Gap title and
+    its fields on the wrapped paragraph; that must not mint an auto- id."""
+    TEXT = ("## 2026-08-17 - t\n\n"
+            "- Gap: **[G-025] every engine-side gate claims the bus** - status: fixed (RECONCILED\n"
+            "  cycle 62) | **seen: 3** | harness: 0.16.0. Bit again this turn.\n"
+            "  - Improvement: unchanged.\n\n"
+            "- Gap: **[G-044] again** - status: open | seen: 2 | harness: 0.21.0\n"
+            "  - Improvement: still.\n\n"
+            "- Gap: **`aabb` reports nothing for lights** - no id anywhere.\n"
+            "  - Improvement: mint one.\n")
+
+    def test_title_id_and_inline_status_are_read(self):
+        gaps = {g["id"]: g for g in upstream_gaps.parse_gaps(self.TEXT)}
+        self.assertIn("G-025", gaps)
+        self.assertEqual(gaps["G-025"]["fields"]["status"], "fixed")
+        self.assertEqual(gaps["G-025"]["fields"]["seen"], "3")
+        self.assertIn("G-044", gaps)
+        self.assertEqual(gaps["G-044"]["fields"]["status"], "open")
+        self.assertEqual(gaps["G-044"]["fields"]["seen"], "2")
+        minted = [g for g in gaps if g.startswith("auto-")]
+        self.assertEqual(len(minted), 1, gaps.keys())
+
+    def test_upstream_skips_the_fixed_sighting_and_names_the_title_read(self):
+        with tempfile.TemporaryDirectory() as td:
+            src = Path(td) / "log-devtools.md"
+            dst = Path(td) / "dest.md"
+            src.write_text(self.TEXT, encoding="utf-8")
+            dst.write_text("# dest\n", encoding="utf-8")
+            r = upstream_gaps.upstream(src, dst, "moving-in", False, False)
+            out = dst.read_text(encoding="utf-8")
+        self.assertTrue(any(a.startswith("moving-in:G-044 (id read from the Gap title)") for a in r["appended"]), r)
+        self.assertTrue(any("G-025" in sk for sk in r["skipped"]), r["skipped"])
+        self.assertIn("[moving-in:G-044] status: open | seen: 2 | harness: 0.21.0 | source: moving-in", out)
+        self.assertNotIn("moving-in:auto-", out.split("aabb")[0])
+
+
 class Triage(unittest.TestCase):
     """H-069: the pooled log's open set is listed by age, and only explicit ids move."""
     TEXT = ("- [gather:G-001] status: open | seen: 1 | harness: 0.8.0\n"

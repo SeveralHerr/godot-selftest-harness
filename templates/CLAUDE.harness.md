@@ -385,7 +385,8 @@ runtime, which the static checker cannot see) and `name_check_ignore` (path pref
   can read as reached having never run — prove it with `get-state`/`run-method`.
 - `findings`: `signal_unconnected` is one line per (script, signal) with a node count and
   has its own baseline (`findings --baseline-write` accepts a deliberately unconnected
-  signal once; only NEW pairs gate).
+  signal once; only NEW pairs gate). **Baselines are written to `.devtools/` — commit
+  them**; a `user://` baseline from an older install is still read.
 - `_T.assert_margin(values, threshold, margin, recorded)` gates a tuned constant on the
   corpus items sitting near it — use it instead of hand-rolling a sweep.
 - `run_tests.py` exits 2 on a results file two runs wrote (`Run: <id> pid N` brackets

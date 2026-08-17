@@ -58,6 +58,7 @@ import argparse
 import hashlib
 import importlib.util
 import json
+import os
 import re
 import shutil
 import sys
@@ -139,18 +140,82 @@ def vendored_version(project):
     by every config pass since 0.9.0); an older install without that record falls
     back to the `# harness-version:` stamp on the installed dev_tools.gd.
     """
+    # gh#47.1 (0.45.0): three records of the same fact, written by the same installer
+    # - the config's _scaffold_defaults, the manifest, and the stamps on the files.
+    # Take the NEWEST any of them names, so a project where one record lagged (a
+    # hand-copied file, a config a project reset) still refuses a downgrade against
+    # the version it actually runs. The manifest is what the command's own
+    # pre-flight reads; reading it here too is what makes the two agree by
+    # construction rather than by luck.
+    candidates = []
     cfg = load_json(project / CONFIG_REL, {}) or {}
     record = cfg.get(SCAFFOLD_DEFAULTS_KEY)
     if isinstance(record, dict) and _vtuple(record.get("harness_version")):
-        return str(record["harness_version"])
+        candidates.append(str(record["harness_version"]))
+    manifest = load_json(project / MANIFEST_REL, {}) or {}
+    if isinstance(manifest, dict) and _vtuple(manifest.get("harness_version")):
+        candidates.append(str(manifest["harness_version"]))
     for rel in ("addons/godot_selftest/dev_tools.gd", "tools/devtools.py"):
         try:
             m = _STAMP_RE.search((project / rel).read_text(encoding="utf-8", errors="replace"))
         except OSError:
             continue
         if m:
-            return m.group(1)
-    return None
+            candidates.append(m.group(1))
+    if not candidates:
+        return None
+    return max(candidates, key=_vtuple)
+
+
+def newest_harness_on_machine(plugin_root):
+    """(version, source) of the newest harness this machine holds, from the plugin
+    cache record and the marketplace clone (gh#47.1). The command body a session
+    loads is pinned at ONE version and interpolates every path from it; a body older
+    than the cache should say so before it touches anything."""
+    home = Path(os.environ.get("USERPROFILE") or os.environ.get("HOME") or Path.home())
+    plugins = home / ".claude" / "plugins"
+    found = []
+    try:
+        installed = json.loads((plugins / "installed_plugins.json").read_text(encoding="utf-8"))
+        for key, entries in (installed.get("plugins") or {}).items():
+            if key.startswith("godot-selftest-harness@"):
+                for e in entries or []:
+                    if _vtuple(e.get("version")):
+                        found.append((str(e["version"]), "plugin cache"))
+    except (OSError, ValueError, AttributeError):
+        pass
+    try:
+        mp = json.loads((plugins / "marketplaces" / "godot-selftest-harness" / ".claude-plugin"
+                         / "plugin.json").read_text(encoding="utf-8"))
+        if _vtuple(mp.get("version")):
+            found.append((str(mp["version"]), "marketplace clone"))
+    except (OSError, ValueError, AttributeError):
+        pass
+    if not found:
+        return None, None
+    return max(found, key=lambda vs: _vtuple(vs[0]))
+
+
+def report_version(plugin_root, project):
+    """`scaffold_install.py version`: the [version] line, plus whether the plugin root
+    this command runs from is itself behind the machine (gh#47.1). Exit 2 when the
+    root is older than what the project runs (a downgrade would be refused anyway),
+    exit 3 when the root is behind the newest on the machine (a stale command body:
+    update the plugin and restart before scaffolding), else 0."""
+    label, plugin_ver, project_ver, refused = version_transition(plugin_root, project, False)
+    newest, source = newest_harness_on_machine(plugin_root)
+    print("[version] this command body / plugin root: %s (%s)" % (plugin_ver, plugin_root))
+    if newest:
+        print("[version] newest harness on this machine: %s (%s)" % (newest, source))
+        if _vtuple(newest) > _vtuple(plugin_ver):
+            print("[version] STALE COMMAND BODY: this session loaded the %s skill but %s is on "
+                  "this machine. Every path in the loaded command interpolates the %s root - "
+                  "installing from it would land %s, not %s. Run `claude plugin update "
+                  "godot-selftest-harness@godot-selftest-harness`, RESTART the session, and "
+                  "re-run /scaffold-godot-harness." % (plugin_ver, newest, plugin_ver, plugin_ver, newest),
+                  file=sys.stderr)
+            return 3
+    return 2 if refused else 0
 
 
 def version_transition(plugin_root, project, allow_downgrade=False):
@@ -803,7 +868,7 @@ def parse_set(pairs):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("mode", choices=["full", "files", "config", "format-block"])
+    ap.add_argument("mode", choices=["full", "files", "config", "format-block", "version"])
     ap.add_argument("rels", nargs="*", metavar="REL",
                     help="files mode: template-relative paths to install")
     ap.add_argument("--project", required=True, help="Target Godot project root")
@@ -828,6 +893,8 @@ def main():
         print("error: no project.godot at %s" % project, file=sys.stderr)
         return 1
 
+    if args.mode == "version":
+        return report_version(plugin_root, project)
     if args.mode == "full":
         return install_full(plugin_root, project, parse_set(args.sets),
                             hook=not args.no_hook, hook_python=args.hook_python,

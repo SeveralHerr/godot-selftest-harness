@@ -2613,6 +2613,14 @@ def check_ui_baseline(client, scratch):
     wrote = call({"baseline_write": True})
     if not ((wrote.get("data") or {}).get("baseline_written") and wrote.get("success")):
         return fail("baseline_write: %r" % wrote.get("message"))
+    # gh#48 / moving-in:G-066 (0.45.0): the acceptance lands in the PROJECT
+    # (.devtools/, committable), not user://, and the reply names the path.
+    bp = str((wrote.get("data") or {}).get("baseline_path", ""))
+    if bp != "res://.devtools/ui_findings_baseline.json" \
+            or not (scratch / ".devtools" / "ui_findings_baseline.json").is_file():
+        return fail("baseline_write must land in the project's .devtools/ and say so: "
+                    "baseline_path=%r, file on disk=%s"
+                    % (bp, (scratch / ".devtools" / "ui_findings_baseline.json").is_file()))
 
     after = call()
     da = after["data"]
@@ -2658,7 +2666,7 @@ def check_ui_baseline(client, scratch):
                         {"node_path": "/root/Main", "method": "harness_rebuild_auto_rows",
                          "args": [0]}, timeout=15.0)
     print("stage 5 bridge: validate_ui baseline survives auto-name renumbering (0 NEW), and "
-          "one extra auto row is exactly 1 NEW")
+          "one extra auto row is exactly 1 NEW; baseline lives at res://.devtools/ (committable)")
 
     # The baseline stays written. The contract table's validate_ui row runs
     # after this and asserts the envelope only, precisely because success now
@@ -3349,6 +3357,10 @@ def check_signal_findings(client, scratch):
                     % d0.get("signal_baseline_in_use"))
     wrote = call({"baseline_write": True})
     dw = wrote.get("data") or {}
+    if str(dw.get("signal_baseline_path", "")) != "res://.devtools/signal_findings_baseline.json" \
+            or not (scratch / ".devtools" / "signal_findings_baseline.json").is_file():
+        return fail("the signal baseline must land in the project's .devtools/ (gh#48): "
+                    "path=%r" % dw.get("signal_baseline_path"))
     if not dw.get("signal_baseline_written") or dw.get("signal_pre_existing_count", 0) < 1:
         return fail("findings --baseline-write must write the signal baseline and count the "
                     "pair as accepted, got written=%r pre=%r"

@@ -89,11 +89,11 @@ from pathlib import Path
 from typing import Optional  # noqa: F401
 
 
-# harness-version: 0.44.0
+# harness-version: 0.45.0
 # Version of the godot-selftest-harness this client was copied from. Compared against
 # the running game's own stamp by the `harness-version` verb, so a half-refreshed
 # install (new client, old autoload) is visible instead of mysterious.
-HARNESS_VERSION = "0.44.0"
+HARNESS_VERSION = "0.45.0"
 
 COMMANDS_FILE = "devtools_commands.json"
 RESULTS_FILE = "devtools_results.json"
@@ -3358,6 +3358,8 @@ def cmd_findings(args, project_path: Path):
         cmd_args["use_baseline"] = False
     if getattr(args, "baseline_write", False):
         cmd_args["baseline_write"] = True
+    if getattr(args, "baseline_dir", None):
+        cmd_args["baseline_dir"] = args.baseline_dir
 
     # Scene validation loads every scene under scan_root; give it room.
     timeout = 30.0 if cmd_args.get("scenes") is False else 120.0
@@ -3457,6 +3459,9 @@ def cmd_findings(args, project_path: Path):
         # skipped. Advertising "run --baseline-write" here would be advice about
         # a check that did not happen.
         print("UI baseline: not consulted (the ui_layout check did not run).")
+    elif cmd_args.get("baseline_write") and data.get("baseline_path"):
+        print(f"UI baseline: written to {data['baseline_path']} - {data.get('pre_existing_count', 0)} "
+              "finding(s) accepted" + (" (under .devtools/: commit it)" if str(data["baseline_path"]).startswith("res://") else ""))
     elif data["baseline_in_use"]:
         print(f"UI baseline: {data['new_count']} NEW, {data['pre_existing_count']} "
               "pre-existing (excluded above). Only NEW ui_layout findings gate.")
@@ -3507,8 +3512,15 @@ def cmd_validate_ui(args, project_path: Path):
         cmd_args["baseline_write"] = True
     if getattr(args, "no_baseline", False):
         cmd_args["use_baseline"] = False
+    if getattr(args, "baseline_dir", None):
+        cmd_args["baseline_dir"] = args.baseline_dir
     result = send_command(project_path, "validate_ui", cmd_args)
     print_validation_result(result, geometry_verb="validate-ui")
+    bp = (result.get("data") or {}).get("baseline_path")
+    if bp and getattr(args, "baseline_write", False):
+        print(f"UI baseline: written to {bp}" + (" - commit it; the acceptance travels with the "
+              "repo (gh#48)" if str(bp).startswith("res://") else " (legacy user:// location; pass "
+              "--baseline-dir .devtools to make it committable)"))
 
 
 def cmd_save_ui_baseline(args, project_path: Path):
@@ -5043,8 +5055,13 @@ def main():
     p.add_argument("--no-baseline", action="store_true",
                    help="Ignore the saved UI findings baseline; every ui_layout finding gates")
     p.add_argument("--baseline-write", action="store_true",
-                   help="Record the current ui_layout findings as pre-existing; "
-                        "later runs gate only on NEW ones")
+                   help="Record the current ui_layout AND signal_unconnected findings as "
+                        "pre-existing; later runs gate only on NEW ones. Written under the "
+                        "project's .devtools/ (commit it - gh#48); an older user:// baseline "
+                        "is still read when no .devtools/ one exists")
+    p.add_argument("--baseline-dir", metavar="DIR", default=None,
+                   help="Where the baselines live (default: .devtools/, then legacy user://). "
+                        "A res://-relative dir, or a user:// / absolute path")
     p.add_argument("--json", "-j", action="store_true",
                    help="Print the full raw reply envelope")
     p.set_defaults(func=cmd_findings)
@@ -5058,6 +5075,8 @@ def main():
                         "gate only on NEW ones (mirrors lint_project.gd --baseline-write)")
     p.add_argument("--no-baseline", action="store_true",
                    help="Ignore the saved baseline and gate on every finding")
+    p.add_argument("--baseline-dir", metavar="DIR", default=None,
+                   help="Where the baseline lives (default: .devtools/, then legacy user://)")
     p.set_defaults(func=cmd_validate_ui)
 
     # save-ui-baseline

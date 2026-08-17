@@ -67,6 +67,24 @@ grep -n 'config/features' "$ROOT/project.godot" || echo "WARN: no config/feature
    If no Python is found, use the `cp`-based fallbacks noted in steps 3, 4 and 7 and
    say clearly in the summary which safeguards were skipped.
 
+4b. **Say which version this command body IS, before anything else (gh#47.1).** Every
+   path below interpolates `${CLAUDE_PLUGIN_ROOT}`, which is pinned at the version the
+   session loaded — and that can be older than the plugin cache (a session started
+   before `/plugin update`) or older than what the project already runs. Run the
+   installer's `version` mode and read its lines:
+
+   ```bash
+   "$PY" "${CLAUDE_PLUGIN_ROOT}/tools/scaffold_install.py" version --project "$ROOT"; echo "exit $?"
+   ```
+
+   It prints `[version] <fresh install | already at X | upgrade Y -> X | DOWNGRADE Y ->
+   X>`, then `this command body / plugin root: X`, then `newest harness on this
+   machine: Z`. **Exit 3 = STALE COMMAND BODY** (Z > X): stop, run `claude plugin update
+   godot-selftest-harness@godot-selftest-harness`, restart the session, re-invoke — a
+   `full` from this body would install X, not Z. **Exit 2 = DOWNGRADE**: `full` will
+   refuse it anyway (below); do not pass `--allow-downgrade` to get past it. Exit 0:
+   proceed.
+
 5. **On a refresh, work on a branch.** A re-scaffold rewrites a dozen files across
    the project. Landing that straight on the working branch means it gets discovered
    afterwards as unexplained churn in `git status` rather than read as a diff. So when
@@ -143,6 +161,14 @@ print('yes' if a < b else 'no')" 2>/dev/null)"
    Absent a manifest (fresh install) or an unreadable version on either side, this
    check has nothing to compare and is silently skipped — that is the normal case,
    not a failure. If it prints ABORT, stop: do not run step 3's installer.
+
+   **This pre-flight is a belt over the installer's braces, not the only guard**
+   (gh#47.1). `scaffold_install.py full` (and `files`) itself refuses `DOWNGRADE Y ->
+   X` with exit 2 and nothing touched, since 0.33.0 (gh#32); since 0.45.0 it reads the
+   project's version as the NEWEST of `_scaffold_defaults.harness_version`, this
+   manifest's `harness_version`, and the installed files' `# harness-version:` stamps,
+   so the two checks cannot disagree about which version the project runs. Step 1.4's
+   `version` mode is the same comparison, run first so the reader sees it before step 3.
 
 ## Step 2 — Parse project identity (for reporting only)
 
