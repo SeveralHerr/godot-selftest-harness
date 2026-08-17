@@ -112,6 +112,19 @@ sessions have converged on one checkout and edited it at once (H-061), so a rele
 re-reads `git status` immediately before it commits, and a fan-out never runs a
 repo-wide git command — untracked work has no copy anywhere else (H-052).
 
+**A verification run leaves the developer's state as it found it.** `--isolated`
+isolates the bus and only the bus; `user://` is the game's, and a verb that behaves
+correctly — `capture()` rebinding a key, `bank_score()` filing a run — persists there
+exactly as it should. Two projects on one day (gh#39, gh#40) had a live pass write the
+developer's real save that way and read the consequence twenty minutes later as
+unrelated headless failures; one had spent the previous cycle closing the *suite* half
+of the same hazard, and the bridge half structurally cannot be closed from test code.
+So the default is the safe one: `launch` copies the save aside and `quit` puts it back,
+and a run whose writes are the point opts out (`--no-snapshot-userstate`). The flag
+that only helps people who already know the hazard exists is a flag for the wrong
+population. The same rule reaches into the suite: a test that writes `user://` is
+named by `run_tests.gd`, per test, so the redirect can go where the write is.
+
 **Say it while it can still be acted on.** A report that arrives after the moment of
 choice is a post-mortem, and the harness has shipped several of those before noticing:
 `quit` said "this run wrote the developer's REAL user data — changed: highscore.save"

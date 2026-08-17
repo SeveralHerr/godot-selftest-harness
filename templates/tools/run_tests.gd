@@ -91,10 +91,10 @@ extends SceneTree
 ## (res://addons/godot_selftest/devtools_config.json key "test_dir", default
 ## "res://test/unit") for files named test_*.gd.
 
-# harness-version: 0.39.0
+# harness-version: 0.40.0
 ## Harness revision these files were copied from. See lint_project.gd / the
 ## `harness_version` bus verb; bump with .claude-plugin/plugin.json.
-const HARNESS_VERSION: String = "0.39.0"
+const HARNESS_VERSION: String = "0.40.0"
 
 const CONFIG_PATH: String = "res://addons/godot_selftest/devtools_config.json"
 const DEFAULT_TEST_DIR: String = "res://test/unit"
@@ -153,6 +153,16 @@ var _vacuous: int = 0
 ## lines read as one run with a contradiction in it. run_tests.py exits 2 when the
 ## output it captured carries more than one distinct `Run:` id.
 var _run_id: String = ""
+
+## gh#39 / plant-tower-defense:G-052: which TEST wrote user://. run_tests.py's
+## per-run diff said "highscore.save changed" and stopped there; recovering the
+## test cost a hand-instrumented _save() and a 535-test run. A stat + md5 of the
+## files under user:// per test method is cheap next to a scene instantiation.
+## Each entry: {file, test, script, kind: "content changed" | "rewritten identically"
+## | "created" | "deleted"}. Bridge files (devtools_*) are excluded.
+var _user_writes: Array[Dictionary] = []
+var _user_snapshot: Dictionary = {}
+const USER_WRITES_MAX_FILE_BYTES: int = 4 * 1024 * 1024
 
 
 func _initialize() -> void:
@@ -548,6 +558,8 @@ func _run_single_test(
 	if test_obj.has_method("setup"):
 		await test_obj.call("setup")
 
+	_user_snapshot = _user_files_snapshot()
+
 	# Recorded as a failure up front, so a test that never comes back (a runtime
 	# error aborts this function too) can never be silently missing from the tally.
 	var result: Dictionary = {
@@ -593,6 +605,68 @@ func _run_single_test(
 	if test_obj.has_method("teardown"):
 		await test_obj.call("teardown")
 
+	_attribute_user_writes(script_path, method_name)
+
+
+## {relative path: {"md5": String, "mtime": int}} for every regular file under
+## user:// (recursive, bridge files skipped, files over USER_WRITES_MAX_FILE_BYTES
+## recorded by mtime+size only).
+func _user_files_snapshot() -> Dictionary:
+	var out: Dictionary = {}
+	_walk_user_dir("user://", "", out)
+	return out
+
+
+func _walk_user_dir(abs_dir: String, rel_prefix: String, out: Dictionary) -> void:
+	var dir: DirAccess = DirAccess.open(abs_dir)
+	if dir == null:
+		return
+	dir.list_dir_begin()
+	var name: String = dir.get_next()
+	while name != "":
+		if name != "." and name != "..":
+			var rel: String = rel_prefix + name
+			var abs_path: String = abs_dir.path_join(name)
+			if dir.current_is_dir():
+				if not name.begins_with("."):
+					_walk_user_dir(abs_path, rel + "/", out)
+			elif not name.begins_with("devtools_") and name != "logs":
+				var size: int = 0
+				var f: FileAccess = FileAccess.open(abs_path, FileAccess.READ)
+				if f != null:
+					size = f.get_length()
+					f.close()
+				out[rel] = {
+					"mtime": FileAccess.get_modified_time(abs_path),
+					"size": size,
+					"md5": FileAccess.get_md5(abs_path) if size <= USER_WRITES_MAX_FILE_BYTES else "",
+				}
+		name = dir.get_next()
+	dir.list_dir_end()
+
+
+func _attribute_user_writes(script_path: String, method_name: String) -> void:
+	var after: Dictionary = _user_files_snapshot()
+	var before: Dictionary = _user_snapshot
+	for rel: Variant in after:
+		var kind: String = ""
+		if not before.has(rel):
+			kind = "created"
+		else:
+			var b: Dictionary = before[rel]
+			var a: Dictionary = after[rel]
+			if a["md5"] != b["md5"] or a["size"] != b["size"]:
+				kind = "content changed"
+			elif a["mtime"] != b["mtime"]:
+				kind = "rewritten identically"
+		if kind != "":
+			_user_writes.append({"file": str(rel), "test": method_name,
+				"script": script_path.get_file(), "kind": kind})
+	for rel: Variant in before:
+		if not after.has(rel):
+			_user_writes.append({"file": str(rel), "test": method_name,
+				"script": script_path.get_file(), "kind": "deleted"})
+
 
 func _print_results() -> void:
 	if _json_output:
@@ -600,6 +674,7 @@ func _print_results() -> void:
 			"harness_version": HARNESS_VERSION,
 			"run_id": _run_id,
 			"pid": OS.get_process_id(),
+			"user_writes": _user_writes,
 			"passed": _passed,
 			"failed": _failed,
 			"skipped": _skipped,
@@ -682,6 +757,22 @@ func _print_results() -> void:
 	# is the one a fresh session should read first: it says how much checking
 	# previous sessions left behind for this one to extend.
 	print("  Suite: %d test script(s) in %s" % [_test_files, _test_dir])
+	if not _user_writes.is_empty():
+		# gh#39: the test, not just the file. One line per (file, test); a suite
+		# whose write is unconditional over the developer's real save is named
+		# here, where the fix (a setup() redirect) is one hop away.
+		var by_file: Dictionary = {}
+		var order: Array = []
+		for w: Dictionary in _user_writes:
+			if not by_file.has(w["file"]):
+				by_file[w["file"]] = []
+				order.append(w["file"])
+			(by_file[w["file"]] as Array).append("%s (%s) [%s]" % [w["test"], w["script"], w["kind"]])
+		print("  user:// writes by test: %d write(s) to %d file(s)" % [_user_writes.size(), order.size()])
+		for file: String in order:
+			var writers: Array = by_file[file]
+			print("    %s <- %s%s" % [file, "; ".join(writers.slice(0, 6)),
+				" ; ... %d more" % (writers.size() - 6) if writers.size() > 6 else ""])
 	print("-" .repeat(60))
 
 	if _selection_error != "" and not _selected_load_failures.is_empty():
@@ -725,6 +816,18 @@ static func assert_eq(actual: Variant, expected: Variant, context: String = "") 
 	if actual == expected:
 		return ""
 	var msg: String = "Expected %s but got %s" % [str(expected), str(actual)]
+	if context != "":
+		msg = "%s: %s" % [context, msg]
+	return msg
+
+
+## gh#39 / plant-tower-defense:G-053: inequality - "did the guard actually move
+## this" - reported with the value, so the context need not carry it by hand.
+static func assert_ne(actual: Variant, unexpected: Variant, context: String = "") -> String:
+	_assertions_run += 1
+	if actual != unexpected:
+		return ""
+	var msg: String = "Expected anything but %s, got exactly that" % str(unexpected)
 	if context != "":
 		msg = "%s: %s" % [context, msg]
 	return msg

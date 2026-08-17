@@ -871,14 +871,30 @@ def stage_assemble(scratch, user_dir_name):
         '[gd_resource type="LabelSettings" format=3]\n\n[resource]\nfont_size = 11\n',
         encoding="utf-8")
 
+    # gh#41 / moving-in:G-062: one script, one unconnected signal, THREE instances.
+    # findings must report it once with nodes=3, not three times.
+    (scratch / "tools" / "harness_check_emitter.gd").write_text(
+        "extends Node2D\n\n## gh#41 fixture: declared, emitted by nothing here, connected by "
+        "nothing - instanced 3x in main.tscn.\nsignal harness_never_heard\n",
+        encoding="utf-8")
     (scratch / "main.tscn").write_text(
         "\n".join([
-            "[gd_scene load_steps=2 format=3]",
+            "[gd_scene load_steps=3 format=3]",
             "",
             '[ext_resource type="Script" path="res://tools/harness_check_fixture.gd" id="1_fixture"]',
+            '[ext_resource type="Script" path="res://tools/harness_check_emitter.gd" id="2_emitter"]',
             "",
             '[node name="Main" type="Node2D"]',
             'script = ExtResource("1_fixture")',
+            "",
+            '[node name="Emitter1" type="Node2D" parent="."]',
+            'script = ExtResource("2_emitter")',
+            "",
+            '[node name="Emitter2" type="Node2D" parent="."]',
+            'script = ExtResource("2_emitter")',
+            "",
+            '[node name="Emitter3" type="Node2D" parent="."]',
+            'script = ExtResource("2_emitter")',
             "",
         ]), encoding="utf-8")
     # Shader fixtures for the lint shader pass. All three shapes it claims to
@@ -1786,6 +1802,48 @@ def check_run_tests_py(godot, scratch):
     finally:
         box_test.unlink(missing_ok=True)
 
+    # gh#39 / plant-tower-defense:G-052 (0.40.0): the runner names the TEST that
+    # wrote user://. Plant one that writes a save and one that rewrites it
+    # identically; both must be attributed by name with the right kind. assert_ne
+    # rides along: it must FAIL on equal values naming the value.
+    uw_test = scratch / "test" / "unit" / "test_user_writes_control.gd"
+    uw_test.write_text(
+        "extends RefCounted\n"
+        "var _T\n"
+        "\n"
+        "func test_writes_a_save() -> String:\n"
+        "\tvar f: FileAccess = FileAccess.open(\"user://harness_check_write.save\", FileAccess.WRITE)\n"
+        "\tf.store_string(\"v1\")\n"
+        "\tf.close()\n"
+        "\treturn _T.assert_true(true)\n"
+        "\n"
+        "func test_rewrites_it_identically() -> String:\n"
+        "\tOS.delay_msec(1100)\n"
+        "\tvar f: FileAccess = FileAccess.open(\"user://harness_check_write.save\", FileAccess.WRITE)\n"
+        "\tf.store_string(\"v1\")\n"
+        "\tf.close()\n"
+        "\treturn _T.assert_true(true)\n"
+        "\n"
+        "func test_assert_ne_fails_on_equal_naming_the_value() -> String:\n"
+        "\tvar err: String = _T.assert_ne(\"user://highscore.save\", \"user://highscore.save\", \"guard\")\n"
+        "\tif err == \"\" or not err.contains(\"anything but user://highscore.save\"):\n"
+        "\t\treturn \"assert_ne must fail on equal values naming the value, got: \" + err\n"
+        "\treturn _T.assert_ne(1, 2)\n",
+        encoding="utf-8")
+    try:
+        uw = run_godot(godot, scratch,
+                       ["--script", "res://tools/run_tests.gd", "--", "--file", "test_user_writes_control"])
+        if uw.returncode != 0:
+            return fail("user-writes control suite must pass (exit %d):\n%s" % (uw.returncode, uw.stdout[-2000:]))
+        line = next((l for l in uw.stdout.splitlines() if "harness_check_write.save <-" in l), "")
+        if not line or "test_writes_a_save (test_user_writes_control.gd) [created]" not in line \
+                or "test_rewrites_it_identically (test_user_writes_control.gd) [rewritten identically]" not in line:
+            return fail("run_tests.gd must attribute the planted user:// write to its test by name "
+                        "and kind (created / rewritten identically); got %r in:\n%s"
+                        % (line, uw.stdout[-2000:]))
+    finally:
+        uw_test.unlink(missing_ok=True)
+
     # plant-tower-defense:G-049 (0.37.0): an argument the runner does not know must
     # be refused (exit 2, named), never silently run the whole suite as "(no selector)".
     unknown = run_godot(godot, scratch, ["--script", "res://tools/run_tests.gd", "--", "--select", "test_x"])
@@ -1843,7 +1901,9 @@ def check_run_tests_py(godot, scratch):
           "printed %r and said nothing under --filter; assert_margin passed the recorded "
           "set and refused a new near-the-line item; assert_box accepted a font-clamped "
           "Label and refused a moved one; quiesce() after hosting held at 0 ticks where "
-          "set_physics_process(false) before hosting was undone" % declared_line)
+          "set_physics_process(false) before hosting was undone; user:// writes attributed "
+          "to their test as [created] then [rewritten identically]; assert_ne named the value"
+          % declared_line)
     return True
 
 
@@ -3193,6 +3253,56 @@ def check_paused_bridge(client, scratch):
     return True
 
 
+def check_signal_findings(client, scratch):
+    """gh#41 / moving-in:G-062: signal_unconnected is one finding per (script,
+    signal) with a node count, and it has a baseline of its own.
+
+    Runs AFTER check_ui_baseline (findings --baseline-write also writes the UI
+    file, and that check needs a clean slate). The emitter fixture is instanced 3x
+    in main.tscn: pre-collapse this was three findings differing by a node index.
+    """
+    def call(args):
+        return client.send_command(scratch, "findings", dict(args, scenes=False), timeout=60.0)
+
+    def pair(d):
+        return [f for f in d.get("findings", []) if f.get("code") == "signal_unconnected"
+                and str(f.get("script", "")).endswith("harness_check_emitter.gd")
+                and f.get("signal") == "harness_never_heard"]
+
+    d0 = (call({"use_baseline": False}).get("data") or {})
+    hits = pair(d0)
+    if len(hits) != 1:
+        return fail("signal_unconnected must report the emitter's signal ONCE for 3 instances, "
+                    "got %d finding(s): %r" % (len(hits), [h.get("path") for h in hits]))
+    if hits[0].get("nodes") != 3 or len(hits[0].get("paths") or []) != 3 \
+            or "(3 node(s))" not in str(hits[0].get("message", "")):
+        return fail("the collapsed finding must carry nodes=3, three paths and say so in the "
+                    "message; got %r" % hits[0])
+    if "signal_baseline_in_use" not in d0 or d0.get("signal_baseline_in_use") is not False:
+        return fail("with --no-baseline the reply must say signal_baseline_in_use=False, got %r"
+                    % d0.get("signal_baseline_in_use"))
+    wrote = call({"baseline_write": True})
+    dw = wrote.get("data") or {}
+    if not dw.get("signal_baseline_written") or dw.get("signal_pre_existing_count", 0) < 1:
+        return fail("findings --baseline-write must write the signal baseline and count the "
+                    "pair as accepted, got written=%r pre=%r"
+                    % (dw.get("signal_baseline_written"), dw.get("signal_pre_existing_count")))
+    d1 = call({}).get("data") or {}
+    if pair(d1) or d1.get("signal_baseline_in_use") is not True \
+            or d1.get("signal_pre_existing_count", 0) < 1:
+        return fail("after --baseline-write the accepted pair must be pre-existing and excluded: "
+                    "in_use=%r pre=%r new=%r pair-still-listed=%r"
+                    % (d1.get("signal_baseline_in_use"), d1.get("signal_pre_existing_count"),
+                       d1.get("signal_new_count"), bool(pair(d1))))
+    d2 = call({"use_baseline": False}).get("data") or {}
+    if len(pair(d2)) != 1:
+        return fail("--no-baseline must re-report the accepted signal pair (got %d)" % len(pair(d2)))
+    print("stage 5 bridge: signal_unconnected collapsed 3 emitter instances to 1 finding "
+          "(nodes=3); its own baseline accepts the (script, signal) pair (pre=%d, excluded), "
+          "and --no-baseline re-reports it" % d1.get("signal_pre_existing_count", 0))
+    return True
+
+
 def check_pause_verb(client, scratch):
     """The generic `pause`/`unpause` verbs actually flip SceneTree.paused (gh#26).
 
@@ -3208,11 +3318,24 @@ def check_pause_verb(client, scratch):
         return client.send_command(scratch, action, args or {}, timeout=15.0)
 
     try:
+        # moving-in:G-061: plant one PROCESS_MODE_ALWAYS node (Emitter1 = 3), with
+        # Emitter2 left INHERIT under a PAUSABLE parent as the negative control.
+        planted = client.send_command(scratch, "set_state",
+                                      {"node_path": "/root/Main/Emitter1",
+                                       "property": "process_mode", "value": 3}, timeout=15.0)
+        if not planted.get("success"):
+            return fail("could not plant PROCESS_MODE_ALWAYS on Emitter1: %s" % planted.get("message"))
         r1 = call("pause")
         if not r1.get("success") or r1.get("data", {}).get("was_paused") is not False \
                 or r1.get("data", {}).get("paused") is not True:
             return fail("pause on an unpaused tree must succeed with was_paused=False, "
                         "paused=True, got %r" % r1)
+        d1 = r1.get("data", {})
+        if d1.get("always_count") != 1 or d1.get("always_roots") != ["/root/Main/Emitter1"] \
+                or "PROCESS_MODE_ALWAYS" not in str(r1.get("message", "")) \
+                or "set-game-speed" not in str(r1.get("message", "")):
+            return fail("pause must name the planted PROCESS_MODE_ALWAYS node (count 1, root "
+                        "/root/Main/Emitter1) and point at set-game-speed; got %r" % r1)
         if call("ping").get("data", {}).get("paused") is not True:
             return fail("ping must report paused=True after the `pause` verb")
         r2 = call("pause")  # idempotent: pausing an already-paused tree is not an error
@@ -3231,9 +3354,12 @@ def check_pause_verb(client, scratch):
             return fail("a second `unpause` call must still succeed, reporting "
                         "was_paused=False, got %r" % r4)
         print("stage 5 bridge: pause/unpause verbs flip SceneTree.paused directly "
-              "(ping reflects both transitions), idempotent both directions")
+              "(ping reflects both transitions), idempotent both directions; pause names "
+              "the 1 planted PROCESS_MODE_ALWAYS node and the set-game-speed way round it")
     finally:
         call("unpause")  # never leave the scratch project paused for a later check
+        client.send_command(scratch, "set_state", {"node_path": "/root/Main/Emitter1",
+                                                    "property": "process_mode", "value": 0}, timeout=15.0)
     return True
 
 
@@ -3731,6 +3857,10 @@ def check_deferred_client(client, scratch):
     return True
 
 
+class _StageDone(Exception):
+    """--stage 2.5 stops before --import; raised to reach the shared cleanup."""
+
+
 def stage_bridge(godot, scratch, full):
     client = load_client(scratch)
     out_log = scratch / "game_stdout.log"
@@ -3776,6 +3906,7 @@ def stage_bridge(godot, scratch, full):
         ok = check_panel_escape(client, scratch) and ok
         ok = check_geometry_caveat_and_hide(client, scratch) and ok
         ok = check_ui_baseline(client, scratch) and ok
+        ok = check_signal_findings(client, scratch) and ok
         ok = check_validator_reach(client, scratch) and ok
         ok = check_ping_project_path(client, scratch) and ok
         ok = check_performance_window_and_growth(client, scratch) and ok
@@ -3868,16 +3999,22 @@ def main():
                     help="run only stage 1 (no Godot needed)")
     ap.add_argument("--keep", action="store_true",
                     help="keep the scratch project and user dir for inspection")
+    ap.add_argument("--stage", choices=["1", "2.5", "3", "4", "5"], default=None,
+                    help="H-068: run ONE stage (2 assemble + --import always run first for "
+                         "3/4/5). A 4-line fix to one planted control used to cost a second "
+                         "~10-minute full run to prove. Default: every stage.")
     args = ap.parse_args()
+    only = args.stage
 
-    if not stage_static():
-        return 1
-    # Needs no Godot and no project, so it runs under --static-only too.
-    if not stage_reach():
-        return 1
-    if not stage_coverage():
-        return 1
-    if args.static_only:
+    if only in (None, "1"):
+        if not stage_static():
+            return 1
+        # Needs no Godot and no project, so it runs under --static-only too.
+        if not stage_reach():
+            return 1
+        if not stage_coverage():
+            return 1
+    if args.static_only or only == "1":
         return 0
 
     godot = resolve_godot(args.godot)
@@ -3898,7 +4035,10 @@ def main():
         ok = stage_assemble(scratch, user_dir_name) and ok
         # Before --import: name_check.py claims it needs no .godot/, and the only
         # honest way to check that is to run it on a project that has never had one.
-        ok = stage_names(scratch, godot, Path(tmp) / "api-cache") and ok
+        if only in (None, "2.5"):
+            ok = stage_names(scratch, godot, Path(tmp) / "api-cache") and ok
+        if only == "2.5":
+            raise _StageDone()
         # First import builds .godot/ so later runs resolve class caches.
         imp = run_godot(godot, scratch, ["--import"])
         cache = scratch / ".godot" / "global_script_class_cache.cfg"
@@ -3916,9 +4056,14 @@ def main():
             else:
                 print("note: --import exited %d but the class cache exists (often benign "
                       "on a bare project); output tail:\n%s" % (imp.returncode, tail or "(nothing)"))
-        ok = stage_parse(godot, scratch) and ok
-        ok = stage_runners(godot, scratch) and ok
-        ok = stage_bridge(godot, scratch, args.full) and ok
+        if only in (None, "3"):
+            ok = stage_parse(godot, scratch) and ok
+        if only in (None, "4"):
+            ok = stage_runners(godot, scratch) and ok
+        if only in (None, "5"):
+            ok = stage_bridge(godot, scratch, args.full) and ok
+    except _StageDone:
+        pass
     finally:
         if args.keep:
             print("kept: %s (user dir %s)" % (scratch, user_data_dir(user_dir_name)))

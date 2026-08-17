@@ -7350,7 +7350,7 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   sound, both being cumulative. But "138 file(s)" is five files credited 51+50+21+8+8
   times, and it cost this project a kanban entry, a todo item and a re-audit verdict —
   a subagent independently recomputed 138 and called the entry accurate.
-  - [moving-in:G-059] status: fixed | fixed-in: 0.39.0 | seen: 1 | harness: 0.36.0 | source: moving-in 2026-08-16
+  - [moving-in:G-059] status: fixed | fixed-in: 0.39.0 | seen: 2 | harness: 0.36.0 | source: moving-in 2026-08-16
   - Improvement: say both, e.g. *"138 alias credit(s) across 5 distinct file(s)"*. The
     caveat sentence is the good part and should stay; it is the noun that misleads.
 
@@ -7417,7 +7417,7 @@ about.
 - Gap: **`check_templates.py` has no way to run one stage.** The full run failed at the
   new stage-4 control, kept going through stage 5/6 (correctly), and the fix cost a
   second full run to prove — ~10 minutes for a 4-line change to one planted test.
-  - [H-068] status: open | seen: 1 | harness: 0.39.0
+  - [H-068] status: fixed | fixed-in: 0.40.0 | seen: 1 | harness: 0.39.0
   - Improvement: `--stage 4` (or `--only runners`) that assembles the scratch project
     and runs one stage; the assemble step is cheap and every stage already takes
     `(godot, scratch)`.
@@ -7427,3 +7427,185 @@ about.
 `unittest discover -s tools` — 66 OK (13 new). `check_templates.py --full` — first
 run FAILED at the new stage-4 control (`Expected 0 but got 1`, above), everything else
 green including `stage 6 contract: 90/90`; second run (control fixed) — OK, all stages, `Run: f819a3 pid 6204 brackets the output`, `assert_box accepted a font-clamped Label and refused a moved one; quiesce() after hosting held at 0 ticks where set_physics_process(false) before hosting was undone`.
+
+## 2026-08-16 - Upstreamed 3 open gap(s) from plant-tower-defense (harness 0.18.0, 0.19.0, 0.21.0, 0.23.0, 0.24.0, 0.25.0, 0.32.0, 0.33.0, 0.36.0, 0.38.0)
+
+Pooled by `tools/upstream_gaps.py` from `C:\Users\gotmi\Documents\GitHub\plant-tower-defense\log-devtools.md`. Gap text is the project's,
+verbatim; only the id line is rewritten (qualified with the project name so
+ids from two projects cannot collide, plus a `source:` back-pointer).
+
+- Gap: **the user:// reporter names the file the suite wrote and cannot name the test
+  that wrote it.** `user:// writes: 1 file(s) changed by the suite ... changed:
+  highscore.save` is exactly one bit more than "something happened", and recovering the
+  rest cost a hand-instrumented `_save()` and a full 535-test run. The machinery to do
+  better is already in `devtools.py` and already called by the wrapper —
+  `userstate_stat_take` / `userstate_stat_diff` are a snapshot and a diff, and
+  `run_tests.gd` already brackets every test method with setup/teardown.
+  - [plant-tower-defense:G-052] status: fixed | fixed-in: 0.40.0 | seen: 1 | harness: 0.38.0 | source: plant-tower-defense 2026-08-16
+  - Improvement: take the snapshot per test method rather than per run (it is a `stat`
+    of one directory, cheap next to a scene instantiation), and print
+    `user:// writes: highscore.save <- test_quitting_a_run_through_pause_still_files_the_score
+    (test_selftest.gd)`. Same check, same cost class, and it turns a cycle of
+    instrumentation into a line of output. Gate it behind a flag if the per-test stat is
+    unwelcome by default — the information is worth a `--trace-user-writes`.
+
+- Gap: **`_T` has no `assert_ne`.** Asserting "this path is NOT the player's save" — the
+  runtime half of this cycle's fix — has to be written
+  `_T.assert_false(a == b, "...%s...%s" % [a, b])`, and the message has to carry both
+  values by hand, because `assert_false` reports only `Expected false but got true`.
+  The helper set has `assert_eq`, `assert_true`, `assert_false`, `assert_float_eq`,
+  `assert_gt`, `assert_gte` and `assert_margin`; inequality is the obvious missing one,
+  and it is the shape every "did the guard actually move this" check wants.
+  - [plant-tower-defense:G-053] status: fixed | fixed-in: 0.40.0 | seen: 1 | harness: 0.38.0 | source: plant-tower-defense 2026-08-16
+  - Improvement: add `static func assert_ne(actual, unexpected, context := "") -> String`
+    beside `assert_eq` in `run_tests.gd`, reporting `Expected anything but <value>` and
+    printing the actual — six lines, and it removes the hand-formatted message that is
+    the only reason the failure above is readable.
+
+- Gap: **nothing stops a live bridge session persisting into the developer's `user://`,
+  and nothing tells you afterwards that it did.** `quit` names what the run changed —
+  and I did not read it, because the write happened many verbs earlier and the failure
+  surfaced twenty minutes later as five unrelated-looking test failures. The suite now
+  has `tools/save_persist_check.py` and per-script `setup()` redirects; the bridge has
+  neither and cannot have the second one.
+  - [plant-tower-defense:G-054] status: fixed | fixed-in: 0.40.0 | seen: 1 | harness: 0.38.0 | source: plant-tower-defense 2026-08-16
+  - Improvement: `launch --snapshot-userstate` already exists and makes `quit` restore
+    what the run changed. Make it **the default for `launch`**, with
+    `--no-snapshot-userstate` to opt out — a verification session that silently mutates
+    the developer's save is never what was wanted, and the flag only helps the people
+    who already know to look for it. Failing that, have `launch` print one line naming
+    the `user://` files it is prepared to see change, so the hazard is stated at the
+    moment the risk is taken rather than at `quit`, after the damage.
+
+## 2026-08-16 - Upstreamed 3 open gap(s) from moving-in (harness 0.11.0, 0.16.0, 0.19.0, 0.21.0, 0.33.0 (cache) / 0.31.0 (vendored), 0.36.0 (project) / 0.38.0 (cache))
+
+Pooled by `tools/upstream_gaps.py` from `C:\Users\gotmi\Documents\GitHub\moving-in\log-devtools.md`. Gap text is the project's,
+verbatim; only the id line is rewritten (qualified with the project name so
+ids from two projects cannot collide, plus a `source:` back-pointer).
+
+- Gap: **`reach` is file-level, and this run is the case that shows what that costs.**
+  `verify_ledger.py reach` printed
+  `worktree (this session's edits - the honest number): reached 1/1 changed file(s)` —
+  a clean 100% — for a run in which the lines I actually changed provably did not
+  execute. `_search_left: 12` is the proof: the game loaded `unpack_ui.gd`, so the file
+  counts as reached, while `_process()`'s body ran zero times. The ledger's whole
+  argument for reach is that it "says whether a run actually loaded the code it claimed
+  to verify rather than asking the run to grade itself", and at file granularity a 1/1
+  can mean the changed function never ran. I found this by hand, by reading a private
+  counter I happened to know was there.
+  - [moving-in:G-060] status: fixed | fixed-in: 0.40.0 | seen: 1 | harness: 0.36.0 (project) / 0.38.0 (cache) | source: moving-in 2026-08-16
+    RECONCILED cycle 38: still open upstream as #38, no release since. Unchanged.
+    Filed upstream as SeveralHerr/godot-selftest-harness#38 — re-verified against the
+    0.38.0 template first (`_reach_line()` line 1067, `split_reach()` line 615 both
+    still purely file-path), so it reproduces on current, not only on the vendored copy.
+    Noted while checking: #27 and #35 are both CLOSED now, contradicting cycle 33's
+    note that they were open/half-done.
+  - Improvement: intersect `git diff -U0`'s changed line ranges with the enclosing
+    `func` names, and have `reach` report a second line —
+    `functions: 0/1 changed function(s) observed executing` — as **advisory**, not a
+    gate. It cannot be computed from a scene tree alone, so the honest minimum is for
+    `reach` to say out loud that a reached FILE is not a reached CHANGE, the same way it
+    already distinguishes `reached_alias` from `reached`. Today nothing in the output
+    hints at the distinction, which is why a 1/1 reads as stronger evidence than it is.
+
+- Gap: **`pause` freezing nothing is undiscoverable until it wastes a run.** CLAUDE.md
+  recommends "poll for the moment, pause, then inspect at no rush", and `ping` prints
+  `tree is PAUSED (bridge still polling: PROCESS_MODE_ALWAYS)`. Both are true and neither
+  says the thing that matters: **any node the project set to `PROCESS_MODE_ALWAYS` keeps
+  animating**, which for a HUD — where `ALWAYS` is mandatory, or the pause menu cannot
+  draw itself — means pause freezes everything EXCEPT the thing being measured. Observed:
+  `RewardCard` read `visible: true`, then `visible: false` one command later, on a tree
+  that `ping` insisted was paused. That reads like a bus fault. The workaround was
+  `set-game-speed 0.01`, which is not mentioned near `pause` anywhere.
+  - [moving-in:G-061] status: fixed | fixed-in: 0.40.0 | seen: 1 | harness: 0.36.0 (project) / 0.38.0 (cache) | source: moving-in 2026-08-16
+    RECONCILED cycle 38: not filed upstream yet, by choice — still want a second
+    sighting before claiming the shape of the fix. `set-game-speed 0.01` has now
+    served as the workaround twice (cycles 35 and 37) without a third surprise, so
+    the workaround is at least stable.
+  - Improvement: have `pause` count the `PROCESS_MODE_ALWAYS` nodes under the configured
+    `hud_layer_name` and say so in its own reply — `paused; N node(s) under GameHud are
+    PROCESS_MODE_ALWAYS and keep animating (use set-game-speed 0.01 to slow them
+    instead)`. The information is one `get_tree()` walk away and it is only ever needed
+    at the moment `pause` is called.
+
+- Gap: **[G-062] — `findings` prints 57 lines for 11 facts, and the multiplicity is why
+  nobody read it.** Not a duplicate of #41's baseline argument; this is the cheaper half
+  and stands alone. `_collect_unconnected_signals` walks nodes, so a signal declared once
+  on a script instanced 24 times produces 24 findings whose text differs only by a node
+  index. The finding is about the SCRIPT, not the node.
+  - [moving-in:G-062] status: fixed | fixed-in: 0.40.0 | seen: 1 | harness: 0.36.0 (project) / 0.38.0 (cache) | source: moving-in 2026-08-16
+  - Improvement: collapse to one line per `(script, signal)` with a count —
+    `signal 'emptied' declared by unpack_box.gd is never connected (24 nodes)` — and keep
+    the paths in the JSON for anyone who wants them. Turns an unreadable 57 into a
+    readable 11 without changing what gates. Included as the fallback proposal in #41.
+
+## 2026-08-16 — 0.40.0: loop tick eight — four issues in an hour, all from the plant and moving-in sessions
+
+Reviewed: 15 open beads, four NEW issues (gh#38–#41, all filed in the hour after 0.39.0
+shipped, all against 0.38.0 caches), `PURPOSE.md`, and the two project logs (six new gaps
+pooled — plant G-052/G-053/G-054, moving-in G-060/G-061/G-062 — which are the same six
+facts as the four issues, so this tick reconciled them rather than counting them twice).
+Two independent sessions hit the developer's real `user://` from the bridge on the same
+day; that is the tick's headline, and it changed a default and `PURPOSE.md`.
+
+- **[gh#40 / plant G-054 — fixed] `launch` restores `user://*.save` on `quit` BY
+  DEFAULT.** 0.39.0 made the copy always-on and the restore opt-in; two reporters
+  said, correctly, that the flag only helps people who already know the hazard.
+  `--no-snapshot-userstate` keeps a run's writes; the launch line says `will be
+  RESTORED on quit`. Considered and rejected: leaving it opt-in with a louder line —
+  gh#40's own weaker proposal — because the line was already there (0.39.0) and the
+  reporter's session had it and still lost the save.
+- **[gh#39.1 / plant G-052 — fixed] `run_tests.gd` names the TEST that wrote
+  `user://`** — per-method stat+md5, `user:// writes by test:` after `Suite:`, with
+  `[content changed]` / `[rewritten identically]` / `[created]` / `[deleted]`; the same
+  distinction now on `quit`'s report (`highscore.save (rewritten identically - a writer
+  ran; the values matched)`). Stage 4 plants a writer and an identical rewriter and
+  asserts both attributions by name and kind.
+- **[gh#39.2 / plant G-053 — fixed] `_T.assert_ne`.** Stage 4 asserts it FAILS on equal
+  values naming the value.
+- **[gh#41 / moving-in G-062 — fixed] `signal_unconnected` is one finding per (script,
+  signal) with a node count, and has its own baseline** (`user://signal_findings_baseline.json`,
+  written by `findings --baseline-write`, keyed on the pair, not the path). 57 lines for
+  11 facts → 11 lines, and a deliberately-unconnected outward API is accepted once.
+  `_apply_ui_baseline` grew a `path` parameter rather than a second implementation.
+  Stage 5 instances one emitter script 3× and asserts 1 finding / nodes=3 / accept /
+  exclude / re-report. Client says `Signal baseline: …` beside `UI baseline: …` and
+  says "not reported" for a pre-0.40.0 game rather than guessing.
+- **[gh#38 / moving-in G-060 — fixed, the honest half] `reach` says `[file-level:
+  loaded, not lines-executed]` on the line and lists the changed functions in reached
+  files** (`git diff -U0` ∩ enclosing `func`; `<top-level>` for a const). Advisory,
+  never gating, never claims execution — the scene tree cannot see it. Rejected the
+  "observed executing" version for now: it needs a per-function signal the bridge does
+  not carry, and a line that says "0/1 observed" while observing nothing is the
+  overclaim PURPOSE forbids. `/verify` Phase 5 tells the session what to do instead
+  (`get-state` the state the change would have moved).
+- **[moving-in G-061 — fixed] `pause` names the `PROCESS_MODE_ALWAYS` nodes** that keep
+  processing (`data.always_count` / `always_roots`) and points at `set-game-speed 0.01`.
+  The reporter wanted a second sighting before proposing a shape; the data is a tree
+  walk and the message states a fact, not a hypothesis, so it shipped. Stage 5 plants
+  one ALWAYS node (`set_state process_mode=3`) and asserts count 1 and the path.
+- **[H-068 / gh#37 — fixed] `check_templates.py --stage {1,2.5,3,4,5}`.** Used the same
+  tick: the stage-4 user-writes control was proved in ~90 s instead of a second full run.
+- **PURPOSE.md gained "A verification run leaves the developer's state as it found it."**
+
+**Considered and not done:** the bus-side beads again (batch verb, wedged handler,
+verb-usage counts) — still no project evidence; per-function reach observation
+(above); a `--trace-user-writes` flag (gh#39 offered it as a fallback — the per-test
+stat is cheap enough to be always on, and an advisory that is opt-in is one nobody
+runs, per PURPOSE).
+
+- Gap: no new gap this turn. (The plant log's G-050b/G-051b "same id, different
+  evidence" pattern recurred — H-044 — and `upstream_gaps.py` handled it by suffix
+  again; the intake-side fix is still the open bead.)
+
+**Validation run this turn:** `record_version.py --record` then `--check` OK at 0.40.0
+(14 files, 57 verbs + 60 CLI). `unittest discover -s tools` — 69 OK (3 new: identical
+rewrite vs change; changed_functions names only the changed `func`s and `<top-level>`,
+skips an unchanged file, lists every func of an untracked one). `check_templates.py
+--full` — OK first run, all stages: `signal_unconnected collapsed 3 emitter instances to
+1 finding (nodes=3); its own baseline accepts the (script, signal) pair (pre=1,
+excluded), and --no-baseline re-reports it`; `pause names the 1 planted
+PROCESS_MODE_ALWAYS node and the set-game-speed way round it`; `stage 6 contract:
+90/90`. Then `--stage 4` for the user-writes/assert_ne control added after: OK,
+`user:// writes attributed to their test as [created] then [rewritten identically];
+assert_ne named the value`.
