@@ -144,8 +144,8 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
-# harness-version: 0.49.0
-HARNESS_VERSION = "0.49.0"
+# harness-version: 0.50.0
+HARNESS_VERSION = "0.50.0"
 
 LEDGER_PATH = Path(".devtools") / "verify-runs.jsonl"
 
@@ -153,8 +153,14 @@ LEDGER_PATH = Path(".devtools") / "verify-runs.jsonl"
 # ignored, by name, with the nearest known key. Keep this in step with cmd_record.
 RUN_JSON_KEYS = {
     "value", "verdict", "checks", "found", "expected", "cheaper_alternative",
-    "lint", "tests", "runtime", "duration_s", "harness", "kind",
+    "lint", "tests", "runtime", "duration_s", "harness", "kind", "tier",
 }
+# plant-tower-defense:G-060 (2nd sighting, 0.50.0): `tier` - which Phase 0.5 tier the
+# run took - is a field of its own on the row. A session wrote it into every run.json
+# and 0.44.0-0.49.0 read it nowhere (0.48.0 aliased it to `runtime`, which was wrong:
+# it is not runtime evidence, it is the triage decision). Free text, but these are
+# the names /verify uses; `stats` counts rows by it.
+TIERS = ("full", "headless-only", "lint-only", "nothing", "experiment", "tooling")
 # gh#50 (0.49.0): `kind: "experiment"` marks a run whose diff is its OUTPUT (a skill
 # doc, a REFERENCE correction, a gap report written FROM a live session), not its
 # subject. Reach is not expected of it - the changed file is not code the game loads
@@ -168,7 +174,7 @@ RUN_JSON_ALIASES = {"phase4": "checks", "phase_4": "checks", "evidence": "checks
                     # top-level keys - the real shape is nested (`lint: {...}`, `tests: {...}`)
                     "lint_exit": "lint", "lint_errors": "lint", "tests_exit": "tests",
                     "tests_total": "tests", "tests_failed": "tests", "tests_passed": "tests",
-                    "assertions": "tests", "runtime_exit": "runtime", "tier": "runtime"}
+                    "assertions": "tests", "runtime_exit": "runtime", "triage": "tier"}
 RUN_JSON_SCHEMA = """run.json keys `verify_ledger.py record --run` reads (everything else is
 reported as ignored and is NOT written to the row):
 
@@ -184,6 +190,8 @@ reported as ignored and is NOT written to the row):
   runtime              {"scene": ..., "fps": ..., ...}  (any JSON; entry_point dropped)
   duration_s           number
   harness              version string (default: this tool's)
+  tier                 which Phase 0.5 tier ran: full | headless-only | lint-only |
+                       nothing | experiment | tooling (free text; these are counted)
   kind                 verify (default) | experiment - the diff is the run's OUTPUT
                        (a doc, a recipe, a gap report written from the live game);
                        reach is recorded as not-applicable and never downgrades it
@@ -1214,6 +1222,7 @@ def cmd_record(args, root):
         "reach": reach_obj,
         # gh#50: verify (default) or experiment; absent on rows before 0.49.0.
         "kind": kind,
+        "tier": (str(run.get("tier")).strip() or None) if run.get("tier") is not None else None,
         "reach_note": ("experiment: the session produced the diff; reach is not applicable"
                        if kind == "experiment" and reach_obj is None else None),
     }
@@ -1446,6 +1455,7 @@ def cmd_stats(args, root):
     cheaper = []
     overkill_seconds = 0.0
     experiments = 0
+    tiers = {}
     reached_n = unreached_n = 0
     implicit_n = 0
     implicit_files = set()
@@ -1504,6 +1514,8 @@ def cmd_stats(args, root):
             overkill_seconds += row["duration_s"]
         if row.get("kind") == "experiment":
             experiments += 1
+        if row.get("tier"):
+            tiers[str(row["tier"])] = tiers.get(str(row["tier"]), 0) + 1
 
         reach = row.get("reach") or {}
         r, u = reach.get("reached"), reach.get("unreached")
@@ -1648,6 +1660,9 @@ def cmd_stats(args, root):
     if experiments:
         print("  experiments (kind=experiment, gh#50 - the diff was the run's output; "
               "reach not applicable): %d of %d" % (experiments, total))
+    if tiers:
+        print("  by Phase 0.5 tier (rows that recorded one): "
+              + ", ".join("%s %d" % kv for kv in sorted(tiers.items(), key=lambda kv: (-kv[1], kv[0]))))
 
     if cheaper:
         print("\nwhat would have been cheaper (most recent first):")

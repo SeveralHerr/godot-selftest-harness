@@ -8183,7 +8183,7 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   Following it literally would have discarded the finding that polling a short tween fails
   *silently*. And the case is one the harness's own workflow encourages: `log-devtools.md`
   asks every turn what was missing from the harness, and finding out usually means driving it.
-  - [plant-tower-defense:G-060] status: fixed | fixed-in: 0.49.0 | seen: 1 | harness: 0.38.0 | source: plant-tower-defense 2026-08-17 | dup-of: gh#50
+  - [plant-tower-defense:G-060] status: fixed | fixed-in: 0.49.0 (2nd sighting: project-owned tooling outside res:// -> tier (f) + `tier` stored on the row, 0.50.0) | seen: 2 | harness: 0.38.0 | source: plant-tower-defense 2026-08-17 | dup-of: gh#50
   - Improvement: a fifth row — tier (e) **Experiment**, reach not expected, ledger row written
     with `--no-reach` and `skipped: "experiment; the session produced the diff"`, verdict
     judged on what the session ESTABLISHED. Plus one line above the table: *classify by what
@@ -8223,3 +8223,31 @@ filing, both right.
 **Validation run this turn:** `record_version.py --record` then `--check` OK at 0.49.0
 (14 files, 58 verbs + 62 CLI). `unittest discover -s tools` — 88 OK (3 new).
 `check_templates.py --full` — OK, all stages, `stage 6 contract: 93/93` (two new sample_pixels argument rows). Live windowed probe as above.
+
+## 2026-08-17 — 0.50.0: loop tick eighteen — the tier that was written and never read
+
+Reviewed: 10 open beads, the tracker (0 open), `PURPOSE.md`, both project logs. Quiet
+except one second sighting — plant G-060 again, with two new facts: (1) the session had
+written `tier` into every `run.json` and the ledger read it nowhere — 0.48.0's alias to
+`runtime` was the wrong home; it is the triage decision, not runtime evidence — and (2)
+a `tools/run_json_check.py` the project ships fits no Phase 0.5 row at all, because the
+table assumes everything worth verifying is loaded by Godot. Also measured by the
+reporter: 26 of 86 historical rows carry `verdict: unknown` — the silent default that
+0.48.0's `read K of N keys` line now names.
+
+- **[plant G-060 (2nd) — fixed] `tier` is a stored row field** (`full | headless-only |
+  lint-only | nothing | experiment | tooling`); `stats` prints `by Phase 0.5 tier: …` —
+  the number that says how often the full run is the right call. **Tier (f)
+  Tooling-only** in `/verify`: run the project's own tool tests, record `tier: tooling`,
+  no Godot phase.
+
+**Considered and not done:** the windowed stage 5b for `check_templates` (suggested last
+tick; a quiet tick is the time, but it is a half-day, not an hour — bead filed); the
+gather triage session (bead 970).
+
+- Gap: no new gap this turn.
+
+**Validation run this turn:** `record_version.py --record` then `--check` OK at 0.50.0
+(14 files, 58 verbs + 62 CLI). `unittest discover -s tools` — 88 OK.
+`check_templates.py --static-only` — OK (only `verify_ledger.py` and docs changed under
+templates/; the reach/coverage stages that exercise the ledger ran).
