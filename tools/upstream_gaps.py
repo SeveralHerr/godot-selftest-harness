@@ -72,8 +72,8 @@ import re
 import sys
 from pathlib import Path
 
-# harness-version: 0.52.0
-HARNESS_VERSION = "0.52.0"
+# harness-version: 0.53.0
+HARNESS_VERSION = "0.53.0"
 
 DEFAULT_DEST = "log-devtools.md"
 
@@ -302,8 +302,16 @@ def triage(dest_text, older_than=15, current=None):
         hv = fields.get("harness", "")
         mv = _minor(hv)
         stale = bool(project) and mv is not None and cur is not None and cur - mv > older_than
+        # 0.53.0: the Gap title, so a triage session can decide without grepping.
+        title = ""
+        lines = dest_text.splitlines()
+        for back in range(i - 1, max(-1, i - 40), -1):
+            gm = _GAP_RE.match(lines[back])
+            if gm:
+                title = re.sub(r"^\s*-\s*Gap[^:]*:\s*", "", lines[back]).strip("* `").strip()
+                break
         out.append({"id": gid, "project": project or "harness", "harness": hv or "?",
-                    "seen": _seen(fields), "stale": stale, "line_no": i})
+                    "seen": _seen(fields), "stale": stale, "line_no": i, "title": title[:90]})
     return out
 
 
@@ -527,8 +535,8 @@ def main():
             print("%s: %d open, %d STALE (harness more than %d minor releases behind %s)"
                   % (proj, len(rs), stale_n, args.older_than, HARNESS_VERSION))
             for r in rs:
-                print("  %s %s  harness %s  seen %d" % (
-                    "STALE" if r["stale"] else "     ", r["id"], r["harness"], r["seen"]))
+                print("  %s %s  harness %s  seen %d  %s" % (
+                    "STALE" if r["stale"] else "     ", r["id"], r["harness"], r["seen"], r.get("title", "")))
         if args.mark_unverified:
             new_text, marked = mark_unverified(text, args.mark_unverified)
             missing = sorted(set(args.mark_unverified) - set(marked))
