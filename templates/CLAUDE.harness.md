@@ -173,6 +173,7 @@ listed is silently ignored; `--offline` parses the scripts statically with no ga
 | `press --node PATH` | Emit `pressed` on the nearest `BaseButton` at or under PATH — a real press with no screen coordinates to guess. A disabled button is reported, not silently "pressed" |
 | `input press`/`release`/`tap` ACTION, `input state [ACTION ...]` | Simulate input actions; `state` polls what the game is actually seeing. `tap` releases on the NEXT frame and reports `pressed_during`/`pressed_after` |
 | `screenshot [--region X,Y,W,H] [--hide NODE]` | Visual check only (`sleep 0.5`–`1` after a state change). Crop and hiding happen game-side, so a capture is reproducible |
+| `batch --json-items '[{"action":..,"args":{..}},..]'` | Several verbs in ONE round trip (a read-modify-read as one call); one line per item, `failed` by index, `--stop-on-error` to halt at the first failure. Project verbs and hyphenated names accepted; `quit`/`batch` refused inside |
 | `ping` / `quit [--kill]` | Confirm the bridge is live (reports `bus_dir`, `user_dir`, and `tree is PAUSED`; **the bridge answers while paused**, so pause menus are verifiable) / shut down, **exiting 1 if the process survived** — or if any earlier launch of this project is still alive (`.devtools/launched.jsonl`); `--kill` terminates exactly those pids, never by image name. On Windows the printed fallback is `Stop-Process -Force -Id` (PowerShell) — `taskkill /F` through Git-Bash becomes `F:/` and fails |
 
 Worth knowing exists, reach for `REFERENCE.md` when you need them — `validate-ui`,

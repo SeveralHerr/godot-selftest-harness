@@ -14,14 +14,14 @@ extends Node
 ## extension loads AFTER the generic handlers, a project may override a generic
 ## verb by registering the same action string (last-writer-wins).
 
-# harness-version: 0.46.0
+# harness-version: 0.47.0
 # --- Constants ---
 
 ## Version of the godot-selftest-harness these files were copied from. Reported by the
 ## `harness_version` verb and stamped into every copied tool script, so a gap logged
 ## against a project can name the version it was seen on, and a refresh can tell a
 ## stale file from a customized one. Bump with .claude-plugin/plugin.json.
-const HARNESS_VERSION: String = "0.46.0"
+const HARNESS_VERSION: String = "0.47.0"
 
 ## Default bus filenames. With a session id (see _resolve_session) the id is spliced in
 ## before the extension, so two instances can each own a bus in the same user:// dir.
@@ -544,6 +544,7 @@ func _load_config() -> void:
 
 func _register_generic_handlers() -> void:
 	register_command("ping", _cmd_ping)
+	register_command("batch", _cmd_batch)
 	register_command("screenshot", _cmd_screenshot)
 	register_command("scene_tree", _cmd_scene_tree)
 	register_command("validate_scene", _cmd_validate_scene)
@@ -871,6 +872,78 @@ func _process_command_line_args() -> void:
 ## (gather:G-115). When they differ, the bus is isolated and saves/screenshots are
 ## not; when they match, nothing is isolated. Either way it is now a read rather
 ## than an assumption.
+## Runs several verbs in ONE round trip (0.47.0, bead ik8). Every bus call costs a
+## command-file write, up to a 100 ms poll and a result-file read; verb-usage on the
+## two live projects showed 13k calls, most of them get_state / set_state /
+## run_method / get_node_bounds in tight read-modify-read runs. This dispatches
+## each item through the same registry (project verbs included, hyphens accepted),
+## awaits it, and returns every item's full envelope in order - a failure does not
+## stop the batch unless `stop_on_error` says so, and the reply's `failed` names
+## the indices. `batch` and `quit` are refused inside a batch (recursion; a quit
+## would kill the game before the result is written). Cap: 200 items.
+##
+## args: { "commands": [ {"action": String, "args": Dictionary}, ... ],
+##         "stop_on_error": bool (default false) }
+## data: { "results": [ {"action", "success", "message", "data"} ... ], "count",
+##         "succeeded", "failed": [indices], "stopped_at": int|-1 }
+func _cmd_batch(args: Dictionary) -> Dictionary:
+	var items: Variant = args.get("commands", [])
+	if not (items is Array):
+		return {"success": false, "message": "batch: 'commands' must be an array of {action, args}", "data": {}}
+	var commands: Array = items
+	if commands.is_empty():
+		return {"success": false, "message": "batch: no commands given", "data": {"results": [], "count": 0}}
+	if commands.size() > 200:
+		return {"success": false, "message": "batch: %d commands; the cap is 200 per batch" % commands.size(), "data": {}}
+	var stop_on_error: bool = bool(args.get("stop_on_error", false))
+	var results: Array = []
+	var failed: Array = []
+	var stopped_at: int = -1
+	for i: int in commands.size():
+		var item: Variant = commands[i]
+		var action: String = ""
+		var cargs: Dictionary = {}
+		if item is Dictionary:
+			action = str((item as Dictionary).get("action", ""))
+			var a: Variant = (item as Dictionary).get("args", {})
+			if a is Dictionary:
+				cargs = a
+		var entry: Dictionary = {"action": action, "success": false, "message": "", "data": {}}
+		var key: String = action.replace("-", "_")
+		if action.is_empty():
+			entry["message"] = "batch item %d: no action" % i
+		elif key == "batch" or key == "quit":
+			entry["message"] = "batch item %d: '%s' is not allowed inside a batch" % [i, action]
+		elif not _handlers.has(key):
+			var near: String = _nearest_handler(key)
+			entry["message"] = "Unknown action: %s%s" % [action, (" (did you mean '%s'?)" % near) if not near.is_empty() else ""]
+		else:
+			_write_log("command", "Executing: %s (batch item %d)" % [key, i], cargs)
+			var handler: Callable = _handlers[key]
+			var r: Variant = await handler.call(cargs)
+			if r is Dictionary:
+				var rd: Dictionary = r
+				entry["success"] = bool(rd.get("success", false))
+				entry["message"] = str(rd.get("message", ""))
+				entry["data"] = rd.get("data", {})
+			else:
+				entry["message"] = "batch item %d: handler returned no envelope" % i
+		results.append(entry)
+		if not entry["success"]:
+			failed.append(i)
+			if stop_on_error:
+				stopped_at = i
+				break
+	var succeeded: int = results.size() - failed.size()
+	return {
+		"success": failed.is_empty(),
+		"message": "batch: %d of %d succeeded%s" % [succeeded, commands.size(),
+			(" - stopped at item %d" % stopped_at) if stopped_at >= 0 else ""],
+		"data": {"results": results, "count": commands.size(), "succeeded": succeeded,
+			"failed": failed, "stopped_at": stopped_at},
+	}
+
+
 func _cmd_ping(_args: Dictionary) -> Dictionary:
 	return {
 		"success": true,

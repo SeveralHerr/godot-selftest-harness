@@ -89,11 +89,11 @@ from pathlib import Path
 from typing import Optional  # noqa: F401
 
 
-# harness-version: 0.46.0
+# harness-version: 0.47.0
 # Version of the godot-selftest-harness this client was copied from. Compared against
 # the running game's own stamp by the `harness-version` verb, so a half-refreshed
 # install (new client, old autoload) is visible instead of mysterious.
-HARNESS_VERSION = "0.46.0"
+HARNESS_VERSION = "0.47.0"
 
 COMMANDS_FILE = "devtools_commands.json"
 RESULTS_FILE = "devtools_results.json"
@@ -1682,6 +1682,56 @@ def cmd_logs(args, project_path: Path):
             print(f"[{ts}] [{cat}] {msg}")
         except json.JSONDecodeError:
             print(line)
+
+
+def cmd_batch(args, project_path: Path):
+    """Run several verbs in one round trip (bus verb: batch, 0.47.0).
+
+    Data keys read: results[{action, success, message, data}], count, succeeded,
+    failed, stopped_at. Items come from --json '[...]', --file cmds.json, or stdin
+    ('-'), each {"action": "get_state", "args": {...}}. Prints one line per item and
+    exits 1 when any item failed (the reply's success is "all succeeded").
+    """
+    src = None
+    if getattr(args, "json_items", None):
+        src = args.json_items
+    elif getattr(args, "file", None):
+        src = Path(args.file).read_text(encoding="utf-8") if args.file != "-" else sys.stdin.read()
+    else:
+        src = sys.stdin.read()
+    try:
+        items = json.loads(src)
+    except ValueError as exc:
+        print(f"batch: could not parse the items as JSON: {exc}", file=sys.stderr)
+        sys.exit(2)
+    if not isinstance(items, list):
+        print("batch: expected a JSON array of {action, args}", file=sys.stderr)
+        sys.exit(2)
+    payload = {"commands": items, "stop_on_error": bool(getattr(args, "stop_on_error", False))}
+    result = send_command(project_path, "batch", payload, timeout=max(30.0, 5.0 * len(items)))
+    if args.json:
+        print(json.dumps(result, indent=2))
+        sys.exit(0 if result.get("success") else 1)
+    data = result.get("data") or {}
+    results = data.get("results")
+    if results is None:
+        print(f"batch: the reply carried no 'results' key ({result.get('message', '')}). Keys present: "
+              f"{sorted(data)} - this game's harness predates 0.47.0 or the verb changed on one side.",
+              file=sys.stderr)
+        sys.exit(2)
+    for i, r in enumerate(results):
+        tag = "OK  " if r.get("success") else "FAIL"
+        msg = str(r.get("message", ""))
+        extra = ""
+        d = r.get("data") or {}
+        if r.get("success") and isinstance(d, dict) and d:
+            # One line of the reply's data, so a read batch is readable without --json.
+            extra = "  " + json.dumps(d, separators=(",", ":"))[:200]
+        print(f"[{i}] {tag} {r.get('action', '?')}: {msg}{extra}")
+    print(result.get("message", ""))
+    if data.get("stopped_at", -1) not in (-1, None):
+        print(f"stopped at item {data['stopped_at']}: {len(items) - int(data['stopped_at']) - 1} item(s) not run")
+    sys.exit(0 if result.get("success") else 1)
 
 
 def cmd_ping(args, project_path: Path):
@@ -4665,6 +4715,19 @@ def main():
     # ping
     p = subparsers.add_parser("ping", help="Check if DevTools is running")
     p.set_defaults(func=cmd_ping)
+
+    # batch
+    p = subparsers.add_parser(
+        "batch",
+        help="Run several verbs in ONE round trip: --json '[{\"action\":..,\"args\":{..}},..]', "
+             "--file cmds.json, or stdin. One line per item; exit 1 if any failed")
+    p.add_argument("--json-items", dest="json_items", metavar="JSON",
+                   help="The items as a JSON array literal")
+    p.add_argument("--file", metavar="FILE", help="Read the items from FILE ('-' = stdin)")
+    p.add_argument("--stop-on-error", action="store_true",
+                   help="Stop at the first failed item (default: run them all, report each)")
+    p.add_argument("--json", "-j", action="store_true", help="Print the full raw reply envelope")
+    p.set_defaults(func=cmd_batch)
 
     # screenshot
     p = subparsers.add_parser("screenshot", help="Take a screenshot")

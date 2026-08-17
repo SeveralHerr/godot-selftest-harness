@@ -8071,3 +8071,30 @@ seven; it is the one bus-side bead the data now argues *for*. Left open, noted.
 (14 files, 57 verbs + 61 CLI). `unittest discover -s tools` — 84 OK. `check_templates.py`
 — OK, all stages (`dev_tools.gd` stamp-only). `check_real_suite.py ../plant-tower-defense`
 — OK, lines above.
+
+## 2026-08-17 — 0.47.0: loop tick fifteen — the one bus-side bead the data argued for
+
+Reviewed: 11 open beads, the tracker (0 open), `PURPOSE.md`, both project logs — nothing
+new for the third tick running. Last tick's `verb-usage` numbers (13k calls across two
+projects; seven verbs carrying most of them, in tight read-modify-read runs) were the
+first evidence any bus-side bead had ever had, and they pointed at exactly one: the
+batch verb (bead ik8, open since 0.10.0 without a sighting).
+
+- **[bead ik8 — shipped] `batch`.** N verbs in one round trip, dispatched through the
+  same registry (project verbs, hyphenated names), each item's full envelope back in
+  order; `failed` by index; `stop_on_error`; `batch`/`quit` refused inside; cap 200.
+  Client `batch --json-items '[…]' | --file | stdin`, one line per item, exit 1 if any
+  failed. Contract row + stage 5 control (five items: hyphenated verb, unknown verb,
+  nested batch, stop-at-2). Both halves in one edit, keys named in the commit.
+  Design note kept honest: this does not make the bus concurrent or transactional — an
+  item's failure leaves the earlier items' effects in place, and the reply says so by
+  listing what ran. It removes round trips, which is what the numbers said cost.
+
+**Considered and not done:** the wedged-handler half of H-043 (unchanged); the triage
+session (bead 970 — a session, not a tick); H-031 `--self-check`.
+
+- Gap: no new gap this turn.
+
+**Validation run this turn:** `record_version.py --record` then `--check` OK at 0.47.0
+(14 files, 58 verbs + 62 CLI). `unittest discover -s tools` — 84 OK. `check_templates.py
+--full` — OK, all stages, `batch ran 5 items in one round trip (3 ok incl. a hyphenated verb, unknown verb + nested batch failed by index), stop_on_error stopped at 2`, `stage 6 contract: 91/91`. `run_tests.gd` unchanged (no real-suite run).

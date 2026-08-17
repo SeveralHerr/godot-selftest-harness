@@ -822,6 +822,19 @@ Notable behaviors:
   same root-viewport image with the same `Rect2i` that `screenshot --region` uses. If
   the two ever disagree, the reply now carries enough to say in which coordinate space.
 
+- **`batch`** (0.47.0) runs several verbs in ONE round trip. Every bus call costs a
+  command-file write, up to a 100 ms poll and a result-file read; `verb-usage` on the
+  two live projects showed ~13k calls, most of them `get_state` / `set_state` /
+  `run_method` / `get_node_bounds` in tight read-modify-read runs. `batch --json-items
+  '[{"action":"set-state","args":{...}},{"action":"get-state","args":{...}}]'` (or
+  `--file cmds.json`, or stdin) dispatches each item through the same registry —
+  project verbs included, hyphens accepted — awaits it, and returns every item's full
+  envelope in order: `data.results[{action, success, message, data}]`, `count`,
+  `succeeded`, `failed` (indices), `stopped_at`. A failed item does not stop the batch
+  unless `--stop-on-error`; the reply's own `success` means *all* succeeded and the
+  client exits 1 otherwise, printing one line per item. `batch` and `quit` are refused
+  inside a batch; the cap is 200 items. Stage 5 runs a five-item batch (a hyphenated
+  verb, an unknown verb, a nested batch) and asserts the indices and the stop.
 - **`findings`** runs every live check at once — `ui_layout`, `ui_reachable`,
   `signal_unconnected`, `performance`, `scene_validation` — and returns one flat
   findings list with no assertions from the project. `data`:
@@ -1228,7 +1241,7 @@ node-bounds, save-ui-baseline, ui-snapshot-diff, tilemap-cells,
 tilemap-region, scripts-seen, canvas-scale, set-resolution,
 find-nodes, press, raycast, sample-pixels, reachable-ui, aabb, look-at, new-uid,
 mouse-move, reload, first-frame, fire-entry-point, project-settings, contained-in,
-restore-userstate, verb-usage
+restore-userstate, verb-usage, batch
 ```
 
 `new-uid` is the one subcommand that never touches the bus — see below.
