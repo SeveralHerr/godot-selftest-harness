@@ -398,6 +398,11 @@ runtime, which the static checker cannot see) and `name_check_ignore` (path pref
   them**; a `user://` baseline from an older install is still read.
 - `_T.assert_margin(values, threshold, margin, recorded)` gates a tuned constant on the
   corpus items sitting near it — use it instead of hand-rolling a sweep.
+- A `Node not found` reply names the longest prefix that resolved, its children, a
+  case-only mismatch, and where a node of that leaf name does exist — read it before
+  concluding the node is absent (fourteen polls of a `Hud`/`HUD` typo once did not).
+- `fire-entry-point` prints a `screen:` line — visible layers and the topmost Control
+  with its text — because arriving somewhere is the verb's whole job.
 - `run_tests.gd` prints `Scripts: N of M loaded  DID NOT LOAD: …` — a script lost to a
   parse error was discovered but never ran, and `Total` shrank without saying so.
 - `run_tests.py` exits 2 on a results file two runs wrote (`Run: <id> pid N` brackets

@@ -8496,3 +8496,91 @@ Reviewed: 8 open beads, two NEW issues (gh#51, gh#52), `PURPOSE.md`, both projec
 (14 files, 59 verbs + 63 CLI, 4 links). `unittest discover -s tools` — 91 OK.
 `check_templates.py --full` — OK, all stages, `stage 4 tests: full run with a broken script -> Scripts: 1 of 2 loaded  DID NOT LOAD: …, exit 2`, `stage 6 contract: 95/95`. `check_real_suite.py ../plant-tower-defense`
 (run_tests.gd changed) — OK: `BEFORE (0.38.0): Total 596 | Passed 417 | Failed 179 | exit 1`, `AFTER (0.55.0): 596 | 417 | 179 | exit 1` — plant's own tree is mid-work with 179 failures on both sides; equal both sides is the point.
+
+## 2026-08-17 - Upstreamed 2 open gap(s) from plant-tower-defense (harness 0.18.0, 0.19.0, 0.21.0, 0.23.0, 0.24.0, 0.25.0, 0.32.0, 0.33.0, 0.36.0, 0.38.0)
+
+Pooled by `tools/upstream_gaps.py` from `C:\Users\gotmi\Documents\GitHub\plant-tower-defense\log-devtools.md`. Gap text is the project's,
+verbatim; only the id line is rewritten (qualified with the project name so
+ids from two projects cannot collide, plus a `source:` back-pointer).
+
+- Gap: **`get-state` reports a missing node identically whether the path is wrong or the
+  game is broken, and nothing suggests the verb that would resolve it.**
+  ```
+  Failed: Node not found: /root/Game/Hud/Root/TopBar/MessageLabel
+  ```
+  That is the entire reply, fourteen times, for a path whose only error is the case of one
+  segment. The tree contains `/root/Game/HUD/Root/TopBar/MessageLabel`; the reply knows the
+  path it was given and has the tree in hand, and says neither "the deepest segment that
+  DID resolve was `/root/Game`" nor "a node named `MessageLabel` exists at
+  `/root/Game/HUD/...`". The fix I eventually used —
+  `find-nodes --class Label --where name=MessageLabel` — is in `REFERENCE.md` and is the
+  right verb; nothing in the failure points at it.
+  This is worse in a polling loop than in a single call, which is how it cost fourteen
+  batches: each read "failed" identically to the previous one, so the shape of the output
+  was stable and looked like a stable *result*.
+  - [plant-tower-defense:G-065] status: fixed | fixed-in: 0.56.0 | dup-of: gh#53 | seen: 1 | harness: 0.38.0 | source: plant-tower-defense 2026-08-17
+  - Improvement: on a node-path miss, report the longest prefix that resolved and the
+    children available at that point — `resolved as far as /root/Game, which has children
+    [HUD, Entities, CompostMeter, ...]`. That alone names a case error instantly. Better
+    still, when the leaf name exists elsewhere in the tree, say where: the walk is already
+    happening and a single `find_children(leaf, "", true, false)` is one call.
+  - Note: no other gaps this turn.
+
+  - [G-065] status: open | seen: 1 | harness: 0.54.0 | upstream: gh#53 | note: reconciled
+    against the installed 0.54.0 before filing, per `gap-reconcile`. All four
+    `"Node not found: %s"` sites are unchanged (`dev_tools.gd:1254`, `:1741`, `:1872`,
+    `:3843`); `:1872` alone adds "(also tried under /root)", which shows the intent already
+    exists at one site and nowhere else.
+
+- Gap: **`fire-entry-point` puts you on a screen but says nothing about what state it is
+  in, and the state it landed in was not the documented one.**
+  ```
+  python tools/devtools.py fire-entry-point notebook
+  entry_points.notebook fired /root/TitleScreen._open_notebook()
+    scene changed to reach /root/TitleScreen
+  ```
+  The notebook's build ends with `go_to(0)` (`game/notebook_screen.gd:370`), so page 1 of
+  10 is what a reader of the source expects. The live screen was on **page 10 of 10**. That
+  was convenient — it is the page I wanted — and I nearly recorded "the legend renders"
+  without noticing I had not navigated to it. Whether the entry point, the pager's wrap
+  (`go_to` normalises `-1` to the last page) or a stray input put it there, the reply is the
+  only thing that could have said so and it reports only that the method was called.
+  The reason this matters beyond one screen: an entry point exists to reach a state, and a
+  run that verifies the WRONG state passes exactly like one that verifies the right one.
+  `reach` catches an unloaded file; nothing catches an unexpected page.
+  - [plant-tower-defense:G-066] status: fixed | fixed-in: 0.56.0 | dup-of: gh#54 | seen: 1 | harness: 0.38.0 | source: plant-tower-defense 2026-08-17
+  - Improvement: have `fire-entry-point` return the same summary `first-frame` already
+    computes — topmost on-screen Control, visible CanvasLayers, paused state — so the reply
+    says what is on screen rather than only what was called. The verb exists and the data is
+    one call away; the entry point is precisely the moment a caller has no idea yet.
+  - Note: no other gaps this turn.
+
+  - [G-066] status: open | seen: 1 | harness: 0.54.0 | upstream: gh#54 | note: reconciled
+    against the installed 0.54.0 before filing. `_cmd_fire_entry_point`'s success return
+    (`dev_tools.gd:5181`) carries `name`, `node_path`, `method`, `result` and
+    `scene_changed` — every field describes the CALL and none the resulting screen. The
+    fix is a merge rather than new code: `first_frame` is registered at `:602` and already
+    computes "what IS the screen showing".
+
+## 2026-08-17 — 0.56.0: loop tick twenty-four — a miss that says where it stopped, an arrival that says where it is
+
+Reviewed: 8 open beads, two NEW issues (gh#53, gh#54), `PURPOSE.md`, both project logs
+(two new plant gaps, the issues' twins). Plant is still pinned at 0.38.0; both re-verified
+against 0.54.0 before filing.
+
+- **[gh#53 / plant G-065 — fixed] every `Node not found` names the longest prefix that
+  resolved, its children, a case-only mismatch, and where the leaf name does exist** —
+  thirteen sites through one helper. The reporter's framing was the design's own: most
+  verbs here separate "could not run" from "ran and found nothing", and a path miss was
+  the one place a wrong input and a broken world returned the same string. Three contract
+  rows plant a case error, a moved leaf and a genuinely absent node.
+- **[gh#54 / plant G-066 — fixed] `fire-entry-point` carries `data.screen`** (the
+  `first_frame` summary) and names the topmost Control with its text in the message —
+  `reach` catches a run that never loaded the changed file, and there was no equivalent
+  for a run that drove to the wrong *screen*. The entry-point control asserts the line.
+
+- Gap: no new gap this turn.
+
+**Validation run this turn:** `record_version.py --record` then `--check` OK at 0.56.0
+(14 files, 59 verbs + 63 CLI). `unittest discover -s tools` — 91 OK. `check_templates.py
+--full` — OK, all stages, `stage 6 contract: 98/98` (three new node-miss rows), entry-point control prints the screen line. `run_tests.gd` unchanged.

@@ -89,11 +89,11 @@ from pathlib import Path
 from typing import Optional  # noqa: F401
 
 
-# harness-version: 0.55.0
+# harness-version: 0.56.0
 # Version of the godot-selftest-harness this client was copied from. Compared against
 # the running game's own stamp by the `harness-version` verb, so a half-refreshed
 # install (new client, old autoload) is visible instead of mysterious.
-HARNESS_VERSION = "0.55.0"
+HARNESS_VERSION = "0.56.0"
 
 COMMANDS_FILE = "devtools_commands.json"
 RESULTS_FILE = "devtools_results.json"
@@ -3101,6 +3101,18 @@ def cmd_fire_entry_point(args, project_path: Path):
         data = result.get("data") or {}
         if data.get("scene_changed"):
             print(f"  scene changed to reach {data.get('node_path')}")
+        # gh#54 (0.56.0): what is on screen NOW, from the same reply.
+        screen = data.get("screen")
+        if isinstance(screen, dict) and screen:
+            layers = screen.get("visible_canvas_layers") or []
+            names = [str(l.get("path") or l.get("name") or "?") for l in layers if isinstance(l, dict)][:5]
+            top = screen.get("topmost_control") or {}
+            print("  screen: %d visible CanvasLayer(s)%s; topmost %s%s"
+                  % (len(layers), (" (" + ", ".join(names) + ")") if names else "",
+                     ("%s '%s'" % (top.get("type", "Control"), top.get("path", ""))) if top else "none",
+                     (" text=%r" % top.get("text")) if top and top.get("text") else ""))
+        elif "screen" not in data:
+            print("  (this game's harness predates 0.56.0: no screen summary in the reply)")
     else:
         print(f"Failed: {result['message']}", file=sys.stderr)
         sys.exit(1)

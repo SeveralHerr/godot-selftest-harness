@@ -2283,6 +2283,15 @@ def contract_rows():
          ["settings", "missing"], {"missing": ["harness_check/no_such_setting"]}),
         ("pause", {}, True, "behaviour and idempotency asserted by check_pause_verb()"),
         ("repaint", {}, True, "gh#51: queue_redraw on the tree's CanvasItems", ["touched", "node_path", "paused"]),
+        ("get_state", {"node_path": "/root/main", "properties": ["visible"]}, False,
+         "gh#53: a case error names the resolved prefix and the case match",
+         [], {"message_contains": "did you mean 'Main' (case differs from 'main')"}),
+        ("get_state", {"node_path": "/root/Main/NoSuchHolder/Blip", "properties": ["visible"]}, False,
+         "gh#53: a leaf that exists elsewhere is located",
+         [], {"message_contains": "a node named 'Blip' exists at /root/Main/Blip"}),
+        ("get_state", {"node_path": "/root/Main/NoSuchNode", "properties": ["visible"]}, False,
+         "gh#53: the resolved prefix and its children are named",
+         [], {"message_contains": "resolved as far as /root/Main, whose children are ["}),
         ("repaint", {"node_path": "/root/NoSuchNode"}, False, "gh#51: unknown node refused by name",
          [], {"message_contains": "Node not found"}),
         ("unpause", {}, True, "behaviour and idempotency asserted by check_pause_verb()"),
@@ -3816,6 +3825,10 @@ def check_entry_hook_and_entry_points(godot, scratch):
         if fire.returncode != 0 or "-> 42" not in fire.stdout:
             return fail("fire-entry-point probe (args=[21], returns n*2) must succeed "
                         "and report 42, got exit %d:\n%s" % (fire.returncode, fire.stdout))
+        # gh#54 (0.56.0): the reply says what is on screen after the call.
+        if "  screen: " not in fire.stdout or "topmost" not in fire.stdout:
+            return fail("fire-entry-point must print the screen summary (visible layers, "
+                        "topmost Control) from the same reply (gh#54); got:\n%s" % fire.stdout)
 
         # Negative control: an unconfigured name must fail naming what's known,
         # not silently do nothing.

@@ -14,14 +14,14 @@ extends Node
 ## extension loads AFTER the generic handlers, a project may override a generic
 ## verb by registering the same action string (last-writer-wins).
 
-# harness-version: 0.55.0
+# harness-version: 0.56.0
 # --- Constants ---
 
 ## Version of the godot-selftest-harness these files were copied from. Reported by the
 ## `harness_version` verb and stamped into every copied tool script, so a gap logged
 ## against a project can name the version it was seen on, and a refresh can tell a
 ## stale file from a customized one. Bump with .claude-plugin/plugin.json.
-const HARNESS_VERSION: String = "0.55.0"
+const HARNESS_VERSION: String = "0.56.0"
 
 ## Default bus filenames. With a session id (see _resolve_session) the id is spliced in
 ## before the extension, so two instances can each own a bus in the same user:// dir.
@@ -1252,7 +1252,7 @@ func _cmd_get_state(args: Dictionary) -> Dictionary:
 	var resolved: Dictionary = _resolve_node(node_path)
 	var node: Node = resolved["node"]
 	if node == null:
-		return {"success": false, "message": "Node not found: %s" % node_path}
+		return {"success": false, "message": _node_miss(node_path)}
 	node_path = resolved["path"]
 
 	var wanted: Array = []
@@ -1739,7 +1739,7 @@ func _cmd_set_state(args: Dictionary) -> Dictionary:
 
 	var node: Node = get_node_or_null(node_path)
 	if node == null:
-		return {"success": false, "message": "Node not found: %s" % node_path}
+		return {"success": false, "message": _node_miss(node_path)}
 
 	var property: String = args.get("property", "")
 	if property.is_empty():
@@ -1870,7 +1870,7 @@ func _cmd_run_method(args: Dictionary) -> Dictionary:
 	var resolved: Dictionary = _resolve_node(node_path)
 	var node: Node = resolved["node"]
 	if node == null:
-		return {"success": false, "message": "Node not found: %s (also tried under /root)" % node_path}
+		return {"success": false, "message": _node_miss(node_path, true)}
 	var used_path: String = resolved["path"]
 
 	var method: String = args.get("method", "")
@@ -3170,7 +3170,7 @@ func _cmd_repaint(args: Dictionary) -> Dictionary:
 	if not path.is_empty():
 		node = get_tree().root.get_node_or_null(NodePath(path))
 		if node == null:
-			return {"success": false, "message": "Node not found: %s" % path}
+			return {"success": false, "message": _node_miss(path)}
 	var touched: int = _queue_redraw_recursive(node)
 	return {
 		"success": true,
@@ -3886,9 +3886,9 @@ func _cmd_contained_in(args: Dictionary) -> Dictionary:
 	var a: Dictionary = _resolve_node(node_path)
 	var b: Dictionary = _resolve_node(within_path)
 	if a["node"] == null:
-		return {"success": false, "message": "Node not found: %s" % node_path}
+		return {"success": false, "message": _node_miss(node_path)}
 	if b["node"] == null:
-		return {"success": false, "message": "Node not found: %s" % within_path}
+		return {"success": false, "message": _node_miss(within_path)}
 	if not (a["node"] is Control) or not (b["node"] is Control):
 		return {"success": false, "message": "contained_in measures Controls; got %s and %s" % [
 			(a["node"] as Node).get_class(), (b["node"] as Node).get_class()]}
@@ -4208,7 +4208,7 @@ func _cmd_get_node_bounds(args: Dictionary) -> Dictionary:
 	var resolved: Dictionary = _resolve_node(node_path)
 	var node: Node = resolved["node"]
 	if node == null:
-		return {"success": false, "message": "Node not found: %s" % node_path}
+		return {"success": false, "message": _node_miss(node_path)}
 
 	if not node is CanvasItem:
 		# Name the verb that DOES answer for this node. Being told only what the
@@ -4318,7 +4318,7 @@ func _cmd_canvas_scale(args: Dictionary) -> Dictionary:
 	var resolved: Dictionary = _resolve_node(node_path)
 	var node: Node = resolved["node"]
 	if node == null:
-		return {"success": false, "message": "Node not found: %s" % node_path, "data": {}}
+		return {"success": false, "message": _node_miss(node_path), "data": {}}
 	if not node is CanvasItem:
 		return {"success": false, "message": "Node is not a CanvasItem (no canvas transform): %s"
 			% node.get_class(), "data": {"class": node.get_class()}}
@@ -4443,7 +4443,7 @@ func _cmd_aabb(args: Dictionary) -> Dictionary:
 	var resolved: Dictionary = _resolve_node(node_path)
 	var node: Node = resolved["node"]
 	if node == null:
-		return {"success": false, "message": "Node not found: %s (also tried under /root)" % node_path,
+		return {"success": false, "message": _node_miss(node_path, true),
 			"data": {}}
 	var used_path: String = resolved["path"]
 
@@ -4927,7 +4927,7 @@ func _cmd_tilemap_cells(args: Dictionary) -> Dictionary:
 	var resolved: Dictionary = _resolve_node(node_path)
 	var node: Node = resolved["node"]
 	if node == null:
-		return {"success": false, "message": "Node not found: %s (also tried under /root)" % node_path}
+		return {"success": false, "message": _node_miss(node_path, true)}
 
 	var layer: int = int(args.get("layer", 0))
 	var access: Dictionary = _tilemap_accessors(node, layer)
@@ -4991,7 +4991,7 @@ func _cmd_tilemap_region(args: Dictionary) -> Dictionary:
 	var resolved: Dictionary = _resolve_node(node_path)
 	var node: Node = resolved["node"]
 	if node == null:
-		return {"success": false, "message": "Node not found: %s (also tried under /root)" % node_path}
+		return {"success": false, "message": _node_miss(node_path, true)}
 
 	var layer: int = int(args.get("layer", 0))
 	var access: Dictionary = _tilemap_accessors(node, layer)
@@ -5224,12 +5224,25 @@ func _cmd_fire_entry_point(args: Dictionary) -> Dictionary:
 			"message": "entry_points.%s: no such method: %s.%s" % [name, node_path, method],
 			"data": {"scene_changed": scene_changed}}
 	var result: Variant = node.callv(method, args_list)
+	# gh#54 / plant-tower-defense:G-066 (0.56.0): an entry point exists to reach a
+	# STATE, at the one moment the caller has no idea what that state is - and the
+	# reply described only the call. `first_frame` already computes "what IS the
+	# screen showing"; carry it, and put the topmost Control in the one-line message
+	# so the wrong screen is visible in the reply that produced it (a paged notebook
+	# landed on page 10 of 10 and a green run nearly described a page it never opened).
+	var screen: Dictionary = _cmd_first_frame({}).get("data", {})
+	var top: Dictionary = screen.get("topmost_control", {}) if screen.get("topmost_control", {}) is Dictionary else {}
+	var top_note: String = ""
+	if not top.is_empty():
+		top_note = "; topmost: %s '%s'%s" % [str(top.get("type", "Control")), str(top.get("path", "")),
+			(" \"%s\"" % str(top.get("text", ""))) if str(top.get("text", "")) != "" else ""]
 	return {
 		"success": true,
-		"message": "entry_points.%s fired %s.%s()%s" % [
-			name, node_path, method, (" -> %s" % result) if result != null else ""],
+		"message": "entry_points.%s fired %s.%s()%s%s" % [
+			name, node_path, method, (" -> %s" % result) if result != null else "", top_note],
 		"data": {"name": name, "node_path": node_path, "method": method,
-			"result": _serialize_variant(result), "scene_changed": scene_changed},
+			"result": _serialize_variant(result), "scene_changed": scene_changed,
+			"screen": screen},
 	}
 
 
@@ -5457,7 +5470,7 @@ func _cmd_press(args: Dictionary) -> Dictionary:
 	var resolved: Dictionary = _resolve_node(node_path)
 	var node: Node = resolved["node"]
 	if node == null:
-		return {"success": false, "message": "Node not found: %s" % node_path}
+		return {"success": false, "message": _node_miss(node_path)}
 
 	var button: BaseButton = node as BaseButton
 	if button == null:
@@ -5885,7 +5898,7 @@ func _cmd_curve(args: Dictionary) -> Dictionary:
 	var resolved: Dictionary = _resolve_node(node_path)
 	var node: Node = resolved["node"]
 	if node == null:
-		return {"success": false, "message": "Node not found: %s" % node_path}
+		return {"success": false, "message": _node_miss(node_path)}
 
 	var method: String = args.get("method", "")
 	if method.is_empty() or not node.has_method(method):
@@ -6135,6 +6148,58 @@ func _cmd_project_settings(args: Dictionary) -> Dictionary:
 ## performance answers "is it fast" -- and none of them answer "what IS the
 ## screen showing", which is the one state every game has and the thing a human
 ## glancing at a screenshot reads in half a second.
+## The reply for a node-path miss (gh#53 / plant-tower-defense:G-065, 0.56.0). A bare
+## `Node not found: <path>` returned fourteen times in a polling loop for a one-letter
+## case error (`Hud` for `HUD`), and a stable failure shape read as a stable result -
+## the session went looking for a defect in a feature that worked. Everything needed
+## to be useful is in hand: walk the path, name the longest prefix that resolved and
+## the children there (a case error, a rename and a genuinely absent node become
+## three visibly different failures), say when a sibling matches the next segment
+## case-insensitively, and when the LEAF name exists elsewhere in the tree, say where.
+func _node_miss(node_path: String, tried_root: bool = false) -> String:
+	var msg: String = "Node not found: %s" % node_path
+	if tried_root:
+		msg += " (also tried under /root)"
+	var root: Node = get_tree().root
+	var text: String = str(node_path)
+	if not text.begins_with("/root"):
+		text = "/root/" + text.trim_prefix("/")
+	var segments: PackedStringArray = text.trim_prefix("/root").split("/", false)
+	var node: Node = root
+	var resolved: String = "/root"
+	var missing: String = ""
+	for seg: String in segments:
+		var next: Node = node.get_node_or_null(NodePath(seg))
+		if next == null:
+			missing = seg
+			break
+		node = next
+		resolved = resolved.path_join(seg)
+	if not missing.is_empty():
+		var kids: Array = []
+		var case_hit: String = ""
+		for child: Node in node.get_children():
+			if kids.size() < 12:
+				kids.append(str(child.name))
+			if str(child.name).to_lower() == missing.to_lower():
+				case_hit = str(child.name)
+		msg += "; resolved as far as %s, whose children are [%s%s]" % [
+			resolved, ", ".join(kids), ", ..." if node.get_child_count() > 12 else ""]
+		if not case_hit.is_empty():
+			msg += "; did you mean '%s' (case differs from '%s')" % [case_hit, missing]
+		var leaf: String = segments[segments.size() - 1] if segments.size() > 0 else ""
+		if not leaf.is_empty() and (leaf != missing or case_hit.is_empty()):
+			var hits: Array = root.find_children(leaf, "", true, false)
+			if not hits.is_empty():
+				var where: Array = []
+				for h: Node in hits.slice(0, 3):
+					where.append(str(h.get_path()))
+				msg += "; a node named '%s' exists at %s%s" % [
+					leaf, ", ".join(where), " (and %d more)" % (hits.size() - 3) if hits.size() > 3 else ""]
+		msg += " - `find-nodes --where name=<leaf>` searches the whole tree"
+	return msg
+
+
 func _cmd_first_frame(_args: Dictionary) -> Dictionary:
 	var layers: Array = []
 	_collect_canvas_layers(get_tree().root, layers)

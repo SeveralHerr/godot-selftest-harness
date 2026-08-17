@@ -822,6 +822,23 @@ Notable behaviors:
   same root-viewport image with the same `Rect2i` that `screenshot --region` uses. If
   the two ever disagree, the reply now carries enough to say in which coordinate space.
 
+- **A node-path miss diagnoses itself** (0.56.0, gh#53 / plant-tower-defense:G-065). Every
+  `Node not found: <path>` — thirteen sites — now walks the path and appends `resolved as
+  far as /root/Game, whose children are [HUD, Entities, …]`, `did you mean 'HUD' (case
+  differs from 'Hud')` when a sibling matches the next segment case-insensitively, and
+  `a node named 'MessageLabel' exists at /root/Game/HUD/…` when the leaf lives elsewhere,
+  ending with the `find-nodes --where name=` pointer. A one-letter case error had
+  returned the bare line fourteen times in a polling loop, and a stable failure shape
+  read as a stable result. Three contract rows plant a case error, a moved leaf and a
+  genuinely absent node.
+- **`fire-entry-point` reports what is on screen afterwards** (0.56.0, gh#54 /
+  plant-tower-defense:G-066). An entry point exists to reach a *state*, at the one
+  moment the caller has no idea what that state is; the reply described only the call,
+  and a paged notebook that landed on page 10 of 10 nearly got a green run describing a
+  page never opened. The reply now carries `data.screen` (the `first_frame` summary:
+  visible CanvasLayers in paint order, topmost on-screen Control with its text, paused
+  state, cursor mode) and the message ends `; topmost: Label '/root/…/PageLabel' "10 /
+  10"`; the client prints a `screen:` line. The entry-point control asserts it.
 - **`repaint [--node PATH]`, and `pause` names the frozen-canvas asymmetry** (0.55.0,
   gh#51 / plant-tower-defense:G-061). A paused tree does not run `_process`, so a
   `_draw()` cue whose owner repaints from `_process` (`func _process(_d):
