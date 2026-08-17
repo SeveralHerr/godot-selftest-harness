@@ -3369,7 +3369,7 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   writing `bookOpenMCP.glb`; got `UIDs: OK` … `exit 0` with no `.import` file on disk.
   Workaround: run `godot --headless --path . --import` by hand before trusting lint on any
   turn that adds a non-script asset.
-  - [moving-in:G-007] status: open | seen: 1 | harness: 0.16.0 | source: moving-in 2026-08-14
+  - [moving-in:G-007] status: unverified | stale-since: 0.51.0 | seen: 1 | harness: 0.16.0 | source: moving-in 2026-08-14
   - Improvement: extend the existing UID pass to walk `scan_root` for importable
     extensions and report `MISSING IMPORT <path>` when a recognised asset has no
     `.import` sidecar — the same shape as the `.uid` check already beside it, and it would
@@ -3424,7 +3424,7 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   (a Control with `mouse_filter` STOP, an earlier `set_input_as_handled()`) swallows it
   here too. It reports before/after heading and pitch and says outright
   `Camera did NOT move — the motion event was delivered and ignored`.
-  - [moving-in:G-010] status: open | seen: 1 | harness: 0.16.0 | source: moving-in 2026-08-14
+  - [moving-in:G-010] status: fixed | fixed-in: by 0.29.0 (`mouse-move`, later credited as moving-in:G-029; re-checked by reading, 0.52.0 triage) | seen: 1 | harness: 0.16.0 | source: moving-in 2026-08-14
   - Improvement: promote it to a generic verb — `mouse move --by DX,DY [--to X,Y]`
     and `mouse button left|right [--pressed]` — since nothing in it is project-specific
     beyond reading back a heading. Pair it with a `--report NODE.method` or simply have
@@ -4678,7 +4678,7 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   frames. Workaround: `capture_mouse(false)`, then `set_heading`, then `set-state _pitch 0`
   AND `set-state Camera.rotation 0,0,0` — the pitch lives in two places and setting one
   leaves the camera where it was.
-  - [moving-in:G-024] status: open | seen: 1 | harness: 0.16.0 | source: moving-in 2026-08-14
+  - [moving-in:G-024] status: fixed | fixed-in: by 0.43.0 (credited in devtools.py; the project reconciled it in cycle 62; 0.52.0 triage) | seen: 1 | harness: 0.16.0 | source: moving-in 2026-08-14
   - Improvement: this is the "a run that never changes is broken" hazard in reverse — a
     run that changes when nothing asked it to. Two things would close it: a
     `set-feature --ignore-os-input true` that makes the game drop real
@@ -4955,7 +4955,7 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   adjacent launch. Any test that needs an exact real-time rotation *rate* (not just "did
   it move") should not trust `step-time`'s printed duration as the actual elapsed
   `_process` time until this is root-caused.
-  - [moving-in:G-039] status: open | seen: 1 | harness: 0.19.0 | source: moving-in 2026-08-15
+  - [moving-in:G-039] status: unverified | stale-since: 0.51.0 | seen: 1 | harness: 0.19.0 | source: moving-in 2026-08-15
   - Improvement: reproduce with a minimal counter script (`_process(delta): count +=
     1; total_delta += delta`) driven the same way, and compare `total_delta` against
     `step-time`'s own reported `process_seconds` — if they disagree, the bug is in
@@ -5752,7 +5752,7 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   and the visual check was recorded `blocked` (which correctly downgraded the run to
   `partial`). Everything else about the shower was settled numerically; this was only the
   cosmetic confirmation, but that is exactly the check a screenshot is for.
-  - [moving-in:G-044] status: open | seen: 2 | harness: 0.21.0 | source: moving-in 2026-08-16
+  - [moving-in:G-044] status: fixed | fixed-in: 0.26.0 (`look-at`; status line never edited - 0.52.0 triage) | seen: 2 | harness: 0.21.0 | source: moving-in 2026-08-16
   - Improvement: a `look-at --node PATH [--from-node PATH] [--distance N]` verb that
     places the observing camera (or the group-`player` node) at a sensible standoff and
     orients it at the target's AABB centre. The engine already has `Node3D.look_at`; the
@@ -5768,7 +5768,7 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   expression. Workaround: prefix the command with `MSYS_NO_PATHCONV=1`, which works.
   Same class as the already-documented `taskkill /F` -> `F:/` gotcha, so the shape is
   known; it is the substitution syntax that is newly affected.
-  - [moving-in:G-045] status: open | seen: 1 | harness: 0.21.0 | source: moving-in 2026-08-16
+  - [moving-in:G-045] status: wontfix (project-owned tool `tools/plant.py`; not harness code - 0.52.0 triage) | seen: 1 | harness: 0.21.0 | source: moving-in 2026-08-16
   - **Out of scope for this repo (2026-08-16):** `tools/plant.py` does not exist under
     `templates/` or `tools/` here - `grep -rn "plant.py"` against `REFERENCE.md` and
     `commands/*.md` finds nothing. It is a `moving-in`-local tool, not a harness-shipped
@@ -5978,7 +5978,7 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   - Workaround: reconstructed the ray by hand from camera `global_position`, pitch and
     `reach = 3.5 * KIT_SCALE`, then compared against `aabb`. That is where the -15
     misreading came from.
-  - [moving-in:G-047] status: open | seen: 1 | harness: 0.21.0 | source: moving-in 2026-08-16
+  - [moving-in:G-047] status: fixed | fixed-in: by 0.30.0 (`raycast` reports collider/position/normal; the `unpack_aim` half is the project's own verb; 0.52.0 triage) | seen: 1 | harness: 0.21.0 | source: moving-in 2026-08-16
   - Improvement: add `collider_path`, `hit_position`, `hit_normal` and `surface_kind` to
     `unpack_aim`'s `data`. Four lines in the handler; it already holds the hit dict.
 
@@ -5986,7 +5986,7 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   nothing and exited 2 (`Selected: 0 of 245 discovered`). The exit code is honest and
   the denominator made it obvious, so this cost one run rather than a wrong conclusion —
   but a selector naming two real tests reads as though it should work.
-  - [moving-in:G-048] status: open | seen: 1 | harness: 0.21.0 | source: moving-in 2026-08-16
+  - [moving-in:G-048] status: fixed | fixed-in: 0.52.0 | seen: 1 | harness: 0.21.0 | source: moving-in 2026-08-16
   - Improvement: split the filter on `,` and match any; or reject a filter containing a
     comma with "one pattern per run" rather than matching nothing.
 
@@ -5995,7 +5995,7 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   nobody is standing in. The verb itself was exemplary — it reported "Camera did NOT
   move — the motion event was delivered and ignored" instead of returning success — but
   `devtools_config.json` has an `entry_hook` for exactly this and it is not set.
-  - [moving-in:G-049] status: open | seen: 1 | harness: 0.21.0 | source: moving-in 2026-08-16
+  - [moving-in:G-049] status: wontfix (project verb `mouse_look`; the generic `mouse-move`/`set-feature --ignore-os-input` are the harness half and exist - 0.52.0 triage) | seen: 1 | harness: 0.21.0 | source: moving-in 2026-08-16
   - Improvement: set `entry_hook` to the title screen's start button so `launch` lands
     in the playable scene. Project-side fix, but the symptom is generic enough that
     `ping` reporting "a modal/menu layer is up" alongside `tree is PAUSED` would have
@@ -6023,7 +6023,7 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   is two runs instead of eight.
   - Workaround: `--filter test_operable_placed_fires_once`, chosen by reading the file
     first to find a substring unique to it.
-  - [moving-in:G-051] status: open | seen: 1 | harness: 0.21.0 | source: moving-in 2026-08-16
+  - [moving-in:G-051] status: fixed | fixed-in: by 0.28.0 (`--file NAME` selects a whole script; 0.52.0 triage) | seen: 1 | harness: 0.21.0 | source: moving-in 2026-08-16
   - Improvement: accept a path or basename as a selector and report it in the
     `Selected: N of M` line the same way, so a selector matching one file is still
     visibly a subset.
@@ -6618,7 +6618,7 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   own spill light, the tipped carboy covering the flask readout the player pours by) was found
   by opening a PNG and looking at it. `validate-ui` correctly reported `No UI issues found`
   throughout — it is a layout check and these are none of its business.
-  - [dave-game:G-004] status: open | seen: 1 | harness: 0.18.0 | source: dave-game 2026-08-15
+  - [dave-game:G-004] status: unverified | stale-since: 0.51.0 | seen: 1 | harness: 0.18.0 | source: dave-game 2026-08-15
   - Improvement: `sample-pixels --rect` already returns mean/dominant colour; what is missing
     is the ability to name a rect and a baseline together. A `save-pixel-baseline` /
     `pixel-diff` pair keyed on named rects (the way `save-ui-baseline` already works for
@@ -8274,3 +8274,36 @@ new. Fourth fully quiet tick. Spent on the bead filed last tick.
 OK. `check_templates.py` — OK, all stages incl. `stage 5b windowed: sample_pixels found
 the planted #3fa7d6 swatch (1600 of 1600 px), #ff00ff ABSENT, points read (3fa7d6,
 2d2d2d)`.
+
+## 2026-08-17 — 0.52.0: loop tick twenty — a triage pass, and one of the stale gaps was real
+
+Reviewed: 10 open beads, the tracker (0 open), `PURPOSE.md`, both project logs — nothing
+new (fifth quiet tick). The `/loop` prompt was re-issued this tick; the hourly job
+`bccfe705` was already scheduled for it, so no duplicate was created. Spent the hour on
+half of bead 970: the 14 STALE non-gather pooled gaps, re-checked by reading against
+current templates.
+
+- **[moving-in G-048 — fixed] `run_tests.gd --filter a,b` is any-of.** The one STALE gap
+  that was still a real, unfixed harness defect: a comma in the needle matched nothing
+  and read `SELECTED NOTHING`. Stage 4 plants three methods, asserts `Selected: 2 of`
+  for a two-name list and `SELECTED NOTHING` (exit 2) for two non-matching names.
+- **Six closed by reading, with the mechanism named:** moving-in G-010 (`mouse-move`,
+  by 0.29.0), G-024 (credited in devtools.py, project reconciled it), G-044 (`look-at`
+  0.26.0 — status line never edited), G-047 (`raycast`; the `unpack_aim` half is the
+  project's), G-051 (`--file NAME`). **Two `wontfix`** with the reason on the line:
+  G-045 (a project-owned `tools/plant.py`), G-049 (project verb `mouse_look`; the
+  generic halves exist). **Three `unverified`** via `--mark-unverified`, explicitly:
+  G-007 (lint `UIDs: OK` on an unloadable asset — `import_check` may cover it, not
+  re-checked), G-039 (`step-time` rate discrepancy — plausibly real, no repro this
+  tick), dave-game G-004 (light-and-shadow — 0.49.0's `--expect` may cover it).
+  **Left open, honestly:** moving-in G-005 / plant G-031 (asset conformance — a real,
+  unbuilt request), G-052 (collider planes — same). `--triage` now: moving-in 6 open /
+  2 STALE, plant 3 / 1; gather's 36 remain for the other half of the bead.
+
+- Gap: no new gap this turn.
+
+**Validation run this turn:** `record_version.py --record` then `--check` OK at 0.52.0
+(14 files, 58 verbs + 62 CLI). `unittest discover -s tools` — 88 OK.
+`check_templates.py --stage 4` — OK with the comma-filter control; full `check_templates.py`
+— OK, all stages incl. 5b. `check_real_suite.py ../plant-tower-defense` (run_tests.gd changed) —
+OK: `BEFORE (0.38.0): Total 582 | Passed 582 | exit 0 | 76s`, `AFTER (0.52.0): 582 | 582 | exit 0 | 60s`.

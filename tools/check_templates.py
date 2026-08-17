@@ -1873,6 +1873,30 @@ def check_run_tests_py(godot, scratch):
     finally:
         uw_test.unlink(missing_ok=True)
 
+    # moving-in:G-048 (0.52.0): `--filter a,b` is any-of. Two planted methods with
+    # unrelated names; a comma list must select both, and a name that matches neither
+    # must still be SELECTED NOTHING (the negative control).
+    comma_test = scratch / "test" / "unit" / "test_comma_filter_control.gd"
+    comma_test.write_text(
+        "extends RefCounted\nvar _T\n\n"
+        "func test_alpha_thing() -> String:\n\treturn _T.assert_true(true)\n\n"
+        "func test_beta_thing() -> String:\n\treturn _T.assert_true(true)\n\n"
+        "func test_gamma_thing() -> String:\n\treturn _T.assert_true(true)\n",
+        encoding="utf-8")
+    try:
+        both = run_godot(godot, scratch, ["--script", "res://tools/run_tests.gd", "--", "--filter", "alpha_thing,beta_thing"])
+        if both.returncode != 0 or "Selected: 2 of" not in both.stdout \
+                or "[PASS] test_alpha_thing" not in both.stdout or "[PASS] test_beta_thing" not in both.stdout \
+                or "test_gamma_thing" in both.stdout.split("Total:")[0].replace("Selected", ""):
+            return fail("--filter alpha_thing,beta_thing must select exactly the two named tests "
+                        "(any-of); got exit %d:\n%s" % (both.returncode, both.stdout[-1500:]))
+        none = run_godot(godot, scratch, ["--script", "res://tools/run_tests.gd", "--", "--filter", "delta_thing,epsilon_thing"])
+        if none.returncode != 2 or "SELECTED NOTHING" not in none.stdout:
+            return fail("--filter with two non-matching names must still be SELECTED NOTHING (exit 2), got %d"
+                        % none.returncode)
+    finally:
+        comma_test.unlink(missing_ok=True)
+
     # plant-tower-defense:G-049 (0.37.0): an argument the runner does not know must
     # be refused (exit 2, named), never silently run the whole suite as "(no selector)".
     unknown = run_godot(godot, scratch, ["--script", "res://tools/run_tests.gd", "--", "--select", "test_x"])
