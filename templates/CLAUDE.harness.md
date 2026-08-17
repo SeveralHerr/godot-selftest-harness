@@ -192,7 +192,10 @@ so step + read pairs carry no ambient drift), `set-game-speed` (refuses a scale 
 `SceneTree.paused` directly, bus keeps answering — catch a sub-second effect, poll for
 the moment, pause, then inspect at no rush; **`PROCESS_MODE_ALWAYS` nodes keep
 animating on a paused tree** — a HUD usually is one — and `pause`'s reply names them;
-`set-game-speed 0.01` slows those where pause cannot);
+`set-game-speed 0.01` slows those where pause cannot; and the converse: **a `_draw()`
+cue whose owner repaints from `_process` keeps its last frame while paused** — after
+mutating state under pause, `repaint [--node PATH]` queues the redraw so the next
+screenshot reflects it);
 `project-settings [--filter PREFIX|--name KEY]` (ProjectSettings as the RUNNING game
 sees them — did the value written to `project.godot` actually land?);
 `contained-in --node PATH --within PATH` (is this Control's box inside that panel's;
@@ -395,6 +398,8 @@ runtime, which the static checker cannot see) and `name_check_ignore` (path pref
   them**; a `user://` baseline from an older install is still read.
 - `_T.assert_margin(values, threshold, margin, recorded)` gates a tuned constant on the
   corpus items sitting near it — use it instead of hand-rolling a sweep.
+- `run_tests.gd` prints `Scripts: N of M loaded  DID NOT LOAD: …` — a script lost to a
+  parse error was discovered but never ran, and `Total` shrank without saying so.
 - `run_tests.py` exits 2 on a results file two runs wrote (`Run: <id> pid N` brackets
   each run; a stopped background run's Godot keeps appending) — kill or wait for the
   other pid, then re-run. Its tallies were a mixture, not a verdict.

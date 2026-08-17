@@ -14,14 +14,14 @@ extends Node
 ## extension loads AFTER the generic handlers, a project may override a generic
 ## verb by registering the same action string (last-writer-wins).
 
-# harness-version: 0.54.0
+# harness-version: 0.55.0
 # --- Constants ---
 
 ## Version of the godot-selftest-harness these files were copied from. Reported by the
 ## `harness_version` verb and stamped into every copied tool script, so a gap logged
 ## against a project can name the version it was seen on, and a refresh can tell a
 ## stale file from a customized one. Bump with .claude-plugin/plugin.json.
-const HARNESS_VERSION: String = "0.54.0"
+const HARNESS_VERSION: String = "0.55.0"
 
 ## Default bus filenames. With a session id (see _resolve_session) the id is spliced in
 ## before the extension, so two instances can each own a bus in the same user:// dir.
@@ -575,6 +575,7 @@ func _register_generic_handlers() -> void:
 	register_command("set_feature", _cmd_set_feature)
 	register_command("set_game_speed", _cmd_set_game_speed)
 	register_command("pause", _cmd_pause)
+	register_command("repaint", _cmd_repaint)
 	register_command("unpause", _cmd_unpause)
 	register_command("step_time", _cmd_step_time)
 	register_command("wait_frames", _cmd_wait_frames)
@@ -3139,12 +3140,57 @@ func _cmd_pause(_args: Dictionary) -> Dictionary:
 		msg += "; %d node(s) are PROCESS_MODE_ALWAYS (%d set explicitly: %s%s) and keep processing on a paused tree - `set-game-speed 0.01` slows them where pause cannot" % [
 			always_count, always_roots.size(), ", ".join(shown),
 			", ..." if always_roots.size() > 5 else ""]
+	# gh#51 / plant-tower-defense:G-061 (0.55.0): the converse asymmetry. A paused
+	# tree does not call _process, so a CanvasItem that repaints from _process
+	# (`func _process(_d): queue_redraw()`) keeps its LAST frame however much the
+	# state under it changes - a screenshot after `pause` + `run_method` showed the
+	# pre-pause frame and read as a failed method, a wrong region or a dead bus.
+	msg += "; canvas: a CanvasItem that repaints from _process keeps its last frame while paused - after changing state under pause, `repaint [--node PATH]` calls queue_redraw() so the next frame reflects it"
 	return {
 		"success": true,
 		"message": msg,
 		"data": {"was_paused": was_paused, "paused": true,
-			"always_count": always_count, "always_roots": always_roots},
+			"always_count": always_count, "always_roots": always_roots,
+			"canvas_repaint": "frozen_for_process_driven_redraw"},
 	}
+
+
+## Calls queue_redraw() on a node and every CanvasItem under it (gh#51 /
+## plant-tower-defense:G-061, 0.55.0). A paused tree does not run _process, so a
+## _draw()-based cue whose owner repaints from _process keeps its last frame no
+## matter what `run_method` changed under it; the workaround needed the node's
+## source read first (which node draws it, and whether it draws from _process or
+## an explicit call), and neither is discoverable from the bus. This is the one
+## command that makes `pause` + mutate + `screenshot` honest for such cues.
+## args: { "node_path": String (default the tree root) }
+## data: { "node_path", "touched": int (CanvasItems queued), "paused": bool }
+func _cmd_repaint(args: Dictionary) -> Dictionary:
+	var node: Node = get_tree().root
+	var path: String = str(args.get("node_path", ""))
+	if not path.is_empty():
+		node = get_tree().root.get_node_or_null(NodePath(path))
+		if node == null:
+			return {"success": false, "message": "Node not found: %s" % path}
+	var touched: int = _queue_redraw_recursive(node)
+	return {
+		"success": true,
+		"message": "repaint: queued redraw on %d CanvasItem(s) under %s%s" % [
+			touched, node.get_path(),
+			" (tree is paused - the next rendered frame reflects the current state; a screenshot right after reads it)" if get_tree().paused else ""],
+		"data": {"node_path": str(node.get_path()), "touched": touched, "paused": get_tree().paused},
+	}
+
+
+func _queue_redraw_recursive(node: Node) -> int:
+	var n: int = 0
+	if node == self:
+		return 0
+	if node is CanvasItem:
+		(node as CanvasItem).queue_redraw()
+		n += 1
+	for child: Node in node.get_children():
+		n += _queue_redraw_recursive(child)
+	return n
 
 
 ## Nodes that keep processing while the tree is paused: explicit

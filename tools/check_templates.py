@@ -1609,6 +1609,16 @@ def stage_runner_controls(godot, scratch):
         else:
             print("stage 4 tests: uncompilable --file target -> verdict names the compile "
                   "failure, not the selector (exit 2)")
+        # gh#52 / plant G-063 (0.55.0): the same broken script on a FULL run (no
+        # selector) must show in the summary's numbers, not only in [ERR] lines.
+        full = run_godot(godot, scratch, ["--script", "res://tools/run_tests.gd"])
+        n_scripts = len(list((scratch / "test" / "unit").glob("test_*.gd")))
+        want = "Scripts: %d of %d loaded  DID NOT LOAD: res://test/unit/test_broken_control.gd" % (n_scripts - 1, n_scripts)
+        if full.returncode != 2 or want not in full.stdout:
+            ok = fail("a full run with one uncompilable script must print %r and exit 2 (gh#52); "
+                      "got exit %d:\n%s" % (want, full.returncode, full.stdout[-1500:]))
+        else:
+            print("stage 4 tests: full run with a broken script -> `%s`, exit 2" % want)
     finally:
         broken.unlink(missing_ok=True)
 
@@ -2272,6 +2282,9 @@ def contract_rows():
          "a key no setting has must fail, naming it in `missing`",
          ["settings", "missing"], {"missing": ["harness_check/no_such_setting"]}),
         ("pause", {}, True, "behaviour and idempotency asserted by check_pause_verb()"),
+        ("repaint", {}, True, "gh#51: queue_redraw on the tree's CanvasItems", ["touched", "node_path", "paused"]),
+        ("repaint", {"node_path": "/root/NoSuchNode"}, False, "gh#51: unknown node refused by name",
+         [], {"message_contains": "Node not found"}),
         ("unpause", {}, True, "behaviour and idempotency asserted by check_pause_verb()"),
         ("look_at", {"node": "/root/Main/Prop3D"}, True,
          "default-camera resolution and effect asserted by check_look_at()"),
@@ -3455,6 +3468,15 @@ def check_pause_verb(client, scratch):
                 or "set-game-speed" not in str(r1.get("message", "")):
             return fail("pause must name the planted PROCESS_MODE_ALWAYS node (count 1, root "
                         "/root/Main/Emitter1) and point at set-game-speed; got %r" % r1)
+        # gh#51 (0.55.0): the converse asymmetry is stated in the same reply, and the
+        # repaint verb touches the fixture's CanvasItems while paused.
+        if d1.get("canvas_repaint") != "frozen_for_process_driven_redraw" or "repaint" not in str(r1.get("message", "")):
+            return fail("pause must say a _process-driven CanvasItem keeps its last frame and name `repaint`; got %r" % r1)
+        rp = call("repaint", {"node_path": "/root/Main"})
+        rd = rp.get("data", {})
+        if not rp.get("success") or rd.get("paused") is not True or int(rd.get("touched", 0)) < 3:
+            return fail("repaint under pause must succeed, report paused=True and touch the fixture's "
+                        "CanvasItems (>=3: Swatch, Tiny, Go, ...); got %r" % rp)
         if call("ping").get("data", {}).get("paused") is not True:
             return fail("ping must report paused=True after the `pause` verb")
         r2 = call("pause")  # idempotent: pausing an already-paused tree is not an error
@@ -3474,7 +3496,8 @@ def check_pause_verb(client, scratch):
                         "was_paused=False, got %r" % r4)
         print("stage 5 bridge: pause/unpause verbs flip SceneTree.paused directly "
               "(ping reflects both transitions), idempotent both directions; pause names "
-              "the 1 planted PROCESS_MODE_ALWAYS node and the set-game-speed way round it")
+              "the 1 planted PROCESS_MODE_ALWAYS node and the set-game-speed way round it; "
+              "the reply names the frozen-canvas asymmetry and repaint touched the fixture's CanvasItems")
     finally:
         call("unpause")  # never leave the scratch project paused for a later check
         client.send_command(scratch, "set_state", {"node_path": "/root/Main/Emitter1",

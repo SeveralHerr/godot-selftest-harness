@@ -8367,3 +8367,132 @@ effectiveness — the experiments/ A/B study is that, and it stays untracked by 
 **Validation run this turn:** `record_version.py --record` then `--check` OK at 0.54.0
 (14 files, 58 verbs + 62 CLI, 4 doc links). `unittest discover -s tools` — 91 OK (3
 new). `check_templates.py --static-only` — OK (only `verify_ledger.py` under templates/).
+
+## 2026-08-17 - Upstreamed 4 open gap(s) from plant-tower-defense (harness 0.18.0, 0.19.0, 0.21.0, 0.23.0, 0.24.0, 0.25.0, 0.32.0, 0.33.0, 0.36.0, 0.38.0)
+
+Pooled by `tools/upstream_gaps.py` from `C:\Users\gotmi\Documents\GitHub\plant-tower-defense\log-devtools.md`. Gap text is the project's,
+verbatim; only the id line is rewritten (qualified with the project name so
+ids from two projects cannot collide, plus a `source:` back-pointer).
+
+- Gap: **`pause` freezes the mechanism that repaints, so a state change made while paused
+  is invisible until you know which node redraws from `_process`** — the workaround is
+  three commands and requires reading the node's source first.
+  `pause`, then `run-method drop_husk` ×5, then `screenshot`: an unchanged frame. Nothing
+  in the reply says why. `HuskLayer` repaints from `_process` (`game/husk_layer.gd:87`),
+  which a paused tree does not call, so the canvas still held the pre-drop frame — while
+  `ping` cheerfully answers, because the bridge is process-mode ALWAYS and the game under
+  it is not. The fix was
+  `run-method --node /root/Game/Entities/HuskLayer --method queue_redraw`, which only
+  works if you already know that node is the one drawing and that it draws from
+  `_process`.
+  This is not a niche shape: every `_draw`-based cue in a Godot game repaints from either
+  `_process` or an explicit `queue_redraw`, and pausing to inspect a transient is exactly
+  the case `pause` is documented for ("catch a sub-second effect, poll for the moment,
+  pause, then inspect at no rush"). The husks here were transient *because* they rot in
+  4.5s, so unpausing to get a repaint races the thing being inspected.
+  - [plant-tower-defense:G-061] status: fixed | fixed-in: 0.55.0 (`repaint` verb; pause names the frozen canvas) | dup-of: gh#51 | seen: 1 | harness: 0.38.0 | source: plant-tower-defense 2026-08-17
+  - Improvement: a `repaint [--node PATH]` verb that calls `queue_redraw()` on the node and
+    its `CanvasItem` descendants (whole tree by default) and returns how many it touched —
+    one command, no source-reading, and it composes with `pause`. Failing that, have
+    `pause`'s own reply carry a `canvas_repaint: frozen` note naming the consequence, so an
+    unchanged frame is diagnosable from the output instead of from a guess.
+
+- Gap: **the verify ledger detected that a `warranted` row carried no Phase 4 checks, said
+  so, and wrote the row anyway.** `verify_ledger.py record` printed
+  `warranted with no Phase 4 checks recorded - the claim that earned it is not in the row`
+  and then `recorded unknown run, value=warranted - reached 3/3 changed file(s)`. Both
+  lines are true and the warning is the useful one, but it is advisory text on stderr that
+  nothing reads back: `verify_ledger.py stats` does not count rows in that state, so the
+  ledger's own headline metric treats a row whose verdict has no recorded evidence
+  identically to one that does. My row is exactly such a row — the runtime work was real
+  and driven by hand, so the verdict is earned, but the row does not carry it.
+  - [plant-tower-defense:G-061b] status: fixed | fixed-in: 0.55.0 (kept + `evidence: none` on the row + counted by stats) | dup-of: gh#51 | seen: 1 | source: plant-tower-defense 2026-08-17
+  - [G-062] status: open | seen: 1 | harness: 0.38.0
+  - Improvement: `stats` should print the count of `warranted`/`insufficient` rows with an
+    empty or absent `checks` array as its own line — "N of M verdicts carry no check
+    evidence". The warning already knows how to detect the state; the gap is that nobody
+    ever sees it again after the run that produced it scrolls past.
+
+- Gap: **`run_tests.gd` reported `Total: 531 | Passed: 531 | Failed: 0 | Skipped: 0` on a run
+  that had silently lost 64 tests to a parse error.** This is a second sighting of the class
+  the `run_tests.py` wrapper exists for, in a new shape worth recording: not a test that
+  aborted mid-method, but a whole SCRIPT that failed to load.
+  ```
+  SCRIPT ERROR: Parse Error: There is already a variable named "err" declared in this scope.
+  ERROR: Failed to load script "res://test/unit/test_economy.gd" with error "Parse error".
+    Total: 531  |  Passed: 531  |  Failed: 0  |  Skipped: 0
+  ```
+  The wrapper exited 2 and quoted it, so the safety net held — and that is the point: the
+  denominator moved 596 → 531 and **`Passed == Total` the whole way**, so the headline line
+  is indistinguishable from a clean run of a smaller suite. `Suite: 7 test script(s)` was
+  still 7, because discovery counts files and this file was discovered and then failed to
+  load. Nothing in the summary block says a script is missing from the run.
+  - [plant-tower-defense:G-063] status: fixed | fixed-in: 0.55.0 (`Scripts: N of M loaded  DID NOT LOAD: ...`) | dup-of: gh#52 | seen: 1 | harness: 0.38.0 | source: plant-tower-defense 2026-08-17
+  - Improvement: `run_tests.gd` should carry its own load-failure count into the summary —
+    `Scripts: 6 of 7 loaded` beside the existing `Suite:` line, and a non-zero shortfall as
+    exit 1 in its own right. It already knows: it iterates the discovered files and the load
+    returns null. The wrapper catching this is the correct backstop, but a runner whose
+    headline says `ALL TESTS PASSED` over a suite missing 11% of itself is a runner that
+    cannot be run directly, and `run_tests.gd` is what a fresh session reaches for first.
+
+- Gap: **the triage table has no row for "the changed call site is already driven by a hosted
+  scene in the headless suite", so a correctly-skipped runtime pass has nowhere honest to
+  live.** This cycle's diff is an autoload guard plus one call site in `Game.arm_uproot`. That
+  site is already exercised by `test_the_move_tip_is_spent_only_when_it_is_actually_shown`
+  (`test/unit/test_economy.gd:2571`), which instantiates `game.tscn`, places two cobs,
+  upgrades one and drives the real arm path. Launching would have re-driven the same code with
+  a renderer attached. Tier (c) is `static func`s and `const` tables only; this is instance
+  methods, so the table says full run.
+  I recorded the row with `"runtime": "skipped"` and a `skipped:` string arguing the case,
+  which the ledger accepted — but that is prose in a field, not a tier, so `stats` counts this
+  as a run that simply had no runtime rather than one that reasoned about not needing it.
+  - [plant-tower-defense:G-064] status: fixed | fixed-in: 0.55.0 (tier (c) covers an instance method whose call site a hosted-scene test drives; runtime.skipped names the test) | seen: 1 | harness: 0.38.0 | source: plant-tower-defense 2026-08-17
+  - Improvement: a tier for **"headless integration covers the changed path"** — the test that
+    stands in must be NAMED (tier (c) already sets that precedent) and must be one that hosts
+    a scene, which is a mechanical property a reader can check. Without it the honest choice
+    is between an overkill launch and a row that looks like a gap.
+  - Note: no gaps beyond these two this turn.
+
+  - [G-063] status: open | seen: 1 | harness: 0.54.0 | upstream: gh#52 | note: reconciled
+    against the INSTALLED 0.54.0 the same cycle it was filed, per `gap-reconcile`, and it
+    survives — in a sharper form worth the re-check. 0.54.0 already collects the list
+    (`_selected_load_failures`, declared `templates/tools/run_tests.gd:127`, appended
+    unconditionally at `:552`) and already exports it in `--json` at `:715`. It is printed at
+    exactly one place, `:799`, guarded by `_selection_error != ""` — the selector-matched-
+    nothing case gh#10 added it for. On a full run `_selection_error` is empty, so the branch
+    is skipped and a populated list never reaches the summary. **The data is one `elif` away
+    from being visible**, which is a much better issue than the one I would have filed from
+    the 0.38.0 observation alone.
+
+## 2026-08-17 — 0.55.0: loop tick twenty-three — the other direction of the pause asymmetry
+
+Reviewed: 8 open beads, two NEW issues (gh#51, gh#52), `PURPOSE.md`, both project logs
+(four new plant gaps, three of them the issues' twins). All from plant, still pinned at
+0.38.0, every claim re-verified against 0.54.0 before filing.
+
+- **[gh#51.1 / plant G-061 — fixed] `repaint [--node PATH]`, and `pause` says why you
+  need it.** 0.40.0's `pause` note covered nodes that keep *running* on a paused tree
+  (`PROCESS_MODE_ALWAYS`); this is the converse — a `_draw()` cue whose owner repaints
+  from `_process` keeps its *last frame*, so `pause` + `run_method` + `screenshot`
+  showed the pre-pause picture and read as three other bugs first. Both halves, contract
+  rows, stage 5 asserts the note and that `repaint` under pause touches the fixture's
+  CanvasItems.
+- **[gh#51.2 / plant G-061b — fixed] a check-less `warranted` is kept, stamped `evidence:
+  none`, counted by `stats`.** The schema said "downgraded" and the code kept it — one
+  had to be wrong; the honest verdict stays, the row now carries the fact, and it is
+  visible after the stderr line has gone.
+- **[gh#52 / plant G-063 — fixed] `run_tests.gd` prints `Scripts: N of M loaded  DID NOT
+  LOAD: …`.** The report's premise was oversold — a load failure already exits 2 with
+  `RUNNER ERROR` and an `[ERR]` line — but the summary's *numbers* read like a smaller
+  clean suite, and the fix is the numbers. Stage 4 runs the planted uncompilable script
+  on a full run and asserts the line and exit 2. Said the correction in the close.
+- **[plant G-064 — fixed] tier (c) covers an instance method whose changed call site a
+  hosted-scene test already drives**; the row records `tier: headless-only` and
+  `runtime: {"skipped": "<that test>"}` — a reasoned skip, not a run with no runtime.
+
+- Gap: no new gap this turn.
+
+**Validation run this turn:** `record_version.py --record` then `--check` OK at 0.55.0
+(14 files, 59 verbs + 63 CLI, 4 links). `unittest discover -s tools` — 91 OK.
+`check_templates.py --full` — OK, all stages, `stage 4 tests: full run with a broken script -> Scripts: 1 of 2 loaded  DID NOT LOAD: …, exit 2`, `stage 6 contract: 95/95`. `check_real_suite.py ../plant-tower-defense`
+(run_tests.gd changed) — OK: `BEFORE (0.38.0): Total 596 | Passed 417 | Failed 179 | exit 1`, `AFTER (0.55.0): 596 | 417 | 179 | exit 1` — plant's own tree is mid-work with 179 failures on both sides; equal both sides is the point.
