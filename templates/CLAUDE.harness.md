@@ -189,7 +189,9 @@ so step + read pairs carry no ambient drift), `set-game-speed` (refuses a scale 
 0.01 — that is a freeze, not a speed; use `pause`/`unpause` for a real freeze),
 `wait-frames` (advance time deterministically), `pause`/`unpause` (sets
 `SceneTree.paused` directly, bus keeps answering — catch a sub-second effect, poll for
-the moment, pause, then inspect at no rush);
+the moment, pause, then inspect at no rush; **`PROCESS_MODE_ALWAYS` nodes keep
+animating on a paused tree** — a HUD usually is one — and `pause`'s reply names them;
+`set-game-speed 0.01` slows those where pause cannot);
 `project-settings [--filter PREFIX|--name KEY]` (ProjectSettings as the RUNNING game
 sees them — did the value written to `project.godot` actually land?);
 `contained-in --node PATH --within PATH` (is this Control's box inside that panel's;
@@ -357,10 +359,20 @@ runtime, which the static checker cannot see) and `name_check_ignore` (path pref
   `user://findings_last.json` (path printed when the count is non-zero) — a transient
   is diagnosable after the frame that produced it is gone.
 - A live check that touches persisted state (a key whose handler saves) writes the
-  developer's real `user://` file — `--isolated` does not isolate `user://`. Every
-  `launch` copies `*.save` aside; `quit` names what the run changed;
-  `restore-userstate` puts the copy back, `launch --snapshot-userstate` does that on
-  quit automatically. A save left changed shows up as failing headless tests later.
+  developer's real `user://` file — `--isolated` does not isolate `user://`. `launch`
+  copies `*.save` aside and **`quit` restores them by default** (`--no-snapshot-userstate`
+  keeps a run's writes; `restore-userstate` reverts after the fact). `quit` names what
+  the run changed, `rewritten identically` when only the mtime moved. In the headless
+  suite, `run_tests.gd` prints `user:// writes by test:` naming the test that wrote —
+  point that test's `setup()` at a temp path.
+- `_T.assert_ne(actual, unexpected)` for "the guard moved this"; `_T.assert_box` for a
+  Control's landed box; `_T.quiesce(node)` after hosting.
+- `verify_ledger.py reach` is **file-level** (`[file-level: loaded, not lines-executed]`)
+  and lists the changed functions in reached files; a guard clause or `_process()` body
+  can read as reached having never run — prove it with `get-state`/`run-method`.
+- `findings`: `signal_unconnected` is one line per (script, signal) with a node count and
+  has its own baseline (`findings --baseline-write` accepts a deliberately unconnected
+  signal once; only NEW pairs gate).
 - `_T.assert_margin(values, threshold, margin, recorded)` gates a tuned constant on the
   corpus items sitting near it — use it instead of hand-rolling a sweep.
 - `run_tests.py` exits 2 on a results file two runs wrote (`Run: <id> pid N` brackets

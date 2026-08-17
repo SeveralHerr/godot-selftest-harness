@@ -89,11 +89,11 @@ from pathlib import Path
 from typing import Optional  # noqa: F401
 
 
-# harness-version: 0.39.0
+# harness-version: 0.40.0
 # Version of the godot-selftest-harness this client was copied from. Compared against
 # the running game's own stamp by the `harness-version` verb, so a half-refreshed
 # install (new client, old autoload) is visible instead of mysterious.
-HARNESS_VERSION = "0.39.0"
+HARNESS_VERSION = "0.40.0"
 
 COMMANDS_FILE = "devtools_commands.json"
 RESULTS_FILE = "devtools_results.json"
@@ -1760,8 +1760,7 @@ def userstate_stat_take(project_path: Path, user_dir: Path) -> int:
     try:
         for f in sorted(user_dir.iterdir()):
             if f.is_file():
-                st = f.stat()
-                stat[f.name] = [st.st_size, st.st_mtime]
+                stat[f.name] = _userstate_stat_entry(f)
     except OSError:
         return 0
     out = project_path / ".devtools" / USERSTATE_STAT
@@ -1769,6 +1768,25 @@ def userstate_stat_take(project_path: Path, user_dir: Path) -> int:
     out.write_text(json.dumps({"user_dir": str(user_dir), "files": stat,
                                "taken_unix": time.time()}), encoding="utf-8")
     return len(stat)
+
+
+_USERSTATE_MD5_MAX = 4 * 1024 * 1024
+
+
+def _userstate_stat_entry(f: Path):
+    """[size, mtime, md5-or-""] - the md5 (gh#39, 0.40.0) tells `content changed`
+    from `rewritten identically`: an identical rewrite says a writer RAN and the
+    values happened to match, which is a different bug from a value overwritten,
+    and it is where an investigation should start."""
+    import hashlib
+    st = f.stat()
+    digest = ""
+    if st.st_size <= _USERSTATE_MD5_MAX:
+        try:
+            digest = hashlib.md5(f.read_bytes()).hexdigest()
+        except OSError:
+            digest = ""
+    return [st.st_size, st.st_mtime, digest]
 
 
 # The bridge's own files churn every run and are not the developer's state.
@@ -1795,10 +1813,17 @@ def userstate_stat_diff(project_path: Path):
     now = {}
     for f in user_dir.iterdir():
         if f.is_file():
-            st = f.stat()
-            now[f.name] = [st.st_size, st.st_mtime]
+            now[f.name] = _userstate_stat_entry(f)
     own = _USERSTATE_OWN
-    changed = sorted(n for n in now if n in before and now[n] != before[n] and n not in own)
+    changed = []
+    for n in sorted(now):
+        if n not in before or n in own or now[n][:2] == before[n][:2]:
+            continue
+        b_md5 = before[n][2] if len(before[n]) > 2 else ""
+        if b_md5 and now[n][2] and b_md5 == now[n][2] and now[n][0] == before[n][0]:
+            changed.append(n + " (rewritten identically - a writer ran; the values matched)")
+        else:
+            changed.append(n)
     created = sorted(n for n in now if n not in before and n not in own)
     deleted = sorted(n for n in before if n not in now and n not in own)
     return changed, created, deleted, user_dir
@@ -2769,10 +2794,15 @@ def cmd_fire_entry_point(args, project_path: Path):
 
 
 def cmd_pause(args, project_path: Path):
-    """Pause SceneTree.paused directly (gh#26)."""
+    """Pause SceneTree.paused directly (gh#26). Data keys read: always_count,
+    always_roots (0.40.0, moving-in:G-061) - the nodes that keep processing."""
     result = send_command(project_path, "pause", {})
     if result["success"]:
         print(result["message"])
+        data = result.get("data") or {}
+        roots = data.get("always_roots")
+        if roots and len(roots) > 5:
+            print("  PROCESS_MODE_ALWAYS set on: " + ", ".join(str(r) for r in roots))
     else:
         print(f"Failed: {result['message']}", file=sys.stderr)
         sys.exit(1)
@@ -3254,6 +3284,25 @@ def cmd_findings(args, project_path: Path):
         print("UI baseline: none on disk - every ui_layout finding gates. "
               "Run `findings --baseline-write` to accept the current UI set.")
 
+    # gh#41 (0.40.0): the signal_unconnected baseline, own file, keyed on
+    # (script, signal). Older games have no such keys: say so rather than guess.
+    if "signal_baseline_in_use" not in data:
+        print("Signal baseline: not reported (this game's harness predates 0.40.0; every "
+              "signal_unconnected finding gates, one line per NODE).")
+    elif data.get("signal_baseline_written"):
+        print(f"Signal baseline: written to {data.get('signal_baseline_path')} - "
+              f"{data.get('signal_pre_existing_count', 0)} (script, signal) pair(s) accepted.")
+    elif data["signal_baseline_in_use"]:
+        print(f"Signal baseline: {data.get('signal_new_count', 0)} NEW, "
+              f"{data.get('signal_pre_existing_count', 0)} pre-existing (script, signal) pair(s) "
+              "(excluded above). Only NEW signal_unconnected findings gate.")
+    elif cmd_args.get("use_baseline") is False:
+        print("Signal baseline: ignored (--no-baseline) - every signal_unconnected pair gates.")
+    elif data.get("signal_new_count", 0):
+        print(f"Signal baseline: none on disk - {data.get('signal_new_count', 0)} "
+              "signal_unconnected pair(s) gate. A signal left unconnected on purpose (an "
+              "outward API, a documented decision) is accepted with `findings --baseline-write`.")
+
     # plant-tower-defense:G-030: full records survive the frame they came from.
     if data.get("last_findings_path"):
         print(f"Full records kept at {data['last_findings_path']} "
@@ -3723,31 +3772,41 @@ def cmd_launch(args, project_path: Path):
         _warn_shared_user_dir(launch_user_dir, project_path)
     except FileNotFoundError:
         pass  # no user:// yet (first ever launch); nothing to diff against
+    # gh#40 / plant-tower-defense:G-054 (0.40.0): restore on quit is the DEFAULT.
+    # Two projects on one day had a bridge session persist into the developer's
+    # real save through a verb that behaved correctly (`capture()` rebinding a
+    # key; `bank_score()`), and the damage surfaced twenty minutes later as five
+    # unrelated-looking headless failures. A verification session that silently
+    # mutates the developer's state is never what was wanted; one that puts it
+    # back costs a file copy. `--no-snapshot-userstate` opts out for a launch
+    # whose writes are the point (a playtest); `--snapshot-userstate GLOB...`
+    # widens what is restored beyond *.save.
     snapshot_patterns = getattr(args, "snapshot_userstate", None)
-    restore_on_quit = snapshot_patterns is not None
+    restore_on_quit = not getattr(args, "no_snapshot_userstate", False)
     try:
         snap_user_dir = get_user_data_path(project_path)
     except FileNotFoundError as exc:
         snap_user_dir = None
-        if restore_on_quit:
+        if snapshot_patterns is not None:
             print(f"Error: --snapshot-userstate needs the user:// directory: {exc}",
                   file=sys.stderr)
             sys.exit(2)
     if snap_user_dir is not None:
         patterns = snapshot_patterns or [USERSTATE_DEFAULT_GLOB]
         manifest = userstate_snapshot(project_path, snap_user_dir, patterns, restore_on_quit)
+        names = ", ".join(manifest["files"][:6]) + (", ..." if len(manifest["files"]) > 6 else "")
         if restore_on_quit:
-            print(f"userstate: snapshotted {len(manifest['files'])} file(s) matching "
-                  f"{', '.join(patterns)} from {snap_user_dir}; `quit` restores them "
-                  f"(files the run creates under those patterns are removed again)")
+            print(f"userstate: {len(manifest['files'])} file(s) matching {', '.join(patterns)} "
+                  f"in {snap_user_dir}{f' ({names})' if names else ''} will be RESTORED on "
+                  f"`quit` (files the run creates under those patterns are removed again; "
+                  f"--no-snapshot-userstate keeps this run's writes)")
         elif manifest["files"]:
             # plant-tower-defense:G-050: the copy exists either way; say so at the
             # moment the decision can still be made, naming the files at risk.
-            print(f"userstate: {len(manifest['files'])} file(s) in {snap_user_dir} "
-                  f"({', '.join(manifest['files'][:6])}{', ...' if len(manifest['files']) > 6 else ''}) "
-                  f"copied to .devtools/{USERSTATE_DIR}/ - this run shares the developer's "
-                  f"real user://; `restore-userstate` puts them back if it writes them, or "
-                  f"relaunch with --snapshot-userstate to restore on quit automatically")
+            print(f"userstate: {len(manifest['files'])} file(s) in {snap_user_dir} ({names}) "
+                  f"copied to .devtools/{USERSTATE_DIR}/ and NOT restored on quit "
+                  f"(--no-snapshot-userstate) - this run shares the developer's real "
+                  f"user://; `restore-userstate` puts them back after the fact")
 
     with out_log.open("w", encoding="utf-8") as out_f, \
             err_log.open("w", encoding="utf-8") as err_f:
@@ -4474,10 +4533,14 @@ def main():
                         "Godot has no switch for it.")
     p.add_argument("--snapshot-userstate", dest="snapshot_userstate", nargs="*",
                    metavar="GLOB", default=None,
-                   help="Restore the user:// files matching GLOB(s) (default *.save) on "
-                        "`quit`, removing any the run created. A copy is taken on EVERY "
-                        "launch regardless (recoverable with `restore-userstate`); this flag "
-                        "makes the restore automatic. --isolated does not isolate user://")
+                   help="Which user:// files `quit` restores (default *.save). Restore on "
+                        "quit is the DEFAULT since 0.40.0 (gh#40) - a copy is taken on every "
+                        "launch and `quit` puts it back, removing files the run created "
+                        "under the same patterns; this flag only widens the set. "
+                        "--isolated does not isolate user://")
+    p.add_argument("--no-snapshot-userstate", dest="no_snapshot_userstate", action="store_true",
+                   help="Keep this run's user:// writes (a playtest whose save is the point). "
+                        "The copy is still taken; `restore-userstate` can revert after the fact")
     p.add_argument("--no-mute", action="store_true",
                    help="Do not pass --mute (a --write-movie run records the audio bus, "
                         "and a muted run captures silence)")

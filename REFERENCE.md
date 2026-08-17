@@ -494,14 +494,56 @@ Notable behaviors:
   for `.import` metadata; a crash mid-write leaves them beside the assets, where they
   show up as untracked in `git status` and invite being committed. Never touches
   `.godot/`.
+- **`pause` names what keeps running** (0.40.0, moving-in:G-061). A paused tree is
+  not a frozen one: any node the project set to `PROCESS_MODE_ALWAYS` — and a HUD,
+  where ALWAYS is mandatory or the pause menu cannot draw itself, is exactly what a
+  caller pauses to measure — keeps processing. `RewardCard` read `visible: true` then
+  `visible: false` one command later on a tree `ping` insisted was paused, and it read
+  as a bus fault. The reply now says `Tree paused; N node(s) are PROCESS_MODE_ALWAYS
+  (K set explicitly: /root/…) and keep processing on a paused tree - set-game-speed
+  0.01 slows them where pause cannot`; `data.always_count` / `always_roots`. Stage 5
+  plants one ALWAYS node and asserts count 1, its path, and the pointer.
+- **`run_tests.gd` names the TEST that wrote `user://`** (0.40.0, gh#39 /
+  plant-tower-defense:G-052): a stat + md5 of the files under `user://` per test
+  method (bridge files excluded), printed after `Suite:` as
+  `user:// writes by test: N write(s) to M file(s)` then `highscore.save <-
+  test_quitting_a_run… (test_selftest.gd) [content changed]` — or `[rewritten
+  identically]`, `[created]`, `[deleted]`. `--json` carries `user_writes`. The
+  per-run line from `run_tests.py` said "highscore.save changed" and stopped there;
+  recovering the test cost a hand-instrumented `_save()` and a 535-test run.
+- **`_T.assert_ne(actual, unexpected, context)`** (0.40.0, gh#39 /
+  plant-tower-defense:G-053) — "did the guard actually move this", reported with the
+  value (`Expected anything but user://highscore.save, got exactly that`) instead of
+  `assert_false(a == b)`'s `Expected false but got true` with both values interpolated
+  by hand.
+- **`verify_ledger.py reach` says it is file-level, and names the changed functions**
+  (0.40.0, gh#38 / moving-in:G-060). `reached 1/1 changed file(s)` was true of a run in
+  which the changed `_process()` body provably ran zero times (`_search_left: 12`,
+  its initial value): the game LOADED the file. The worktree line now reads `reached
+  1/1 changed file(s) [file-level: loaded, not lines-executed]`, and `reach` prints an
+  advisory block — `changed function(s) in reached file(s) - N … unpack_ui.gd:
+  _process, <top-level>` — from `git diff -U0` intersected with the enclosing `func`;
+  it never gates and never claims execution. It leaves the reader one `get-state` /
+  `run-method` from the answer instead of a 1/1 that reads stronger than it is.
 - **`_T.assert_margin(values, threshold, margin, recorded, context)`** (0.36.0,
   moving-in:G-057) — the threshold-margin gate a project had hand-rolled three times:
   sweep a corpus, one number per item; fail on any item newly within `margin` of the
   threshold, any recorded near-the-line value that moved, and any stale record. Returns
   every violation on one line. Stage 4 plants a passing recorded set and a new
   near-the-line item that must be refused.
-- **A `user://` snapshot is taken on EVERY `launch`; `--snapshot-userstate` only arms
-  the automatic restore** (0.39.0, plant-tower-defense:G-050). Before this, the report
+- **`launch` restores `user://*.save` on `quit` BY DEFAULT** (0.40.0, gh#40 /
+  plant-tower-defense:G-054). Two projects on one day had a bridge session persist
+  into the developer's real save through a verb that behaved correctly (`capture()`
+  rebinding a key; `bank_score()`), and the damage surfaced twenty minutes later as
+  five unrelated-looking headless failures. The launch line now says `N file(s) …
+  will be RESTORED on quit`; **`--no-snapshot-userstate`** keeps a run's writes (a
+  playtest whose save is the point — the copy is still taken and `restore-userstate`
+  can still revert); `--snapshot-userstate GLOB…` widens what is restored beyond
+  `*.save`. The `quit` report says **`rewritten identically`** for a file whose bytes
+  match and whose mtime moved (gh#39) — a writer ran and the values happened to
+  match, which is a different bug from a value overwritten.
+- **A `user://` snapshot is taken on EVERY `launch`** (0.39.0, plant-tower-defense:G-050;
+  0.39.0's `--snapshot-userstate` opt-in became 0.40.0's default). Before this, the report
   that a run had overwritten a developer's campaign best arrived at `quit`, when the
   previous value existed nowhere. Now `launch` copies `*.save` under
   `.devtools/userstate_snapshot/` (the previous launch's copy is kept as
@@ -660,7 +702,8 @@ Notable behaviors:
   findings list with no assertions from the project. `data`:
   `findings[{source, code, severity, path, message}]`, `counts`, `checks_run`,
   `checks_skipped[{check, reason}]`, `viewport`, `baseline_in_use`, `new_count`,
-  `pre_existing_count`.
+  `pre_existing_count`, and (0.40.0) `signal_baseline_in_use`, `signal_new_count`,
+  `signal_pre_existing_count`, `signal_baseline_path`, `signal_baseline_written`.
 
   It reuses each verb's own implementation rather than re-deriving it, so it can
   never disagree with `validate_ui` / `reachable_ui` / `performance` /
@@ -672,7 +715,19 @@ Notable behaviors:
   `signal_unconnected` reports only signals a *script* declares
   (`Script.get_script_signal_list()`), never the engine built-ins every `Node`
   inherits — those are legitimately unconnected almost everywhere and would bury
-  the real findings.
+  the real findings. **One finding per (script, signal), with a node count**
+  (0.40.0, gh#41 / moving-in:G-062): a signal declared once on a script instanced
+  24 times used to print 24 lines differing only by a node index — 57 lines for 11
+  facts, and a report that was permanently red and permanently unread. The finding
+  carries `script`, `signal`, `nodes` and up to 20 `paths`; the message ends
+  `(24 node(s))`. **It has a baseline of its own**, `user://signal_findings_baseline.json`,
+  keyed on the (script, signal) pair and not on a node path (a per-instance key would
+  need 24 entries for one decision and re-present them all as NEW the day a box is
+  added): `findings --baseline-write` accepts the current pairs — a signal left
+  unconnected on purpose (an outward API, an emit the project documents leaving
+  dangling) is accepted once — and only a NEW pair gates; `--no-baseline` re-reports
+  everything. Stage 5 instances one emitter script three times and asserts one
+  finding with `nodes=3`, then the accept / exclude / re-report round trip.
 
   **`checks_run` / `checks_skipped` are load-bearing.** A consolidated report is
   the easiest place in the whole system for a check to quietly vanish from, so it

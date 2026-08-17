@@ -144,8 +144,8 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
-# harness-version: 0.39.0
-HARNESS_VERSION = "0.39.0"
+# harness-version: 0.40.0
+HARNESS_VERSION = "0.40.0"
 
 LEDGER_PATH = Path(".devtools") / "verify-runs.jsonl"
 
@@ -249,6 +249,74 @@ def changed_worktree(root):
         if path:
             changed.add(_norm(path.strip('"')))
     return changed
+
+
+_FUNC_RE = re.compile(r"^\s*(?:static\s+)?func\s+([A-Za-z_]\w*)\s*\(")
+_HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
+
+
+def changed_functions(root, files, base=None):
+    """{file: [function names]} for the .gd files in `files` whose lines changed
+    (gh#38 / moving-in:G-060, 0.40.0). Worktree diff against HEAD by default, or
+    against `base` (a commit) for the branch set; an untracked file counts every
+    function it declares. A hunk outside any `func` is recorded as "<top-level>".
+
+    Reach is file-level: `split_reach` intersects paths, so `reached 1/1` says the
+    game LOADED unpack_ui.gd and nothing about whether `_process()`'s changed body
+    ran - a private counter read back at its initial value proved it had not.
+    Observing execution needs something a scene tree does not carry, so this
+    names the functions whose lines changed and leaves the reader one `get-state`
+    or `run-method` from the answer, instead of a 1/1 that reads stronger than it is.
+    """
+    out = {}
+    for rel in sorted(files or []):
+        if not str(rel).endswith(".gd"):
+            continue
+        path = root / rel
+        if not path.is_file():
+            continue
+        try:
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            continue
+        # enclosing func per line, computed once
+        enclosing = []
+        current = "<top-level>"
+        for ln in lines:
+            m = _FUNC_RE.match(ln)
+            if m:
+                current = m.group(1)
+            elif ln.strip() and not ln.startswith((" ", "\t")) and not ln.lstrip().startswith("#"):
+                current = "<top-level>"  # a class-level statement ends the previous func
+            enclosing.append(current)
+        args = ["diff", "-U0", "--no-color"] + ([base] if base else []) + ["--", str(rel)]
+        diff = _git(root, *args)
+        if diff is None:
+            continue
+        tracked = _git(root, "ls-files", "--error-unmatch", "--", str(rel)) is not None
+        names = []
+        if not tracked and not diff.strip():
+            names = sorted({e for e in enclosing if e != "<top-level>"}) or ["<top-level>"]
+        else:
+            seen = set()
+            for dl in diff.splitlines():
+                m = _HUNK_RE.match(dl)
+                if not m:
+                    continue
+                start = int(m.group(1))
+                count = int(m.group(2)) if m.group(2) is not None else 1
+                if count == 0:
+                    # a pure deletion: attribute to the line the hunk sits before
+                    idx = [max(0, min(start - 1, len(enclosing) - 1))] if enclosing else []
+                else:
+                    idx = range(start - 1, min(start - 1 + count, len(enclosing)))
+                for i in idx:
+                    if 0 <= i < len(enclosing) and enclosing[i] not in seen:
+                        seen.add(enclosing[i])
+                        names.append(enclosing[i])
+        if names:
+            out[str(rel)] = names
+    return out
 
 
 def changed_branch(root):
@@ -1064,7 +1132,10 @@ def _reach_line(split):
     unreached = split.get("unreached") or []
     total = len(reached) + len(implicit) + len(alias) + len(base) + len(unreached)
     if total:
-        detail = "reached %d/%d changed file(s)" % (len(reached), total)
+        # gh#38: FILE-level, said on the line itself. A reached file is one the game
+        # loaded; whether the changed lines in it executed is not observed here.
+        detail = "reached %d/%d changed file(s) [file-level: loaded, not lines-executed]" % (
+            len(reached), total)
     elif split.get("not_applicable"):
         # A zero that git can vouch for: files did change, and every one of them is
         # excused from the denominator. The annotations below name which.
@@ -1182,6 +1253,20 @@ def cmd_reach(args, root):
         print("credited as base class (an observed script `extends` it - a static read "
               "of the files, no config): "
               + ", ".join("%s extended by %s" % (p, bv.get(p, "?")) for p in u["reached_base"]))
+    # gh#38 / moving-in:G-060: name the changed functions inside the reached files.
+    # Advisory, never gating - the scene tree cannot say whether they ran; the
+    # reader can, with one get-state / run-method against the live game.
+    reached_files = set(w.get("reached") or []) | set(b.get("reached") or [])
+    if reached_files:
+        funcs = changed_functions(root, reached_files)
+        if funcs:
+            total_fn = sum(len(v) for v in funcs.values())
+            print("changed function(s) in reached file(s) - %d, advisory: reach is file-level "
+                  "and does NOT observe these executing; a guard clause, an early return or a "
+                  "_process() body that never ran still reads as reached above. Prove one "
+                  "with get-state / run-method:" % total_fn)
+            for f in sorted(funcs):
+                print("  %s: %s" % (f, ", ".join(funcs[f])))
     if u["reached"] is not None and not u["reached"] \
             and not (u["reached_implicit"] or []) \
             and not (u["reached_alias"] or []) \

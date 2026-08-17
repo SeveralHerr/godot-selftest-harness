@@ -24,6 +24,7 @@ sys.path.insert(0, str(REPO / "templates" / "tools"))
 import devtools  # noqa: E402
 import run_tests as run_tests_py  # noqa: E402
 import import_check  # noqa: E402
+import verify_ledger  # noqa: E402
 import contextlib, io
 
 
@@ -435,6 +436,72 @@ class ImportTmpSweepCase(unittest.TestCase):
     def test_clean_tree_sweeps_nothing(self):
         (self.project / "assets" / "audio" / "q.ogg.import").write_text("x", encoding="utf-8")
         self.assertEqual(import_check.sweep_import_tmp(self.project), [])
+
+
+class UserstateRewrittenIdenticallyCase(unittest.TestCase):
+    """gh#39: `content changed` vs `rewritten identically` (mtime moved, bytes same)."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.project = Path(self._tmp.name) / "proj"
+        (self.project / ".devtools").mkdir(parents=True)
+        self.user_dir = Path(self._tmp.name) / "user"
+        self.user_dir.mkdir()
+        (self.user_dir / "highscore.save").write_text("v6 308 5008", encoding="utf-8")
+        (self.user_dir / "keys.save").write_text("m0", encoding="utf-8")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_identical_rewrite_is_named_as_such_and_real_change_is_not(self):
+        devtools.userstate_stat_take(self.project, self.user_dir)
+        f = self.user_dir / "highscore.save"
+        f.write_text("v6 308 5008", encoding="utf-8")   # same bytes, new mtime
+        os.utime(f, (time.time() + 5, time.time() + 5))
+        (self.user_dir / "keys.save").write_text("m0 cb1", encoding="utf-8")
+        changed, created, deleted, _ = devtools.userstate_stat_diff(self.project)
+        self.assertEqual(created, [])
+        self.assertEqual(deleted, [])
+        self.assertEqual(len(changed), 2, changed)
+        self.assertTrue(changed[0].startswith("highscore.save (rewritten identically"), changed)
+        self.assertEqual(changed[1], "keys.save")
+
+
+class ChangedFunctionsCase(unittest.TestCase):
+    """gh#38 / moving-in:G-060: the changed functions inside a reached file."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        subprocess.run(["git", "init", "-q"], cwd=self.root, check=True)
+        subprocess.run(["git", "config", "user.email", "t@t"], cwd=self.root, check=True)
+        subprocess.run(["git", "config", "user.name", "t"], cwd=self.root, check=True)
+        self.src = self.root / "unpack_ui.gd"
+        self.src.write_text(
+            "extends Control\n\nconst BUDGET := 12\nvar _search_left := BUDGET\n\n"
+            "func _ready() -> void:\n\tpass\n\n"
+            "func _process(_d: float) -> void:\n\tif _search_left > 0:\n\t\t_search_left -= 1\n\n"
+            "static func helper() -> int:\n\treturn 1\n", encoding="utf-8")
+        subprocess.run(["git", "add", "-A"], cwd=self.root, check=True)
+        subprocess.run(["git", "commit", "-qm", "base"], cwd=self.root, check=True)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_names_only_the_functions_whose_lines_changed(self):
+        text = self.src.read_text(encoding="utf-8")
+        text = text.replace("_search_left -= 1", "_search_left -= 2")   # inside _process
+        text = text.replace("const BUDGET := 12", "const BUDGET := 6")  # top-level
+        self.src.write_text(text, encoding="utf-8")
+        got = verify_ledger.changed_functions(self.root, {"unpack_ui.gd"})
+        self.assertEqual(got, {"unpack_ui.gd": ["<top-level>", "_process"]})
+
+    def test_unchanged_file_is_absent_and_untracked_file_lists_every_func(self):
+        self.assertEqual(verify_ledger.changed_functions(self.root, {"unpack_ui.gd"}), {})
+        new = self.root / "fresh.gd"
+        new.write_text("extends Node\n\nfunc a() -> void:\n\tpass\n\nfunc b() -> void:\n\tpass\n",
+                       encoding="utf-8")
+        self.assertEqual(verify_ledger.changed_functions(self.root, {"fresh.gd"}), {"fresh.gd": ["a", "b"]})
 
 
 if __name__ == "__main__":

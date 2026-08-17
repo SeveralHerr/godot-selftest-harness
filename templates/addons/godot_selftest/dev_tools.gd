@@ -14,14 +14,14 @@ extends Node
 ## extension loads AFTER the generic handlers, a project may override a generic
 ## verb by registering the same action string (last-writer-wins).
 
-# harness-version: 0.39.0
+# harness-version: 0.40.0
 # --- Constants ---
 
 ## Version of the godot-selftest-harness these files were copied from. Reported by the
 ## `harness_version` verb and stamped into every copied tool script, so a gap logged
 ## against a project can name the version it was seen on, and a refresh can tell a
 ## stale file from a customized one. Bump with .claude-plugin/plugin.json.
-const HARNESS_VERSION: String = "0.39.0"
+const HARNESS_VERSION: String = "0.40.0"
 
 ## Default bus filenames. With a session id (see _resolve_session) the id is spliced in
 ## before the extension, so two instances can each own a bus in the same user:// dir.
@@ -3051,11 +3051,49 @@ func _cmd_set_game_speed(args: Dictionary) -> Dictionary:
 func _cmd_pause(_args: Dictionary) -> Dictionary:
 	var was_paused: bool = get_tree().paused
 	get_tree().paused = true
+	# moving-in:G-061: a paused tree is not a frozen one. Any node the project set
+	# to PROCESS_MODE_ALWAYS keeps processing - and a HUD, where ALWAYS is
+	# mandatory or the pause menu cannot draw itself, is exactly what a caller
+	# pauses to measure. `RewardCard` read visible:true then visible:false one
+	# command later on a tree `ping` insisted was paused, and it read as a bus
+	# fault. Say it in the reply, at the moment it matters, and name the way
+	# round it (set-game-speed 0.01 slows those nodes too; pause does not).
+	var always_roots: Array = []
+	var always_count: int = _count_process_always(get_tree().root, false, always_roots)
+	var msg: String = "Tree paused" if not was_paused else "Tree was already paused"
+	if always_count > 0:
+		var shown: Array = always_roots.slice(0, 5)
+		msg += "; %d node(s) are PROCESS_MODE_ALWAYS (%d set explicitly: %s%s) and keep processing on a paused tree - `set-game-speed 0.01` slows them where pause cannot" % [
+			always_count, always_roots.size(), ", ".join(shown),
+			", ..." if always_roots.size() > 5 else ""]
 	return {
 		"success": true,
-		"message": "Tree paused" if not was_paused else "Tree was already paused",
-		"data": {"was_paused": was_paused, "paused": true},
+		"message": msg,
+		"data": {"was_paused": was_paused, "paused": true,
+			"always_count": always_count, "always_roots": always_roots},
 	}
+
+
+## Nodes that keep processing while the tree is paused: explicit
+## PROCESS_MODE_ALWAYS plus everything inheriting from one. Skips the bridge
+## itself (it is ALWAYS by design). Returns the effective count; `roots` collects
+## the paths that set it explicitly.
+func _count_process_always(node: Node, inherited_always: bool, roots: Array) -> int:
+	if node == self:
+		return 0
+	var effective: bool = inherited_always
+	match node.process_mode:
+		Node.PROCESS_MODE_ALWAYS:
+			effective = true
+			roots.append(str(node.get_path()))
+		Node.PROCESS_MODE_PAUSABLE, Node.PROCESS_MODE_DISABLED, Node.PROCESS_MODE_WHEN_PAUSED:
+			effective = false
+		_:
+			pass  # INHERIT keeps the parent's answer
+	var n: int = 1 if effective else 0
+	for child: Node in node.get_children():
+		n += _count_process_always(child, effective, roots)
+	return n
 
 
 ## Reverses _cmd_pause. Idempotent: unpausing an already-running tree is not an error.
@@ -3503,10 +3541,12 @@ func _cmd_validate_ui(args: Dictionary) -> Dictionary:
 ## args: { "baseline_write": bool, "use_baseline": bool (default true) }
 ## Returns { in_use, written, path, new_count, pre_existing_count }, and stamps
 ## each issue with "baseline": "new" | "pre_existing".
-func _apply_ui_baseline(issues: Array, args: Dictionary) -> Dictionary:
+func _apply_ui_baseline(issues: Array, args: Dictionary,
+		path: String = "user://ui_findings_baseline.json") -> Dictionary:
 	# Plain user://, like the layout baseline next door: a findings baseline is a
 	# property of the project, not of one bus session, so N sessions share it.
-	var path: String = "user://ui_findings_baseline.json"
+	# `path` is a parameter since 0.40.0 (gh#41): the signal_unconnected check
+	# keeps its own file, keyed on (script, signal) rather than a node path.
 	var write_mode: bool = bool(args.get("baseline_write", false))
 	var use: bool = bool(args.get("use_baseline", true))
 
@@ -6053,13 +6093,55 @@ func _cmd_findings(args: Dictionary) -> Dictionary:
 		checks_run.append("ui_reachable")
 
 	# --- 3. signal_unconnected ----------------------------------------------
+	# gh#41 / moving-in:G-062 (0.40.0): one finding per (script, signal), not per
+	# node - a signal declared once on a script instanced 24 times printed 24
+	# lines differing only by a node index (57 lines for 11 facts), and the
+	# report was permanently red and permanently unread. Same baseline mechanism
+	# as ui_layout, own file, keyed on the SCRIPT and signal: a per-instance key
+	# would need 24 entries for one decision and re-present them all as NEW the
+	# day a box is added. A deliberately unconnected signal (an outward API, an
+	# emit the project documents leaving dangling) is accepted once, and only a
+	# NEW pair gates.
 	var dangling: Array = []
 	_collect_unconnected_signals(get_tree().root, dangling)
+	var by_pair: Dictionary = {}
+	var pair_order: Array = []
 	for entry: Dictionary in dangling:
+		var key: String = "%s#%s" % [entry["script"], entry["signal"]]
+		if not by_pair.has(key):
+			by_pair[key] = {
+				"code": "signal_unconnected", "path": key,
+				"script": entry["script"], "signal": entry["signal"], "paths": [],
+			}
+			pair_order.append(key)
+		(by_pair[key]["paths"] as Array).append(entry["path"])
+	var signal_issues: Array = []
+	for key: String in pair_order:
+		signal_issues.append(by_pair[key])
+	var sig_args: Dictionary = {}
+	if args.has("baseline_write"):
+		sig_args["baseline_write"] = bool(args["baseline_write"])
+	if args.has("use_baseline"):
+		sig_args["use_baseline"] = bool(args["use_baseline"])
+	var sig_base: Dictionary = _apply_ui_baseline(signal_issues, sig_args,
+		"user://signal_findings_baseline.json")
+	var signal_baseline_in_use: bool = bool(sig_base.get("in_use", false))
+	var signal_new: int = 0
+	var signal_pre: int = 0
+	for issue: Dictionary in signal_issues:
+		var paths: Array = issue["paths"]
+		if signal_baseline_in_use and str(issue.get("baseline", "new")) == "pre_existing":
+			signal_pre += 1
+			continue
+		signal_new += 1
 		_append_finding(findings, counts, "signal_unconnected", "signal_unconnected", "warning",
-			str(entry["path"]),
-			"signal '%s' declared by %s is never connected" % [
-				entry["signal"], entry["script"]])
+			str(paths[0]),
+			"signal '%s' declared by %s is never connected (%d node(s))" % [
+				issue["signal"], issue["script"], paths.size()])
+		findings[findings.size() - 1]["nodes"] = paths.size()
+		findings[findings.size() - 1]["paths"] = paths.slice(0, 20)
+		findings[findings.size() - 1]["script"] = issue["script"]
+		findings[findings.size() - 1]["signal"] = issue["signal"]
 	checks_run.append("signal_unconnected")
 
 	# --- 4. performance: FPS vs fps_min, orphan GROWTH vs orphan_growth_max --
@@ -6141,6 +6223,11 @@ func _cmd_findings(args: Dictionary) -> Dictionary:
 			"checks_skipped": checks_skipped,
 			"viewport": {"w": vp.x, "h": vp.y},
 			"baseline_in_use": baseline_in_use,
+			"signal_baseline_in_use": signal_baseline_in_use,
+			"signal_new_count": signal_new,
+			"signal_pre_existing_count": signal_pre,
+			"signal_baseline_path": str(sig_base.get("path", "")),
+			"signal_baseline_written": bool(sig_base.get("written", false)),
 			"new_count": new_count,
 			"pre_existing_count": pre_existing_count,
 			"scroll_reachable": scroll_reachable,
