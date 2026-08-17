@@ -822,6 +822,14 @@ Notable behaviors:
   same root-viewport image with the same `Rect2i` that `screenshot --region` uses. If
   the two ever disagree, the reply now carries enough to say in which coordinate space.
 
+- **`ui_overflow` names the nearest ancestor the control escaped, not only the viewport**
+  (0.59.0, plant-tower-defense:G-072). `GridContainer 'PlantBar' extends past viewport
+  (…); extends past its ancestor Panel 'SidePanel' (/root/…/SidePanel) by right=167px -
+  and the viewport`. The viewport is the outermost boundary broken and usually not the
+  first; a reader chasing "past the viewport" looks at screen size and anchors when the
+  fix is a container three levels in. Data carries `escaped_ancestor`. Zero-size ancestor
+  Controls (bare grouping nodes) are skipped. Stage 5 plants a 200 px `Frame` with a 400 px
+  child and asserts `right=200px`; the CanvasLayer-rooted `ScaledOutside` must name none.
 - **A check a person decided by eye is a distinct thing in the ledger** (0.58.0, gh#56 /
   plant-tower-defense:G-070). Two optional per-check fields in `run.json`: `judged: "eye"`
   (the only value; absent means a gate decided it — a vocabulary would invite the

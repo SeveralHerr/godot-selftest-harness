@@ -8744,3 +8744,47 @@ G-070, the twin; and a success note that arrived minted as a gap). Plant still p
 (14 files, 59 verbs + 63 CLI). `unittest discover -s tools` — 94 OK (3 new).
 `check_templates.py --static-only` — OK (only `verify_ledger.py` and `upstream_gaps.py`
 under templates/; the ledger stages ran).
+
+## 2026-08-17 - Upstreamed 1 open gap(s) from plant-tower-defense (harness 0.18.0, 0.19.0, 0.21.0, 0.23.0, 0.24.0, 0.25.0, 0.32.0, 0.33.0, 0.36.0, 0.38.0)
+
+Pooled by `tools/upstream_gaps.py` from `C:\Users\gotmi\Documents\GitHub\plant-tower-defense\log-devtools.md`. Gap text is the project's,
+verbatim; only the id line is rewritten (qualified with the project name so
+ids from two projects cannot collide, plus a `source:` back-pointer).
+
+- Gap: **`findings` reports `ui_overflow` against the VIEWPORT, and the thing that actually
+  overflowed was a panel.** The message reads
+  `GridContainer 'PlantBar' extends past viewport (rect: 908,116 -> 1319,332, viewport:
+  1152x648)`. True, and it names the outermost boundary rather than the nearest one. The bar
+  is a child of a 256px-wide `SidePanel`; it broke that first, by 167px, and the viewport
+  only afterwards. A reader chasing "past the viewport" looks at screen size and anchors; the
+  actual fix was in a container three levels in.
+  The harness already ships the verb that answers this — `contained-in --node PATH --within
+  PATH` reports per-side overhang, and `findings` surfaces the same idea as
+  `ui_escapes_panel` for a **sibling** panel. What it does not do is check a Control against
+  its own ANCESTOR, which is the containment a layout bug most often breaks.
+  - [plant-tower-defense:G-072] status: fixed | fixed-in: 0.59.0 | seen: 1 | harness: 0.38.0 | source: plant-tower-defense 2026-08-17
+  - Improvement: when a Control overflows the viewport, walk up its ancestors and report the
+    NEAREST Control it also escapes — `extends past its parent 'SidePanel' by 167px (and the
+    viewport)`. The walk is a few lines, the rects are already in hand, and it changes the
+    finding from a symptom into a location. The current message is not wrong; it is just the
+    least useful true thing available.
+  - Note: no other gaps this turn.
+
+## 2026-08-17 — 0.59.0: loop tick twenty-seven — the least useful true thing
+
+Reviewed: 8 open beads, the tracker (0 open), `PURPOSE.md`, both project logs — one new
+plant gap (G-072), no issue. Plant still pinned at 0.38.0.
+
+- **[plant G-072 — fixed] `ui_overflow` names the nearest ancestor Control the node
+  escaped, with the per-side overhang, and the viewport second.** "The current message is
+  not wrong; it is just the least useful true thing available" — a GridContainer that
+  broke its 256 px SidePanel by 167 px three levels in read "past the viewport". Data
+  carries `escaped_ancestor`; zero-size grouping Controls are skipped. Stage 5 plants a
+  `Frame`/`Spill` pair (right=200px) and asserts the CanvasLayer-rooted `ScaledOutside`
+  names no ancestor.
+
+- Gap: no new gap this turn.
+
+**Validation run this turn:** `record_version.py --record` then `--check` OK at 0.59.0
+(14 files, 59 verbs + 63 CLI). `unittest discover -s tools` — 94 OK. `check_templates.py`
+— first full run FAILED the new stage-5 control twice on the CONTROL's own mistakes (the plant sat straight under the Node2D root - world-space, so no ui_overflow; then an arithmetic slip, 148 for 200) - both real lessons about the check, none about the verb; stages 1-5b OK on the third run, `ui_overflow on the planted Frame/Spill names the Frame (right=200px) and the viewport second; ScaledOutside names only the viewport`.

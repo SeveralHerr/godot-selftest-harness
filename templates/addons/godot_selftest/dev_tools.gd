@@ -14,14 +14,14 @@ extends Node
 ## extension loads AFTER the generic handlers, a project may override a generic
 ## verb by registering the same action string (last-writer-wins).
 
-# harness-version: 0.58.0
+# harness-version: 0.59.0
 # --- Constants ---
 
 ## Version of the godot-selftest-harness these files were copied from. Reported by the
 ## `harness_version` verb and stamped into every copied tool script, so a gap logged
 ## against a project can name the version it was seen on, and a refresh can tell a
 ## stale file from a customized one. Bump with .claude-plugin/plugin.json.
-const HARNESS_VERSION: String = "0.58.0"
+const HARNESS_VERSION: String = "0.59.0"
 
 ## Default bus filenames. With a session id (see _resolve_session) the id is spliced in
 ## before the extension, so two instances can each own a bus in the same user:// dir.
@@ -3766,6 +3766,34 @@ func _baseline_file(name: String, args: Dictionary, write_mode: bool) -> String:
 	return legacy
 
 
+## The nearest ancestor Control whose screen box `rect` escapes, with the per-side
+## overhang as text (plant-tower-defense:G-072). {} when every ancestor encloses it -
+## the control only broke the viewport. Ancestors with a zero-size box (a bare Control
+## used as a group) are skipped: they enclose nothing and would name themselves first.
+func _nearest_escaped_ancestor(control: Control, rect: Rect2) -> Dictionary:
+	var ancestor: Node = control.get_parent()
+	while ancestor != null and ancestor is Control:
+		var box: Rect2 = _screen_rect_of(ancestor as Control)
+		if box.size.x > 0.0 and box.size.y > 0.0 and not box.encloses(rect):
+			var parts: PackedStringArray = PackedStringArray()
+			var over_r: float = (rect.position.x + rect.size.x) - (box.position.x + box.size.x)
+			var over_b: float = (rect.position.y + rect.size.y) - (box.position.y + box.size.y)
+			var over_l: float = box.position.x - rect.position.x
+			var over_t: float = box.position.y - rect.position.y
+			if over_r > 0.5:
+				parts.append("right=%.0fpx" % over_r)
+			if over_b > 0.5:
+				parts.append("bottom=%.0fpx" % over_b)
+			if over_l > 0.5:
+				parts.append("left=%.0fpx" % over_l)
+			if over_t > 0.5:
+				parts.append("top=%.0fpx" % over_t)
+			return {"path": str(ancestor.get_path()), "name": str(ancestor.name),
+				"type": ancestor.get_class(), "overhang": ", ".join(parts)}
+		ancestor = ancestor.get_parent()
+	return {}
+
+
 ## Stable identity of a UI finding: the rule that fired and the node it fired
 ## on. Deliberately excludes the message - see _apply_ui_baseline().
 ##
@@ -3959,16 +3987,28 @@ func _validate_ui_recursive(node: Node, vp: Vector2, issues: Array, interactive_
 
 		# Check 1: Viewport overflow
 		if not world_space and (rect.position.x + rect.size.x > vp.x or rect.position.y + rect.size.y > vp.y):
+			# plant-tower-defense:G-072 (0.59.0): the viewport is the OUTERMOST boundary
+			# the control broke, and usually not the first. Walk up to the nearest
+			# ancestor Control whose box it also escapes and name it with the overhang -
+			# a GridContainer 908..1319 wide read "past the viewport" when it had broken
+			# its 256px SidePanel first, by 167px, three levels in. The current message
+			# was not wrong; it was the least useful true thing available.
+			var escaped: Dictionary = _nearest_escaped_ancestor(control, rect)
+			var where: String = ""
+			if not escaped.is_empty():
+				where = "; extends past its ancestor %s '%s' (%s) by %s - and the viewport" % [
+					escaped["type"], escaped["name"], escaped["path"], escaped["overhang"]]
 			issues.append({
 				"path": str(control.get_path()),
 				"severity": "warning",
 				"code": "ui_overflow",
-				"message": "%s '%s' extends past viewport (rect: %.0f,%.0f -> %.0f,%.0f, viewport: %.0fx%.0f)" % [
+				"message": "%s '%s' extends past viewport (rect: %.0f,%.0f -> %.0f,%.0f, viewport: %.0fx%.0f)%s" % [
 					control.get_class(), control.name,
 					rect.position.x, rect.position.y,
 					rect.position.x + rect.size.x, rect.position.y + rect.size.y,
-					vp.x, vp.y,
+					vp.x, vp.y, where,
 				],
+				"escaped_ancestor": escaped.get("path", ""),
 			})
 
 		# Check 2: Zero-size visible
