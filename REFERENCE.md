@@ -525,12 +525,34 @@ Notable behaviors:
   _process, <top-level>` — from `git diff -U0` intersected with the enclosing `func`;
   it never gates and never claims execution. It leaves the reader one `get-state` /
   `run-method` from the answer instead of a 1/1 that reads stronger than it is.
+- **`upstream_gaps.py` carries `dup-of: gh#NN` and prints open gaps by source**
+  (0.41.0, H-044 / H-028). A project that filed its gap upstream says so on its id line
+  (`filed upstream: gh#40`); the pooled entry now names the issue it duplicates, so a
+  release closes both at once instead of one twice. Every run ends with `open gaps in
+  log-devtools.md by source: gather 40, harness 22, … (85 total)` — the concentration
+  a single project carries is stated, not implied.
 - **`_T.assert_margin(values, threshold, margin, recorded, context)`** (0.36.0,
   moving-in:G-057) — the threshold-margin gate a project had hand-rolled three times:
   sweep a corpus, one number per item; fail on any item newly within `margin` of the
   threshold, any recorded near-the-line value that moved, and any stale record. Returns
   every violation on one line. Stage 4 plants a passing recorded set and a new
   near-the-line item that must be refused.
+- **`quit` says what it did with the snapshot on EVERY exit path, and the default
+  patterns cover more than `*.save`** (0.41.0, moving-in:G-063 / plant-tower-defense:G-054
+  2nd sighting). Two holes in 0.40.0's default: the survivor branch (`pid N is STILL
+  ALIVE`, with or without `--kill`) exited without restoring and without a line — a
+  session whose game lingered a few seconds kept the run's writes with the flag armed;
+  and `quit` recommended `--snapshot-userstate` in the same reply that proved it would
+  not have helped (`changed: settings.cfg` against patterns `*.save`). Now: the default
+  globs are `*.save *.sav *.cfg *.dat *.json *.tres *.res *.bin` (the bridge's own
+  files — owner, baselines, `findings_last.json` — are never in the set, or a
+  mid-session `findings --baseline-write` would be undone on quit); `quit` prints one
+  of `restored N …`, `no snapshot to restore (none was taken at launch)`, `snapshot …
+  kept, NOT restored (--no-snapshot-userstate)`, or on a survivor `snapshot KEPT, not
+  restored - pid(s) N still alive and may write user:// on exit. Once gone:
+  restore-userstate` (restoring under a live game would be undone by its exit-time
+  save); and the write report appends `NOT covered by the snapshot patterns (…) and so
+  NOT restored: settings.cfg - relaunch with --snapshot-userstate … *.cfg to cover them`.
 - **`launch` restores `user://*.save` on `quit` BY DEFAULT** (0.40.0, gh#40 /
   plant-tower-defense:G-054). Two projects on one day had a bridge session persist
   into the developer's real save through a verb that behaved correctly (`capture()`

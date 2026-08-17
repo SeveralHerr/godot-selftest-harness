@@ -79,5 +79,45 @@ class DuplicateSourceIds(unittest.TestCase):
         self.assertNotIn("bit again", dest)
 
 
+class FiledUpstreamCrossRef(unittest.TestCase):
+    """H-044: a gap the project filed upstream arrives naming the issue it duplicates."""
+
+    def test_filed_upstream_becomes_dup_of(self):
+        text = ("## 2026-08-16 - t\n\n- Gap: **bridge wrote the real save**\n  evidence\n"
+                "  - [G-054] status: open | seen: 2 | harness: 0.38.0 | filed upstream: gh#40\n"
+                "  - Improvement: default it.\n")
+        with tempfile.TemporaryDirectory() as td:
+            src = Path(td) / "log-devtools.md"
+            dst = Path(td) / "dest.md"
+            src.write_text(text, encoding="utf-8")
+            dst.write_text("# dest\n", encoding="utf-8")
+            upstream_gaps.upstream(src, dst, "plant", False, False)
+            out = dst.read_text(encoding="utf-8")
+        self.assertIn("[plant:G-054] status: open | seen: 2 | harness: 0.38.0 | source: plant", out)
+        self.assertIn("| dup-of: gh#40", out)
+
+    def test_no_reference_no_dup_of(self):
+        with tempfile.TemporaryDirectory() as td:
+            src = Path(td) / "log-devtools.md"
+            dst = Path(td) / "dest.md"
+            src.write_text("## t\n\n" + _gap("G-001", "plain"), encoding="utf-8")
+            dst.write_text("# dest\n", encoding="utf-8")
+            upstream_gaps.upstream(src, dst, "plant", False, False)
+            self.assertNotIn("dup-of", dst.read_text(encoding="utf-8"))
+
+
+class GapsBySource(unittest.TestCase):
+    """H-028: the concentration of open gaps by project is surfaced, not implied."""
+
+    def test_counts_open_only_and_names_harness_native(self):
+        text = ("- [gather:G-001] status: open | seen: 1\n"
+                "- [gather:G-002] status: fixed | fixed-in: 0.9.0 | seen: 1\n"
+                "- [gather:G-003] status: open | seen: 3\n"
+                "- [plant:G-050] status: open | seen: 1\n"
+                "- [H-068] status: open | seen: 1 | harness: 0.39.0\n"
+                "- [H-001] status: wontfix | seen: 1\n")
+        self.assertEqual(upstream_gaps.gaps_by_source(text), {"gather": 2, "plant": 1, "harness": 1})
+
+
 if __name__ == "__main__":
     unittest.main()

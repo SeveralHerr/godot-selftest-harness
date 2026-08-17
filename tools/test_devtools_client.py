@@ -467,6 +467,60 @@ class UserstateRewrittenIdenticallyCase(unittest.TestCase):
         self.assertEqual(changed[1], "keys.save")
 
 
+class UserstateUnmatchedAndBridgeOwnedCase(unittest.TestCase):
+    """moving-in:G-063 / plant G-054 (2nd): the patterns' blind spots are named, the
+    bridge's own files are never snapshotted or removed, and the survivor path keeps
+    the snapshot instead of silently dropping the restore."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.project = Path(self._tmp.name) / "proj"
+        (self.project / ".devtools").mkdir(parents=True)
+        self.user_dir = Path(self._tmp.name) / "user"
+        self.user_dir.mkdir()
+        (self.user_dir / "highscore.save").write_text("orig", encoding="utf-8")
+        (self.user_dir / "settings.cfg").write_text("[a]\nx=1", encoding="utf-8")
+        (self.user_dir / "ui_findings_baseline.json").write_text("{}", encoding="utf-8")
+        (self.user_dir / "devtools_owner.json").write_text("{}", encoding="utf-8")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_unmatched_names_are_listed_against_the_patterns(self):
+        self.assertEqual(devtools.userstate_unmatched(
+            ["settings.cfg", "highscore.save (rewritten identically - x)", "keys.save"], ["*.save"]),
+            ["settings.cfg"])
+        self.assertEqual(devtools.userstate_unmatched(["settings.cfg"], devtools.USERSTATE_DEFAULT_GLOBS), [])
+
+    def test_default_globs_cover_cfg_but_never_bridge_files(self):
+        m = devtools.userstate_snapshot(self.project, self.user_dir, devtools.USERSTATE_DEFAULT_GLOBS)
+        self.assertEqual(sorted(m["files"]), ["highscore.save", "settings.cfg"])
+        # a baseline written mid-run must survive quit's "remove created" sweep
+        (self.user_dir / "signal_findings_baseline.json").write_text("{}", encoding="utf-8")
+        (self.user_dir / "run_created.json").write_text("{}", encoding="utf-8")
+        devtools.userstate_restore(self.project, "quit")
+        self.assertTrue((self.user_dir / "signal_findings_baseline.json").exists())
+        self.assertFalse((self.user_dir / "run_created.json").exists())
+
+    def test_survivor_keeps_snapshot_and_gone_restores(self):
+        devtools.userstate_snapshot(self.project, self.user_dir, ["*.save"])
+        (self.user_dir / "highscore.save").write_text("36074", encoding="utf-8")
+        with captured_stderr() as err:
+            devtools._quit_userstate_finish(self.project, [4242])
+        self.assertIn("KEPT", err.getvalue())
+        self.assertIn("4242", err.getvalue())
+        self.assertEqual((self.user_dir / "highscore.save").read_text(encoding="utf-8"), "36074")
+        self.assertTrue((devtools._userstate_dir(self.project) / devtools.USERSTATE_MANIFEST).exists())
+        devtools._quit_userstate_finish(self.project, [])
+        self.assertEqual((self.user_dir / "highscore.save").read_text(encoding="utf-8"), "orig")
+
+    def test_quit_with_no_snapshot_says_so(self):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            devtools.userstate_restore(self.project, "quit")
+        self.assertIn("no snapshot to restore", buf.getvalue())
+
+
 class ChangedFunctionsCase(unittest.TestCase):
     """gh#38 / moving-in:G-060: the changed functions inside a reached file."""
 

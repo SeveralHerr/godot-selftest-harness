@@ -48,8 +48,8 @@ import re
 import sys
 from pathlib import Path
 
-# harness-version: 0.40.0
-HARNESS_VERSION = "0.40.0"
+# harness-version: 0.41.0
+HARNESS_VERSION = "0.41.0"
 
 DEFAULT_DEST = "log-devtools.md"
 
@@ -183,6 +183,43 @@ def dest_entries(text):
     return out
 
 
+_FILED_RE = re.compile(r"(?:filed upstream|upstream|dup-of)\s*[:=]?\s*(?:as\s+)?"
+                       r"(?:SeveralHerr/godot-selftest-harness)?#(\d+)", re.I)
+
+
+def _filed_upstream(gap):
+    """`gh#NN` when the gap's own lines say it was filed upstream, else ""."""
+    fields = gap["fields"]
+    for key in ("filed upstream", "dup-of", "upstream"):
+        v = fields.get(key, "")
+        m = re.search(r"#(\d+)", v)
+        if m:
+            return "gh#" + m.group(1)
+    for line in gap["lines"]:
+        m = _FILED_RE.search(line)
+        if m:
+            return "gh#" + m.group(1)
+    return ""
+
+
+def gaps_by_source(dest_text):
+    """{source-project: open-gap count} over a pooled log (H-028: 84% of gaps came
+    from one game and nothing surfaced the concentration). Harness-native H- gaps
+    count under "harness"."""
+    counts = {}
+    for line in dest_text.splitlines():
+        m = _ID_LINE_RE.match(line)
+        if not m:
+            continue
+        fields = _parse_fields(m.group("fields"))
+        if fields.get("status", "open").split()[0] != "open":
+            continue
+        gid = m.group("id")
+        proj = gid.split(":", 1)[0] if ":" in gid else "harness"
+        counts[proj] = counts.get(proj, 0) + 1
+    return counts
+
+
 def _seen(fields):
     try:
         return int(fields.get("seen", "1"))
@@ -200,6 +237,14 @@ def _render(gap, qualified_id, source_label):
     if fields.get("harness"):
         parts.append("harness: %s" % fields["harness"])
     parts.append("source: %s" % source_label)
+    # H-044 (0.41.0): the two intake paths - a project's own G-NNN and this repo's
+    # gh#NN - used to meet only in a human's memory. A project that filed its gap
+    # upstream says so on the id line (`filed upstream: gh#40`); carry that across
+    # as `dup-of: gh#40` so the pooled entry names the issue it duplicates and the
+    # release turn closes both at once instead of one twice.
+    filed = _filed_upstream(gap)
+    if filed:
+        parts.append("dup-of: %s" % filed)
 
     if gap["id_index"] >= 0:
         indent = _ID_LINE_RE.match(gap["lines"][gap["id_index"]]).group("indent")
@@ -385,6 +430,18 @@ def main():
         print("\ndry run: nothing written.")
     elif total_new:
         print("\n%d gap(s) appended to %s. Review before committing." % (total_new, dest_path))
+    try:
+        by_src = gaps_by_source(dest_path.read_text(encoding="utf-8"))
+    except OSError:
+        by_src = {}
+    if by_src:
+        total = sum(by_src.values())
+        ranked = sorted(by_src.items(), key=lambda kv: (-kv[1], kv[0]))
+        print("open gaps in %s by source: %s (%d total%s)" % (
+            dest_path.name,
+            ", ".join("%s %d" % kv for kv in ranked), total,
+            "; %s carries %d%%" % (ranked[0][0], round(100.0 * ranked[0][1] / total))
+            if total and ranked[0][1] * 2 > total else ""))
     return 0
 
 
