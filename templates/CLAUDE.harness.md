@@ -380,6 +380,8 @@ runtime, which the static checker cannot see) and `name_check_ignore` (path pref
   suite: `instantiate_scene`'s two settle frames are two `_physics_process` calls no
   matter how slow the step before was. A test that needs N ticks awaits N
   `physics_frame`s; a node that frees itself after K ticks is safe to host if K > 2.
+- `python tools/devtools.py verb-usage` — which verbs this project's sessions actually
+  call, from the bridge's own log; never opens the bus.
 - `verify_ledger.py reach` is **file-level** (`[file-level: loaded, not lines-executed]`)
   and lists the changed functions in reached files; a guard clause or `_process()` body
   can read as reached having never run — prove it with `get-state`/`run-method`.

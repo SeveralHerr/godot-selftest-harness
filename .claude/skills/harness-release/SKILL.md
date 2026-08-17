@@ -101,6 +101,8 @@ project-edited and starts getting backed up on every refresh.
 
 ```bash
 python tools/check_templates.py           # required if anything under templates/ changed
+python tools/check_real_suite.py ../plant-tower-defense   # required if run_tests.gd (or what the
+                                          # runner does between/around tests) changed - H-070
 python tools/check_templates.py --full    # required if a generic bus verb was added or
                                            # changed - stage 6 exercises the full
                                            # every-verb contract table
