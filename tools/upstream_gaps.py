@@ -68,8 +68,8 @@ import re
 import sys
 from pathlib import Path
 
-# harness-version: 0.44.0
-HARNESS_VERSION = "0.44.0"
+# harness-version: 0.45.0
+HARNESS_VERSION = "0.45.0"
 
 DEFAULT_DEST = "log-devtools.md"
 
@@ -90,6 +90,14 @@ _FENCE_RE = re.compile(r"^\s*```")
 _ID_LINE_RE = re.compile(r"^(?P<indent>\s*)-\s*\[(?P<id>[^\]]+)\]\s*(?P<fields>.*)$")
 _DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 _SEEN_RE = re.compile(r"(seen:\s*)(\d+)")
+# gh#47.2 / moving-in:G-065: a repeat sighting is often written as
+# `- Gap: **[G-025] every engine-side gate ...** - status: fixed (RECONCILED ...) |
+# seen: 3 | harness: 0.16.0` - the id in the TITLE and the fields on the wrapped
+# paragraph, not on a `- [G-025] status:` list item of their own. The parser read
+# only the list-item form and minted an `auto-` id for each: one gap seen twice
+# arrived as two new gaps, and a `status: fixed` sighting arrived as open.
+_TITLE_ID_RE = re.compile(r"^\s*-\s*Gap[^:]*:\s*\**\s*\[(?P<id>[A-Za-z]+-\d+[a-z]?)\]")
+_INLINE_STATUS_RE = re.compile(r"\bstatus:\s*(?P<status>[a-z][a-z-]*)")
 
 
 def _parse_fields(text):
@@ -178,7 +186,27 @@ def parse_gaps(text):
                 gap["fields"] = _parse_fields(im.group("fields"))
                 break
         if not gap["id"]:
+            tm = _TITLE_ID_RE.match(block[0])
+            if tm:
+                gap["id"] = tm.group("id")
+                gap["id_from_title"] = True
+                # Fields live somewhere in the paragraph: read them from the first
+                # line that carries `status:` (title line included), pipe-split.
+                for k, bline in enumerate(block):
+                    sm = _INLINE_STATUS_RE.search(bline)
+                    if sm:
+                        tail = bline[bline.index("status:"):]
+                        gap["fields"] = _parse_fields(tail)
+                        gap["fields"]["status"] = sm.group("status")
+                        # seen: may sit in bold (**seen: 2**) or on the next line
+                        rest = " ".join(block[k:k + 3])
+                        sn = _SEEN_RE.search(rest)
+                        if sn:
+                            gap["fields"]["seen"] = sn.group(2)
+                        break
+        if not gap["id"]:
             gap["id"] = _auto_id(block)
+            gap["minted"] = True
         # "no gaps this turn" entries are absence markers required by the log
         # format; they carry no id and nothing to fix, so they never upstream.
         if not _NO_GAP_RE.match(block[0]):
@@ -411,7 +439,8 @@ def upstream(source, dest_path, project, include_fixed, dry_run):
             continue
 
         new_blocks.append(_render(gap, qualified, source_label))
-        appended.append(qualified)
+        appended.append(qualified + (" (id read from the Gap title)" if gap.get("id_from_title") else "")
+                        + (" (minted: no id anywhere in the entry)" if gap.get("minted") else ""))
 
     if new_blocks:
         today = datetime.date.today().isoformat()

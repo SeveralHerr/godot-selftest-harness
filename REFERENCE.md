@@ -525,6 +525,32 @@ Notable behaviors:
   _process, <top-level>` — from `git diff -U0` intersected with the enclosing `func`;
   it never gates and never claims execution. It leaves the reader one `get-state` /
   `run-method` from the answer instead of a 1/1 that reads stronger than it is.
+- **Findings baselines live in the project's `.devtools/`, not `user://`** (0.45.0,
+  gh#48 / moving-in:G-066). `findings --baseline-write` and `validate-ui
+  --baseline-write` write `res://.devtools/ui_findings_baseline.json` and
+  `signal_findings_baseline.json` (created on demand; committable — the same
+  argument as `verify-runs.jsonl`); reads prefer `.devtools/` and fall back to the
+  legacy `user://` copy so every existing install still reads its own. The verdict of
+  an adjudication now travels with the evidence: a fresh clone, a second developer or
+  CI used to see eleven accepted findings as eleven new ones. `--baseline-dir DIR`
+  (bus arg `baseline_dir`) pins another location; an exported build whose `res://` is
+  read-only falls back to `user://` and the reply's `baseline_path` says which. Stage 5
+  asserts both files land under the scratch project's `.devtools/`.
+- **`upstream_gaps.py` reads a gap id from the Gap title, and `status:` from the
+  wrapped paragraph** (0.45.0, gh#47.2 / moving-in:G-065). A repeat sighting written as
+  `- Gap: **[G-025] …** - status: fixed (RECONCILED …) | **seen: 3**` used to mint an
+  `auto-` id — one gap seen twice arrived as two new gaps, and a fixed sighting arrived
+  as open. The pool output now says `(id read from the Gap title)` or `(minted: no id
+  anywhere in the entry)`, so a correct dedupe and a guess no longer print the same.
+- **`scaffold_install.py version --project .`, and the installer's version reads all
+  three records** (0.45.0, gh#47.1). `version` prints the `[version]` transition, the
+  version of the command body / plugin root itself, and the newest harness on the
+  machine — exit 3 `STALE COMMAND BODY` when the loaded skill is behind the cache (every
+  path in it interpolates the older root), exit 2 on a would-be downgrade. `full` /
+  `files` have refused a downgrade since 0.33.0 (gh#32); the project's version is now
+  the NEWEST of `_scaffold_defaults.harness_version`, `.harness_manifest.json` and the
+  installed stamps, so the command's manual pre-flight and the installer cannot
+  disagree. `/scaffold-godot-harness` step 1.4b runs `version` first.
 - **`harness-version --client` names the project's own gaps fixed in releases it does
   not have** (0.44.0, gh#45). When a newer harness is on the machine the staleness
   block says `N release(s) behind` (from the newest root's `harness_history.json`) and
