@@ -122,7 +122,10 @@ of the same hazard, and the bridge half structurally cannot be closed from test 
 So the default is the safe one: `launch` copies the save aside and `quit` puts it back,
 and a run whose writes are the point opts out (`--no-snapshot-userstate`). The flag
 that only helps people who already know the hazard exists is a flag for the wrong
-population. The same rule reaches into the suite: a test that writes `user://` is
+population. And the restore reports itself every time — restored, nothing to restore,
+kept because the game is still alive, or *not covered by the patterns* — because a
+restore that silently does not happen is worse than none: the flag was the reason
+to stop checking the file by hand (plant G-054, second sighting; moving-in G-063). The same rule reaches into the suite: a test that writes `user://` is
 named by `run_tests.gd`, per test, so the redirect can go where the write is.
 
 **Say it while it can still be acted on.** A report that arrives after the moment of

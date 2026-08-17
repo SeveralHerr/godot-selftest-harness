@@ -43,8 +43,8 @@ extends SceneTree
 ##      failed, or --fail-on-uniform on a flat image
 ##   2  could not run at all: headless (no renderer), or a malformed flag
 
-# harness-version: 0.40.0
-const HARNESS_VERSION: String = "0.40.0"
+# harness-version: 0.41.0
+const HARNESS_VERSION: String = "0.41.0"
 
 const EXIT_OK: int = 0
 const EXIT_FAILED: int = 1

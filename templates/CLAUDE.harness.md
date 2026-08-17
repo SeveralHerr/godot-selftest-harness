@@ -360,8 +360,10 @@ runtime, which the static checker cannot see) and `name_check_ignore` (path pref
   is diagnosable after the frame that produced it is gone.
 - A live check that touches persisted state (a key whose handler saves) writes the
   developer's real `user://` file — `--isolated` does not isolate `user://`. `launch`
-  copies `*.save` aside and **`quit` restores them by default** (`--no-snapshot-userstate`
-  keeps a run's writes; `restore-userstate` reverts after the fact). `quit` names what
+  copies `*.save *.cfg *.json *.dat …` aside (never the bridge's own files) and **`quit`
+  restores them by default** (`--no-snapshot-userstate` keeps a run's writes;
+  `restore-userstate` reverts after the fact; a `quit` whose game is still alive KEEPS
+  the snapshot and says so — run `restore-userstate` once it is gone). `quit` names what
   the run changed, `rewritten identically` when only the mtime moved. In the headless
   suite, `run_tests.gd` prints `user:// writes by test:` naming the test that wrote —
   point that test's `setup()` at a temp path.

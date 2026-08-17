@@ -89,11 +89,11 @@ from pathlib import Path
 from typing import Optional  # noqa: F401
 
 
-# harness-version: 0.40.0
+# harness-version: 0.41.0
 # Version of the godot-selftest-harness this client was copied from. Compared against
 # the running game's own stamp by the `harness-version` verb, so a half-refreshed
 # install (new client, old autoload) is visible instead of mysterious.
-HARNESS_VERSION = "0.40.0"
+HARNESS_VERSION = "0.41.0"
 
 COMMANDS_FILE = "devtools_commands.json"
 RESULTS_FILE = "devtools_results.json"
@@ -1814,18 +1814,17 @@ def userstate_stat_diff(project_path: Path):
     for f in user_dir.iterdir():
         if f.is_file():
             now[f.name] = _userstate_stat_entry(f)
-    own = _USERSTATE_OWN
     changed = []
     for n in sorted(now):
-        if n not in before or n in own or now[n][:2] == before[n][:2]:
+        if n not in before or _userstate_bridge_owned(n) or now[n][:2] == before[n][:2]:
             continue
         b_md5 = before[n][2] if len(before[n]) > 2 else ""
         if b_md5 and now[n][2] and b_md5 == now[n][2] and now[n][0] == before[n][0]:
             changed.append(n + " (rewritten identically - a writer ran; the values matched)")
         else:
             changed.append(n)
-    created = sorted(n for n in now if n not in before and n not in own)
-    deleted = sorted(n for n in before if n not in now and n not in own)
+    created = sorted(n for n in now if n not in before and not _userstate_bridge_owned(n))
+    deleted = sorted(n for n in before if n not in now and not _userstate_bridge_owned(n))
     return changed, created, deleted, user_dir
 
 
@@ -1853,6 +1852,17 @@ def userstate_stat_report(project_path: Path) -> None:
             recovery = (f" A copy taken at launch of {', '.join(m['files'])} is in "
                         f".devtools/{USERSTATE_DIR}/ - `python tools/devtools.py "
                         f"restore-userstate` puts it back.")
+        # moving-in:G-063: the changed names and the patterns are one comparison
+        # apart; make it, so the advice never points at a mechanism that protects
+        # nothing.
+        unmatched = userstate_unmatched(changed + created, m.get("patterns") or [])
+        if unmatched:
+            pats = m.get("patterns") or []
+            suggest = sorted({("*" + Path(u.split(" (", 1)[0]).suffix) if Path(u.split(" (", 1)[0]).suffix
+                              else u.split(" (", 1)[0] for u in unmatched})
+            recovery += (f" NOT covered by the snapshot patterns ({', '.join(pats)}) and so "
+                         f"NOT restored: {', '.join(unmatched)} - relaunch with "
+                         f"--snapshot-userstate {' '.join(pats + suggest)} to cover them.")
     except (OSError, ValueError):
         pass
     print(f"user://: this run wrote the developer's REAL user data in {user_dir} -- "
@@ -1862,6 +1872,24 @@ def userstate_stat_report(project_path: Path) -> None:
           "automatically.", file=sys.stderr)
 USERSTATE_MANIFEST = "manifest.json"
 USERSTATE_DEFAULT_GLOB = "*.save"
+# moving-in:G-063 (0.41.0): `*.save` alone missed `user://settings.cfg` - ConfigFile
+# is Godot's own idiom - and `quit` recommended the flag in the same reply that
+# proved it would not have helped. The default now covers the common persistence
+# shapes; the bridge's own files (baselines, findings, owner) are never in the set,
+# or restoring on quit would undo a `findings --baseline-write` made mid-session.
+USERSTATE_DEFAULT_GLOBS = ["*.save", "*.sav", "*.cfg", "*.dat", "*.json", "*.tres", "*.res", "*.bin"]
+
+
+def _userstate_bridge_owned(name: str) -> bool:
+    return (name in _USERSTATE_OWN or name.startswith("devtools_")
+            or name.endswith("_baseline.json") or name == "findings_last.json")
+
+
+def userstate_unmatched(names, patterns):
+    """The changed/created names no snapshot pattern covers (moving-in:G-063)."""
+    import fnmatch
+    return [n for n in names
+            if not any(fnmatch.fnmatch(n.split(" (", 1)[0], pat) for pat in patterns)]
 
 
 def _userstate_dir(project_path: Path) -> Path:
@@ -1894,7 +1922,7 @@ def userstate_snapshot(project_path: Path, user_dir: Path, patterns, restore_on_
     files = []
     for pattern in patterns:
         for src in sorted(user_dir.glob(pattern)):
-            if not src.is_file():
+            if not src.is_file() or _userstate_bridge_owned(src.name):
                 continue
             rel = src.relative_to(user_dir).as_posix()
             copy_to = dest / rel
@@ -1922,6 +1950,10 @@ def userstate_restore(project_path: Path, reason: str, force: bool = False) -> "
     dest = _userstate_dir(project_path)
     manifest_path = dest / USERSTATE_MANIFEST
     if not manifest_path.is_file():
+        if reason == "quit":
+            # plant-tower-defense:G-054 (2nd): say what happened with the snapshot EVERY
+            # time - a restore that silently does not happen is worse than no restore.
+            print("userstate: no snapshot to restore (none was taken at launch)")
         return None
     try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -1930,6 +1962,8 @@ def userstate_restore(project_path: Path, reason: str, force: bool = False) -> "
               "for a human", file=sys.stderr)
         return None
     if not force and not manifest.get("restore_on_quit", True):
+        print(f"userstate: snapshot of {len(manifest.get('files', []))} file(s) kept, NOT "
+              f"restored (--no-snapshot-userstate); `restore-userstate` reverts it")
         return None
     user_dir = Path(manifest["user_dir"])
     restored, removed = 0, 0
@@ -1941,7 +1975,8 @@ def userstate_restore(project_path: Path, reason: str, force: bool = False) -> "
     before = set(manifest["files"])
     for pattern in manifest["patterns"]:
         for cur in sorted(user_dir.glob(pattern)):
-            if cur.is_file() and cur.relative_to(user_dir).as_posix() not in before:
+            if cur.is_file() and cur.relative_to(user_dir).as_posix() not in before \
+                    and not _userstate_bridge_owned(cur.name):
                 cur.unlink()
                 removed += 1
     for rel in manifest["files"]:
@@ -2055,10 +2090,34 @@ def cmd_quit(args, project_path: Path):
             ", ".join(str(p) for p in gone) or "nothing",
             ("; STILL ALIVE: %s" % ", ".join(str(p) for p in left)) if left else ""),
             file=sys.stderr)
+        userstate_stat_report(project_path)
+        _quit_userstate_finish(project_path, left)
         sys.exit(1 if left else 0)
     print("Kill before launching again:\n" + _kill_hint([r["pid"] for r in verified_rows]),
           file=sys.stderr)
+    userstate_stat_report(project_path)
+    _quit_userstate_finish(project_path, [pid])
     sys.exit(1)
+
+
+def _quit_userstate_finish(project_path: Path, alive_pids) -> None:
+    """The snapshot's fate on the survivor paths (plant-tower-defense:G-054, 2nd
+    sighting): `quit` used to exit 1 here WITHOUT restoring, so a session whose game
+    lingered a few seconds kept the run's writes with the flag armed and no line
+    saying so. Restoring under a live game would be undone by its own exit-time
+    save, so: game gone -> restore; game alive -> keep the snapshot and say what to
+    run once it is gone."""
+    if alive_pids:
+        dest = _userstate_dir(project_path)
+        if (dest / USERSTATE_MANIFEST).is_file():
+            print(f"userstate: snapshot KEPT, not restored - pid(s) "
+                  f"{', '.join(str(p) for p in alive_pids)} still alive and may write user:// "
+                  f"on exit. Once gone: `python tools/devtools.py restore-userstate`.",
+                  file=sys.stderr)
+        else:
+            print("userstate: no snapshot to restore (none was taken at launch)")
+        return
+    userstate_restore(project_path, "quit")
 
 
 def _quit_sweep(args, project_path: Path, exclude) -> None:
@@ -3792,7 +3851,7 @@ def cmd_launch(args, project_path: Path):
                   file=sys.stderr)
             sys.exit(2)
     if snap_user_dir is not None:
-        patterns = snapshot_patterns or [USERSTATE_DEFAULT_GLOB]
+        patterns = snapshot_patterns or list(USERSTATE_DEFAULT_GLOBS)
         manifest = userstate_snapshot(project_path, snap_user_dir, patterns, restore_on_quit)
         names = ", ".join(manifest["files"][:6]) + (", ..." if len(manifest["files"]) > 6 else "")
         if restore_on_quit:
@@ -4533,7 +4592,8 @@ def main():
                         "Godot has no switch for it.")
     p.add_argument("--snapshot-userstate", dest="snapshot_userstate", nargs="*",
                    metavar="GLOB", default=None,
-                   help="Which user:// files `quit` restores (default *.save). Restore on "
+                   help="Which user:// files `quit` restores (default: *.save *.sav *.cfg *.dat "
+                        "*.json *.tres *.res *.bin, never the bridge's own files). Restore on "
                         "quit is the DEFAULT since 0.40.0 (gh#40) - a copy is taken on every "
                         "launch and `quit` puts it back, removing files the run created "
                         "under the same patterns; this flag only widens the set. "

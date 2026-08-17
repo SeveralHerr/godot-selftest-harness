@@ -2477,7 +2477,7 @@ the instrument existed and had 52 real rows in it. The bad news is what it said.
   commitment currently validated against a single project, and a second scaffolded project
   would be worth more directional information than the next ten verbs. Nothing in the log
   or in `upstream_gaps.py` surfaces the concentration.
-  - [H-028] status: open | seen: 1 | harness: 0.10.0
+  - [H-028] status: fixed | fixed-in: 0.41.0 (upstream_gaps.py prints open gaps by source every run) | seen: 1 | harness: 0.10.0
   - Improvement: have `upstream_gaps.py` print the per-project split after a pool, so a
     release notices when it is being shaped entirely by one game's needs.
 
@@ -3618,7 +3618,7 @@ patches; both patches would have reviewed clean, linted clean and fixed nothing.
   Nothing detected it — I reconciled the five duplicates by hand after noticing HEAD
   had moved. A project that files an issue AND gets pooled is the normal case here,
   not an edge one.
-  - [H-044] status: open | seen: 1 | harness: 0.18.0
+  - [H-044] status: fixed | fixed-in: 0.41.0 (pooled entries carry dup-of: gh#NN from the project's `filed upstream:` field) | seen: 1 | harness: 0.18.0
   - Improvement: have `upstream_gaps.py` refuse to append a gap whose evidence block
     substantially matches one already `fixed` in the destination, printing
     `SKIPPED <id>: looks like <other-id>, already fixed in X.Y.Z` rather than
@@ -7468,7 +7468,7 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   surfaced twenty minutes later as five unrelated-looking test failures. The suite now
   has `tools/save_persist_check.py` and per-script `setup()` redirects; the bridge has
   neither and cannot have the second one.
-  - [plant-tower-defense:G-054] status: fixed | fixed-in: 0.40.0 | seen: 1 | harness: 0.38.0 | source: plant-tower-defense 2026-08-16
+  - [plant-tower-defense:G-054] status: fixed | fixed-in: 0.40.0 | seen: 2 | harness: 0.38.0 | source: plant-tower-defense 2026-08-16
   - Improvement: `launch --snapshot-userstate` already exists and makes `quit` restore
     what the run changed. Make it **the default for `launch`**, with
     `--no-snapshot-userstate` to opt out — a verification session that silently mutates
@@ -7517,7 +7517,7 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   `RewardCard` read `visible: true`, then `visible: false` one command later, on a tree
   that `ping` insisted was paused. That reads like a bus fault. The workaround was
   `set-game-speed 0.01`, which is not mentioned near `pause` anywhere.
-  - [moving-in:G-061] status: fixed | fixed-in: 0.40.0 | seen: 1 | harness: 0.36.0 (project) / 0.38.0 (cache) | source: moving-in 2026-08-16
+  - [moving-in:G-061] status: fixed | fixed-in: 0.40.0 | seen: 2 | harness: 0.36.0 (project) / 0.38.0 (cache) | source: moving-in 2026-08-16
     RECONCILED cycle 38: not filed upstream yet, by choice — still want a second
     sighting before claiming the shape of the fix. `set-game-speed 0.01` has now
     served as the workaround twice (cycles 35 and 37) without a third surprise, so
@@ -7609,3 +7609,80 @@ PROCESS_MODE_ALWAYS node and the set-game-speed way round it`; `stage 6 contract
 90/90`. Then `--stage 4` for the user-writes/assert_ne control added after: OK,
 `user:// writes attributed to their test as [created] then [rewritten identically];
 assert_ne named the value`.
+
+## 2026-08-16 - Upstreamed 1 open gap(s) from moving-in (harness 0.11.0, 0.16.0, 0.19.0, 0.21.0, 0.33.0 (cache) / 0.31.0 (vendored), 0.36.0 (project) / 0.38.0 (cache))
+
+Pooled by `tools/upstream_gaps.py` from `C:\Users\gotmi\Documents\GitHub\moving-in\log-devtools.md`. Gap text is the project's,
+verbatim; only the id line is rewritten (qualified with the project name so
+ids from two projects cannot collide, plus a `source:` back-pointer).
+
+- Gap: **[G-063] — `quit` recommends `--snapshot-userstate` in the same reply that proves
+  it would not have helped.** The message names the changed file (`changed: settings.cfg`)
+  and the flag knows its own patterns (`*.save`). Those two facts are one comparison
+  apart, and as it stands the advice confidently sends you to a mechanism that protects
+  nothing — I followed it, believed it, and reported upstream that it worked.
+  - [moving-in:G-063] status: fixed | fixed-in: 0.41.0 | seen: 1 | harness: 0.36.0 (project) / 0.38.0 (cache) | source: moving-in 2026-08-16
+  - Improvement: two, independent. (1) Have `quit` compare the changed filenames against
+    the active snapshot patterns and say so — *"changed: settings.cfg (NOT matched by
+    --snapshot-userstate's patterns: \*.save)"*. (2) Widen the default beyond `*.save`;
+    `ConfigFile` is Godot's own idiom and `user://settings.cfg` must be one of the most
+    common paths in the ecosystem. Both filed on #40 with the transcript.
+
+## 2026-08-16 — 0.41.0: loop tick nine — the restore that did not say so
+
+Reviewed: 13 open beads, the tracker (0 open — #37–#41 closed last tick), `PURPOSE.md`,
+both project logs. One new gap (moving-in G-063) and one sharper second sighting (plant
+G-054: `--snapshot-userstate` armed, `quit` run, save still dirty, snapshot on disk
+correct, a later bare `quit` restored it). Both are the same lesson as last tick's
+PURPOSE addition, one level down: the default was right and the *report* was not.
+
+- **[plant G-054 (2nd) — fixed] `quit` restores on every exit path and says what it did
+  every time.** Reproduced by reading, not guessing: the survivor branch (`pid N is
+  STILL ALIVE` — with or without `--kill`) `sys.exit(1)`ed before the restore, with no
+  line. That is the reporter's shape exactly (a game that lingered a few seconds; output
+  redirected). Restoring under a live game would be undone by its own exit-time save,
+  so the survivor path now KEEPS the snapshot and prints the pid and the command to run
+  once it is gone; the gone paths restore; and every path prints one of `restored …`,
+  `no snapshot to restore`, `kept, NOT restored (--no-snapshot-userstate)`, `KEPT …
+  still alive`. Unit-tested (alive → kept + named; gone → restored; none → said).
+- **[moving-in G-063 — fixed] `quit` names the changed files the patterns do NOT
+  cover** (`NOT covered by the snapshot patterns (*.save) and so NOT restored:
+  settings.cfg - relaunch with --snapshot-userstate *.save *.cfg`), and **the default
+  globs widened** to `*.save *.sav *.cfg *.dat *.json *.tres *.res *.bin`. The bridge's
+  own files (owner, `*_baseline.json`, `findings_last.json`, `devtools_*`) are never
+  snapshotted, never removed on quit, and never reported as the run's writes — or a
+  mid-session `findings --baseline-write` would be undone at `quit`. Unit-tested.
+- **[H-044 — fixed] `upstream_gaps.py` carries `dup-of: gh#NN`** when the project's id
+  line says `filed upstream: gh#NN` — the two intake paths now meet in the file rather
+  than in a human's memory. **[H-028 — fixed]** every run ends with `open gaps in
+  log-devtools.md by source: gather 40, harness 22, moving-in 17, plant-tower-defense 5,
+  dave-game 1 (85 total)`.
+
+**That last line is the tick's real finding.** 85 "open" gaps, 40 of them from `gather`
+at harness 0.8–0.10 — a project that has not pooled since — and 22 harness-native ones
+back to 0.7.0. Some are genuinely open (H-031's `--self-check`, H-052/H-053), but a
+reader of this log cannot tell which, which is the same failure PURPOSE names for the
+tracker ("nine open defects where two are real"). Filed as a bead, not done this tick:
+triage needs each gap's mechanism re-checked against the current templates, and that
+is a session's work, not an hour's.
+
+**Considered and not done:** H-043's remaining half (a watchdog inside a 30 s client
+timeout — still architectural); the bus-side beads (unchanged, no evidence);
+`--self-check` for name_check (H-031) — no sighting since 0.11.0.
+
+- Gap: **the pooled log's open count is not a backlog, and nothing in it says which
+  entries were re-checked and when.** `gather 40` reads as forty things to do; most were
+  logged against 0.8.0–0.10.0 templates that have been rewritten since, and the log's
+  own rule ("the project's copy stays open until that project refreshes") means they
+  can never close from here. Real output: the by-source line above.
+  - [H-069] status: open | seen: 1 | harness: 0.41.0
+  - Improvement: a `stale-since:` field (or an `upstream_gaps.py --triage` that lists
+    every open pooled gap whose `harness:` predates the last N releases, grouped by
+    project, so a session can re-check mechanisms and mark `status: unverified` /
+    `superseded` explicitly), and a rule that an open pooled gap older than K releases
+    is reported as *unverified*, not open.
+
+**Validation run this turn:** `record_version.py --record` then `--check` OK at 0.41.0
+(14 files, 57 verbs + 60 CLI). `unittest discover -s tools` — 76 OK (7 new).
+`check_templates.py` — OK, all stages (`--full` not run: `dev_tools.gd` is stamp-only
+since 0.40.0's `--full` green; stage 5 still launches/quits with the new client).
