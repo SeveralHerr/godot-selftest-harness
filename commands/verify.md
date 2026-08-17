@@ -117,6 +117,8 @@ Report any drift in the summary with its bearing line. Do **not** auto-resolve i
 
 Classify the diff before running anything. A full runtime pass on a docs edit is where `overkill` rows come from; the fix is to not start one.
 
+**Classify by what the run is *for*, not only by what changed.** Tiers (a)–(d) assume the diff is the *subject* of the run; tier (e) is where the diff is its *product* — a session that drove the live game to learn something and wrote a doc, a recipe, a `REFERENCE.md` correction or a gap report from what it found. The test is mechanical: **tier (a) if the diff existed before the run was considered; tier (e) if the run came first** (gh#50 — a `step-time --then-pause` experiment whose only diff was one `.md` was triaged as "nothing to verify", and the finding that a naive poll of a short tween fails *silently* would have been thrown away).
+
 ```bash
 git status --porcelain --untracked-files=all
 git diff HEAD --stat
@@ -128,6 +130,7 @@ git diff HEAD --stat
 | (b) Only comments/docstrings inside `.gd`/`.tscn` files, or `.md` files in code dirs | **Lint-only** | Phase 1 name gate + import gate + lint. Skip tests and runtime; say so in the summary. |
 | (c) Only `static func`s or `const` tables that existing unit tests cover | **Headless-only** | Phase 1 (name gate + import gate + lint + tests). Skip runtime; the Phase 6 entry must **name which tests** stood in for runtime. |
 | (d) The project **cannot be launched**: neither `project.godot`'s `run/main_scene` nor `config.main_scene` names a scene | **Headless-only (forced)** | Phase 1 only — there is nothing for Phase 2 to start. This is not a pass at runtime and must not be reported as one: the summary says `runtime unreached: project has no main scene`, the Phase 5 ledger row is written with `--no-reach` and `skipped: "no main_scene"`, and the Phase 6 verdict is **inconclusive**, not overkill (gh#10). Every Godot project is in this state for its first commits, which is exactly when the DEVELOPMENT RULE is followed most literally. |
+| (e) The diff is the run's **OUTPUT**, not its subject: a skill doc, a `REFERENCE` correction, a recipe, a gap report written FROM a live session | **Experiment** | All the phases you actually needed, no more. Reach is not expected — the changed file is not code the game loads — so the Phase 5 row is written with `"kind": "experiment"` in `run.json` (`record` then implies `--no-reach` and stamps `reach_note: experiment…` on the row; `stats` counts experiments separately). The Phase 6 verdict is judged on what the session **established** — record it in `found` — not on what it verified; `overkill` is the wrong word for it, and `insufficient` is never applied for reach. |
 | Anything else — instance methods, signals, scenes, exports, node paths, config | **Full run** | All phases. |
 
 Check tier (d) mechanically rather than by recollection — an empty `main_scene` is a state, not a diff, and the diff will not show it:

@@ -89,11 +89,11 @@ from pathlib import Path
 from typing import Optional  # noqa: F401
 
 
-# harness-version: 0.48.0
+# harness-version: 0.49.0
 # Version of the godot-selftest-harness this client was copied from. Compared against
 # the running game's own stamp by the `harness-version` verb, so a half-refreshed
 # install (new client, old autoload) is visible instead of mysterious.
-HARNESS_VERSION = "0.48.0"
+HARNESS_VERSION = "0.49.0"
 
 COMMANDS_FILE = "devtools_commands.json"
 RESULTS_FILE = "devtools_results.json"
@@ -4656,11 +4656,45 @@ def cmd_raycast(args, project_path: Path):
             print(f"  hit at:   ({pos.get('x')}, {pos.get('y')})")
 
 
+def points_arg(text):
+    """'X,Y;X,Y' or 'X,Y X,Y' -> [[x, y], ...]."""
+    out = []
+    for chunk in re.split(r"[;\s]+", text.strip()):
+        if not chunk:
+            continue
+        parts = chunk.split(",")
+        if len(parts) != 2:
+            raise argparse.ArgumentTypeError("points look like X,Y;X,Y (got %r)" % chunk)
+        out.append([int(parts[0]), int(parts[1])])
+    if not out:
+        raise argparse.ArgumentTypeError("no points given")
+    return out
+
+
+def colors_arg(text):
+    """'RRGGBB,RRGGBB' -> ['rrggbb', ...] (a leading # is fine)."""
+    out = []
+    for chunk in text.split(","):
+        c = chunk.strip().lstrip("#").lower()
+        if not re.fullmatch(r"[0-9a-f]{6}", c):
+            raise argparse.ArgumentTypeError("colours are RRGGBB hex (got %r)" % chunk)
+        out.append(c)
+    return out
+
+
 def cmd_sample_pixels(args, project_path: Path):
-    """Mean/dominant colour over a screen rect (bus verb: sample_pixels, G-121)."""
+    """Mean/dominant colour over a screen rect or named points (bus verb: sample_pixels,
+    G-121). Data keys read: mean, dominant, brightest, darkest, and (0.49.0, gh#49)
+    points[{x,y,color}], expected[{color,count,fraction,absent}], absent. With
+    --expect this is an ASSERTION: exit 1 when any expected colour appears zero times."""
     cmd_args = {}
     if args.rect is not None:
         cmd_args["rect"] = args.rect
+    if getattr(args, "points", None):
+        cmd_args["points"] = args.points
+    if getattr(args, "expect", None):
+        cmd_args["expect"] = args.expect
+        cmd_args["tolerance"] = args.tolerance
     result = send_command(project_path, "sample_pixels", cmd_args)
     if not result["success"]:
         print(f"Failed: {result['message']}", file=sys.stderr)
@@ -4671,6 +4705,22 @@ def cmd_sample_pixels(args, project_path: Path):
         c = data.get(key)
         if isinstance(c, dict):
             print(f"  {key:<10} r={c.get('r'):.3f} g={c.get('g'):.3f} b={c.get('b'):.3f}")
+    for pt in data.get("points") or []:
+        print(f"  point ({pt.get('x')}, {pt.get('y')}): #{pt.get('color')}")
+    if getattr(args, "expect", None):
+        exp = data.get("expected")
+        if exp is None:
+            print("sample-pixels: --expect was sent but the reply carried no 'expected' key - "
+                  "this game's harness predates 0.49.0; nothing was asserted.", file=sys.stderr)
+            sys.exit(2)
+        absent = [e["color"] for e in exp if e.get("absent")]
+        for e in exp:
+            print(f"  expected #{e.get('color')} (tol {data.get('tolerance')}): {e.get('count')} px "
+                  f"({100.0 * float(e.get('fraction') or 0):.1f}%){'  <- ABSENT' if e.get('absent') else ''}")
+        if absent:
+            print(f"ABSENT: {', '.join('#' + c for c in absent)} - not drawn in the sampled pixels "
+                  "(within the tolerance).", file=sys.stderr)
+            sys.exit(1)
 
 
 
@@ -5132,9 +5182,17 @@ def main():
 
     # sample-pixels
     p = subparsers.add_parser(
-        "sample-pixels", help="Mean / dominant colour over a screen rect")
+        "sample-pixels", help="Mean / dominant colour over a screen rect or named points; "
+                              "with --expect, an assertion (exit 1 when a colour is absent)")
     p.add_argument("--rect", type=rect_arg, metavar="X,Y,W,H",
                    help="Screen rect (default: the whole viewport)")
+    p.add_argument("--points", type=points_arg, metavar="X,Y[;X,Y...]",
+                   help="Sample exactly these pixels instead of a rect (a cue is a point)")
+    p.add_argument("--expect", type=colors_arg, metavar="RRGGBB[,RRGGBB...]",
+                   help="Count sampled pixels within --tolerance of each colour; exit 1 "
+                        "when any appears zero times (gh#49: 'was this cue drawn')")
+    p.add_argument("--tolerance", type=int, default=8, metavar="N",
+                   help="Per-channel 8-bit tolerance for --expect (default 8)")
     p.set_defaults(func=cmd_sample_pixels)
 
     # set-game-speed

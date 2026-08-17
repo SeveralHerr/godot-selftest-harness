@@ -2180,6 +2180,12 @@ def contract_rows():
          ["canvas_layer", "canvas_layer_path"]),
         ("sample_pixels", {"rect": [0, 0, 8, 8]}, False,
          "gather:G-121: headless has no framebuffer; envelope only"),
+        ("sample_pixels", {"rect": [0, 0, 8, 8], "expect": ["zzz"]}, False,
+         "gh#49: a bad expect colour is refused BY NAME before the framebuffer check",
+         [], {"message_contains": "expect: 'zzz' is not a hex colour"}),
+        ("sample_pixels", {"points": [[1]]}, False,
+         "gh#49: a malformed point is refused by name headless",
+         [], {"message_contains": "points: each entry is [x, y]"}),
         ("curve", {"node_path": "/root/Main", "method": "ramp", "from": 1, "to": 5}, True,
          "gather:G-127: a ramp read as data instead of evaluated by hand",
          ["points", "min", "max", "sum"], {"min": 2, "max": 10, "sum": 30.0}),
@@ -4067,6 +4073,13 @@ def stage_bridge(godot, scratch, full):
                 if expect:
                     data = reply.get("data") or {}
                     for key, want in expect.items():
+                        if key == "message_contains":
+                            # 0.49.0: an argument-contract row asserts the refusal names
+                            # the argument, not a data key.
+                            if want not in str(reply.get("message", "")):
+                                problems.append("message %r does not contain %r"
+                                                % (reply.get("message"), want))
+                            continue
                         if data.get(key) != want:
                             problems.append("data[%r] is %r, expected %r"
                                             % (key, data.get(key), want))

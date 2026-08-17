@@ -822,6 +822,29 @@ Notable behaviors:
   same root-viewport image with the same `Rect2i` that `screenshot --region` uses. If
   the two ever disagree, the reply now carries enough to say in which coordinate space.
 
+- **`sample-pixels --expect` / `--points`** (0.49.0, gh#49 / plant-tower-defense:G-059).
+  The verb could describe a region and never assert a colour was in it: a 3.6 px pip
+  inside a 5x5 box is a few percent and `dominant` will never name it however plainly
+  it is drawn, so "did this cue get drawn" was a squint with extra steps that could not
+  be written into a test. `--expect RRGGBB[,…] [--tolerance N]` (per 8-bit channel,
+  default 8) counts the sampled pixels within tolerance of each colour game-side (the
+  image is already in hand; nothing new crosses the bus) and the client exits 1 when a
+  named colour appears zero times: `expected #ffc500 (tol 8): 0 px (0.0%) <- ABSENT`;
+  `--points X,Y;X,Y` samples exactly those pixels (a cue is a point) and reports each
+  one's colour. Data: `expected[{color,count,fraction,absent}]`, `absent`, `points`,
+  `tolerance`. A game older than 0.49.0 answers without `expected` and the client exits
+  2, never 0. Argument errors are refused by name *before* the framebuffer check, so
+  the headless contract table proves the parsing; the counting was proved live,
+  windowed, on a plant copy: `expected #192121: 11857 px (49.4%)`, `#ff00ff: 0 px <-
+  ABSENT`, exit 1; two named points read back at 100%.
+- **`run.json` `kind: "experiment"`, `/verify` tier (e)** (0.49.0, gh#50 /
+  plant-tower-defense:G-060). Phase 0.5 classified a run by its diff, and a session
+  whose diff is its *output* — a recipe learned by driving the live game — read as
+  tier (a) "nothing to verify, no ledger row, overkill". A fifth row: **classify by
+  what the run is for**; tier (e) records the row with `kind: experiment`, `record`
+  implies `--no-reach` and stamps `reach_note`, the reach downgrade never applies, and
+  the verdict is judged on what was established (`found`); `stats` counts experiments
+  separately.
 - **`record` prints its denominator every run, and `fixed-upstream` is a status**
   (0.48.0, plant-tower-defense:G-058 third sighting). `run.json: read K of N supplied
   key(s) (…); ignored: …; defaulted: verdict -> unknown` — `difflib` catches a key near
@@ -1326,7 +1349,7 @@ Notable flags:
 - `raycast --from X,Y[,Z] --to X,Y[,Z] [--mask N] [--areas] [--exclude NODE]` — two
   components query the 2D space, three the 3D space; `--exclude` is
   repeatable; without `--mask` every layer is tested.
-- `sample-pixels [--rect X,Y,W,H]` — mean / dominant colour over a screen rect
+- `sample-pixels [--rect X,Y,W,H | --points X,Y;X,Y] [--expect RRGGBB,... [--tolerance N]]` — mean / dominant colour over a screen rect or exactly the named points; with `--expect` an **assertion** (exit 1 when a colour appears zero times within the tolerance)
   (default: the whole viewport).
 - `mouse-move --relative DX,DY [--steps N] [--position X,Y] [--buttons MASK]` — a
   real `InputEventMouseMotion` (mouse-look); prints the mouse mode and warns when

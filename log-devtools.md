@@ -8137,3 +8137,89 @@ another session's working tree is not this loop's to do.
 **Validation run this turn:** `record_version.py --record` then `--check` OK at 0.48.0
 (14 files, 58 verbs + 62 CLI). `unittest discover -s tools` — 85 OK (1 new + 3
 assertions). `check_templates.py` — OK, all stages (`dev_tools.gd` stamp-only).
+
+## 2026-08-17 - Upstreamed 2 open gap(s) from plant-tower-defense (harness 0.18.0, 0.19.0, 0.21.0, 0.23.0, 0.24.0, 0.25.0, 0.32.0, 0.33.0, 0.36.0, 0.38.0)
+
+Pooled by `tools/upstream_gaps.py` from `C:\Users\gotmi\Documents\GitHub\plant-tower-defense\log-devtools.md`. Gap text is the project's,
+verbatim; only the id line is rewritten (qualified with the project name so
+ids from two projects cannot collide, plus a `source:` back-pointer).
+
+- Gap: **`sample-pixels` can describe a region but cannot answer "is this colour present in
+  it", which is the only question a drawn-cue check ever has.** The verb takes `--rect
+  X,Y,W,H` and nothing else (`--points` is not a flag; it exits with the argparse usage
+  block), and it reports `mean`, `dominant` with a percentage, `brightest` and `darkest`.
+  Real output from this run, on a 5x5 box centred where a pip should be:
+
+  ```
+  25 px in (178, 230, 5, 5): mean #24894a, dominant #19844a (36%)
+  ```
+
+  That is enough to conclude "not obviously the pip" and not enough to assert anything. The
+  workaround was to shrink the rect until `dominant` became the cue's own colour and read
+  the percentage — which works, is a squint with extra steps, and cannot be written into a
+  test. A cue drawn at 5% coverage of a 5x5 box is drawn; `dominant` will never say so.
+  - [plant-tower-defense:G-059] status: fixed | fixed-in: 0.49.0 | seen: 1 | harness: 0.38.0 | source: plant-tower-defense 2026-08-17 | dup-of: gh#49
+  - Improvement: `sample-pixels --expect RRGGBB[,RRGGBB...] [--tolerance N]`, reporting the
+    matched pixel COUNT and fraction per expected colour, and exiting 1 when a named colour
+    appears zero times. That turns "did this cue get drawn" from a description into an
+    assertion, and it is the one visual question the rest of the harness cannot reach:
+    `node-bounds` is for Controls, `findings` is for layout, and a PNG costs a token budget
+    and an eyeball. `--points X,Y[;X,Y...]` as an alternative to `--rect` would close the
+    smaller half — a cue is a point, and expressing a point as a 1x1 rect works but reads
+    like a workaround because it is one.
+
+- Gap: **Phase 0.5's triage table classifies a run by its diff, and an experiment inverts
+  that — the diff is the run's OUTPUT.** This cycle's diff was one Markdown file, which is
+  tier (a): "print 'nothing to verify', write **no** ledger row, log `Value: overkill —
+  avoided: triaged out', and STOP the run here." Every clause is wrong for what happened. The
+  run was not overkill; it was not avoidable; and the ledger — whose stated job is to be the
+  denominator of runs — would carry no record that a full session happened.
+
+  ```
+  commands/verify.md:127
+  | (a) Nothing Godot loads: only docs/`.md` outside code ... | **Nothing** | ... STOP the run here. |
+  ```
+
+  Following it literally would have discarded the finding that polling a short tween fails
+  *silently*. And the case is one the harness's own workflow encourages: `log-devtools.md`
+  asks every turn what was missing from the harness, and finding out usually means driving it.
+  - [plant-tower-defense:G-060] status: fixed | fixed-in: 0.49.0 | seen: 1 | harness: 0.38.0 | source: plant-tower-defense 2026-08-17 | dup-of: gh#50
+  - Improvement: a fifth row — tier (e) **Experiment**, reach not expected, ledger row written
+    with `--no-reach` and `skipped: "experiment; the session produced the diff"`, verdict
+    judged on what the session ESTABLISHED. Plus one line above the table: *classify by what
+    the run is for, not only by what changed.* The distinguishing test is mechanical:
+    **tier (a) if the diff existed before the run was considered; tier (e) if the run came
+    first.**
+
+## 2026-08-17 — 0.49.0: loop tick seventeen — a visual assertion, and a run whose diff is its output
+
+Reviewed: 10 open beads, two NEW issues (gh#49, gh#50), `PURPOSE.md`, both project logs
+(two new plant gaps, both arriving with `dup-of:` set — the intake path is now routine).
+Both issues from plant, still pinned at 0.38.0, both re-checked against 0.47.0 before
+filing, both right.
+
+- **[gh#49 / plant G-059 — fixed] `sample-pixels --expect RRGGBB[,…] [--tolerance N]`
+  and `--points X,Y;…`.** Counting game-side (the image is already in hand); the client
+  exits 1 on `<- ABSENT`, 2 on a pre-0.49.0 game (never a pass over a missing key).
+  Argument errors are refused by name BEFORE the framebuffer check so the headless
+  contract table proves the parsing (two new rows, plus a `message_contains`
+  expectation the table did not have); the counting itself was proved **live,
+  windowed**, on the plant copy left from tick eleven: `expected #192121: 11857 px
+  (49.4%)`, `#ff00ff: 0 px <- ABSENT`, exit 1; two named points at 100%. This is the
+  one visual question the layout checks structurally cannot reach, and it was a squint
+  with extra steps until now.
+- **[gh#50 / plant G-060 — fixed] `/verify` Phase 0.5 tier (e), `run.json` `kind:
+  experiment`.** "Classify by what the run is for, not only by what changed": tier (a)
+  if the diff existed before the run was considered, tier (e) if the run came first.
+  `record` implies `--no-reach`, stamps `reach_note`, never downgrades an experiment
+  for reach; the verdict is judged on `found`; `stats` counts experiments. The
+  reporter's example — a `step-time --then-pause` recipe whose only diff was one `.md`
+  and whose finding (a naive poll of a short tween fails *silently*) would have been
+  thrown away as "nothing to verify" — is exactly the shape `log-devtools.md`'s own
+  discipline produces every turn.
+
+- Gap: no new gap this turn.
+
+**Validation run this turn:** `record_version.py --record` then `--check` OK at 0.49.0
+(14 files, 58 verbs + 62 CLI). `unittest discover -s tools` — 88 OK (3 new).
+`check_templates.py --full` — OK, all stages, `stage 6 contract: 93/93` (two new sample_pixels argument rows). Live windowed probe as above.
