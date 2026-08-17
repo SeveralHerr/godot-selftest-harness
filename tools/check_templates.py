@@ -4225,9 +4225,25 @@ def stage_windowed(godot, scratch):
         if len(got) != 2 or (pd.get("expected") or [{}])[0].get("count") != 1:
             return fail("stage 5b: two named points, exactly one inside the swatch, got points=%r expected=%r"
                         % (got, pd.get("expected")))
+        # gh#57 (0.60.0): screenshot --region speaks VIEWPORT coordinates and reports
+        # the capture scale; a region over the swatch must produce a swatch-coloured crop.
+        shot = client.send_command(scratch, "screenshot",
+                                   {"region": [900, 520, 40, 40], "region_space": "viewport"}, timeout=15.0)
+        sd = shot.get("data") or {}
+        if not shot.get("success") or "scale" not in sd or "viewport" not in sd \
+                or (sd.get("region") or {}).get("space") != "viewport" \
+                or (sd.get("region") or {}).get("given", {}).get("w") != 40:
+            return fail("stage 5b: screenshot --region must report scale, viewport and the given "
+                        "viewport region; got %r" % shot)
+        raw = client.send_command(scratch, "screenshot",
+                                  {"region": [900, 520, 40, 40], "region_space": "pixels"}, timeout=15.0)
+        if not raw.get("success") or ((raw.get("data") or {}).get("region") or {}).get("space") != "pixels":
+            return fail("stage 5b: screenshot --pixels must record region space 'pixels'; got %r" % raw)
         print("stage 5b windowed: sample_pixels found the planted #3fa7d6 swatch (%d of 1600 px), "
-              "#ff00ff ABSENT, points read (%s, %s)" % (
-                  exp["3fa7d6"]["count"], got[0].get("color"), got[1].get("color")))
+              "#ff00ff ABSENT, points read (%s, %s); screenshot --region reports scale x%.2f and "
+              "the viewport region it was given" % (
+                  exp["3fa7d6"]["count"], got[0].get("color"), got[1].get("color"),
+                  float((sd.get("scale") or {}).get("x", 0))))
     finally:
         try:
             client.send_command(scratch, "quit", {}, timeout=5.0)

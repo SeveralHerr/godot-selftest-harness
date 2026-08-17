@@ -72,8 +72,8 @@ import re
 import sys
 from pathlib import Path
 
-# harness-version: 0.59.0
-HARNESS_VERSION = "0.59.0"
+# harness-version: 0.60.0
+HARNESS_VERSION = "0.60.0"
 
 DEFAULT_DEST = "log-devtools.md"
 

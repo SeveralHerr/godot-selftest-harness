@@ -91,8 +91,8 @@ import sys
 from bisect import bisect_right
 from pathlib import Path
 
-# harness-version: 0.59.0
-HARNESS_VERSION = "0.59.0"
+# harness-version: 0.60.0
+HARNESS_VERSION = "0.60.0"
 
 EXIT_OK = 0
 EXIT_FINDINGS = 1

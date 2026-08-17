@@ -8788,3 +8788,55 @@ plant gap (G-072), no issue. Plant still pinned at 0.38.0.
 **Validation run this turn:** `record_version.py --record` then `--check` OK at 0.59.0
 (14 files, 59 verbs + 63 CLI). `unittest discover -s tools` — 94 OK. `check_templates.py`
 — first full run FAILED the new stage-5 control twice on the CONTROL's own mistakes (the plant sat straight under the Node2D root - world-space, so no ui_overflow; then an arithmetic slip, 148 for 200) - both real lessons about the check, none about the verb; stages 1-5b OK on the third run, `ui_overflow on the planted Frame/Spill names the Frame (right=200px) and the viewport second; ScaledOutside names only the viewport`.
+
+## 2026-08-17 - Upstreamed 1 open gap(s) from plant-tower-defense (harness 0.18.0, 0.19.0, 0.21.0, 0.23.0, 0.24.0, 0.25.0, 0.32.0, 0.33.0, 0.36.0, 0.38.0)
+
+Pooled by `tools/upstream_gaps.py` from `C:\Users\gotmi\Documents\GitHub\plant-tower-defense\log-devtools.md`. Gap text is the project's,
+verbatim; only the id line is rewritten (qualified with the project name so
+ids from two projects cannot collide, plus a `source:` back-pointer).
+
+- Gap: **`screenshot --region` and `node-bounds` speak different coordinate systems and
+  neither says so.** `node-bounds` prints "Size from: get_global_transform_with_canvas() x
+  Control.size (screen space)" — which reads as though it matches what a screenshot would
+  capture, and on a 1:1 window it does. Here it does not, and the failure is silent: you get a
+  valid image of the wrong place.
+  The harness knows the scale — `canvas-scale --node` exists and reports it — so the data is
+  in hand at the moment of the capture.
+  - [plant-tower-defense:G-073] status: fixed | fixed-in: 0.60.0 | dup-of: gh#57 | seen: 2 | harness: 0.38.0 | source: plant-tower-defense 2026-08-17
+  - Improvement: have `screenshot --region` report the scale it applied when the window is not
+    1:1 — `Cropped to: 2270,290 580x545 (viewport 908,116 232x216 at 2.5x)` — or accept the
+    region in viewport coordinates with a `--pixels` flag for the raw form. Either ends the
+    class. The one-line version is cheapest: print the scale whenever it is not 1.0, so the
+    mismatch is visible in the reply that produced the wrong image.
+  - Note: no other gaps this turn.
+
+  - [G-072] status: open | seen: 1 | harness: 0.54.0 | upstream: gh#57 | note: reconciled
+    against the installed 0.54.0 before filing — `dev_tools.gd:3915` still formats
+    `"%s '%s' extends past viewport"` with no ancestor walk.
+  - [G-073] status: open | seen: 1 | harness: 0.54.0 | upstream: gh#57 | note: same issue,
+    filed first because it is the worse of the two: `devtools.py:1144` prints
+    `Cropped to: x,y wxh` with no scale, so a region taken from `node-bounds` produces a
+    valid PNG of the wrong place and no error. Filed together because they share a shape —
+    a reply that is true, is the most general true statement available, and sends the reader
+    to the outermost cause when the specific one was already computed.
+
+## 2026-08-17 — 0.60.0: loop tick twenty-eight — a valid picture of the wrong thing
+
+Reviewed: 8 open beads, one NEW issue (gh#57 — two halves, the second already shipped
+last tick as plant G-072), `PURPOSE.md`, both project logs (plant G-073, the first
+half's twin). Plant still pinned at 0.38.0.
+
+- **[gh#57.1 / plant G-073 — fixed] `screenshot --region` takes viewport coordinates
+  and reports the capture scale.** The reporter's option 2, plus option 1: the region is
+  scaled game-side by capture-px-per-viewport-unit (`--pixels` for the raw form), the
+  reply carries `scale`, `viewport` and the given-vs-applied region, and the client
+  prints the mismatch line whenever the scale is not 1. On a 1:1 window nothing changes;
+  on a 2.5× window a rect pasted from `node-bounds` now crops the thing it names. Stage
+  5b (windowed) asserts both spaces.
+- **[gh#57.2 / plant G-072] — already shipped in 0.59.0**, closed with the pointer.
+
+- Gap: no new gap this turn.
+
+**Validation run this turn:** `record_version.py --record` then `--check` OK at 0.60.0
+(14 files, 59 verbs + 63 CLI). `unittest discover -s tools` — 94 OK. `check_templates.py`
+— OK, all stages; stage 5b `screenshot --region reports scale x1.00 and the viewport region it was given` — the scratch window is 1:1, so the ≠1 scaling branch is exercised only at identity here; the arithmetic is one multiply per axis and the reporter's 2.5× case is what it exists for (a scaled-window plant would need a stretch-mode fixture: not done).

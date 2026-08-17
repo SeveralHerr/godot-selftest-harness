@@ -89,11 +89,11 @@ from pathlib import Path
 from typing import Optional  # noqa: F401
 
 
-# harness-version: 0.59.0
+# harness-version: 0.60.0
 # Version of the godot-selftest-harness this client was copied from. Compared against
 # the running game's own stamp by the `harness-version` verb, so a half-refreshed
 # install (new client, old autoload) is visible instead of mysterious.
-HARNESS_VERSION = "0.59.0"
+HARNESS_VERSION = "0.60.0"
 
 COMMANDS_FILE = "devtools_commands.json"
 RESULTS_FILE = "devtools_results.json"
@@ -1127,6 +1127,7 @@ def cmd_screenshot(args, project_path: Path):
         cmd_args["filename"] = args.filename
     if args.region is not None:
         cmd_args["region"] = args.region
+        cmd_args["region_space"] = "pixels" if getattr(args, "pixels", False) else "viewport"
     if args.hide:
         cmd_args["hide"] = [normalize_node_path(p) for p in args.hide]
     if args.hide_group:
@@ -1139,9 +1140,24 @@ def cmd_screenshot(args, project_path: Path):
     data = result["data"]
     print(f"Screenshot saved: {data['path']}")
     print(f"Size: {data['width']}x{data['height']}")
+    scale = data.get("scale") or {}
+    sx, sy = float(scale.get("x", 1.0) or 1.0), float(scale.get("y", 1.0) or 1.0)
+    vp = data.get("viewport") or {}
     if data.get("region"):
         r = data["region"]
-        print(f"Cropped to: {r['x']},{r['y']} {r['w']}x{r['h']}")
+        given = r.get("given") or {}
+        space = r.get("space", "pixels")
+        if given and space == "viewport" and (abs(sx - 1.0) > 0.01 or abs(sy - 1.0) > 0.01):
+            print(f"Cropped to: {r['x']},{r['y']} {r['w']}x{r['h']} px  (from viewport region "
+                  f"{given['x']},{given['y']} {given['w']}x{given['h']} scaled x{sx:.2f}/x{sy:.2f})")
+        else:
+            print(f"Cropped to: {r['x']},{r['y']} {r['w']}x{r['h']}"
+                  + ("" if space == "pixels" else " (viewport coordinates = pixels at scale 1)"))
+    if scale and (abs(sx - 1.0) > 0.01 or abs(sy - 1.0) > 0.01):
+        # gh#57: the mismatch, in the reply that produced the image.
+        print(f"Scale: the capture is {data.get('width')}x{data.get('height')} px for a "
+              f"{int(vp.get('w', 0))}x{int(vp.get('h', 0))} viewport (x{sx:.2f}) - --region takes "
+              f"VIEWPORT coordinates (what node-bounds reports); pass --pixels for raw capture pixels")
     if data.get("hidden"):
         print(f"Hidden for the capture (restored after): {', '.join(data['hidden'])}")
     elif args.hide or args.hide_group:
@@ -4826,8 +4842,12 @@ def main():
     p = subparsers.add_parser("screenshot", help="Take a screenshot")
     p.add_argument("--filename", "-f", help="Output filename")
     p.add_argument("--region", type=rect_arg, metavar="X,Y,W,H",
-                   help="Crop to this pixel rect (game-side, so the crop is "
-                        "reproducible from the command line)")
+                   help="Crop to this rect in VIEWPORT coordinates - what node-bounds reports "
+                        "(game-side, so the crop is reproducible from the command line). On a "
+                        "window larger than the viewport it is scaled to capture pixels and the "
+                        "reply says by how much (gh#57)")
+    p.add_argument("--pixels", action="store_true",
+                   help="--region is raw capture pixels, not viewport coordinates")
     p.add_argument("--hide", action="append", metavar="NODE",
                    help="Hide this node for the capture and restore it after "
                         "(repeatable)")
