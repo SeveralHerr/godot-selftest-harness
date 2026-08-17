@@ -156,6 +156,14 @@ python tools/upstream_gaps.py ../<game>/log-devtools.md   # deduped by id, safe 
 
 Closing a gap means editing its status line to `status: fixed | fixed-in: <version>` in
 **this** log — the project's copy stays open until that project refreshes and confirms it.
+**Edit the status line, not just the prose** — the 0.29.0 entry said "closes G-028" and
+that gap's line read `open` for thirteen releases ([H-069]). Every pool run ends with
+`open gaps … by source:`; `python tools/upstream_gaps.py --triage` lists the open pooled
+set oldest-first with `STALE` on anything logged 15+ minor releases ago, and
+`--mark-unverified <id>…` (explicit ids, after re-reading them) records "not re-checked
+against current templates" as a third state that is neither open nor fixed. Do not
+bulk-mark by age: a stale-looking gap can be a still-wanted request (asset conformance,
+collider planes) — the flag is for the reader, not a rewrite.
 
 **Reproduce a pooled gap's mechanism before implementing its `Improvement:` line**
 ([H-033]). That line is a hypothesis written by someone who was working around the
