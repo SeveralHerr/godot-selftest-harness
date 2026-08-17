@@ -144,8 +144,8 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
-# harness-version: 0.47.0
-HARNESS_VERSION = "0.47.0"
+# harness-version: 0.48.0
+HARNESS_VERSION = "0.48.0"
 
 LEDGER_PATH = Path(".devtools") / "verify-runs.jsonl"
 
@@ -157,7 +157,12 @@ RUN_JSON_KEYS = {
 }
 RUN_JSON_ALIASES = {"phase4": "checks", "phase_4": "checks", "evidence": "checks",
                     "notes": "expected", "note": "expected", "result": "verdict",
-                    "outcome": "verdict", "phases": "runtime"}
+                    "outcome": "verdict", "phases": "runtime",
+                    # plant-tower-defense:G-058, 3rd sighting: flat gate numbers passed as
+                    # top-level keys - the real shape is nested (`lint: {...}`, `tests: {...}`)
+                    "lint_exit": "lint", "lint_errors": "lint", "tests_exit": "tests",
+                    "tests_total": "tests", "tests_failed": "tests", "tests_passed": "tests",
+                    "assertions": "tests", "runtime_exit": "runtime", "tier": "runtime"}
 RUN_JSON_SCHEMA = """run.json keys `verify_ledger.py record --run` reads (everything else is
 reported as ignored and is NOT written to the row):
 
@@ -1106,6 +1111,23 @@ def cmd_record(args, root):
                 hint = " (did you mean %r?)" % RUN_JSON_ALIASES[k]
             print("verify_ledger: run.json: ignoring unknown key %r%s - it is NOT in the row. "
                   "`record --schema` prints the keys this reads." % (k, hint), file=sys.stderr)
+
+    # plant-tower-defense:G-058 (3rd sighting, 0.48.0): the denominator, every run - the
+    # way every gate here prints one. difflib catches a key NEAR a real one; a
+    # "read K of N keys" line plus the defaults that fired catches the rest, including
+    # the silent `verdict: unknown` that is what actually made a clean run's row wrong.
+    read_keys = sorted(k for k in run if k in RUN_JSON_KEYS)
+    defaults = []
+    if "verdict" not in run:
+        defaults.append("verdict -> unknown")
+    if "value" not in run:
+        defaults.append("value -> unrecorded")
+    if run.get("checks") is None:
+        defaults.append("checks -> []")
+    print("verify_ledger: run.json: read %d of %d supplied key(s) (%s)%s%s"
+          % (len(read_keys), len(run), ", ".join(read_keys) or "none",
+             ("; ignored: " + ", ".join(unknown)) if unknown else "",
+             ("; defaulted: " + ", ".join(defaults)) if defaults else ""), file=sys.stderr)
 
     checks = run.get("checks") or []
     for i, c in enumerate(checks):

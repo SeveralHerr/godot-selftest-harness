@@ -54,6 +54,10 @@ Read the installed revision once, up front — Phase 6 needs it for the `harness
 ```bash
 grep -m1 'harness-version:' tools/lint_project.gd   # works without a running game
 "$PY" tools/devtools.py harness-version --client     # never opens the bus; compares against the machine
+# The project's OWN client may be too old to know how to compare (a project pinned on
+# 0.38.0 on purpose runs a 0.38.0 devtools.py); this session's plugin copy always is:
+[ -f "${CLAUDE_PLUGIN_ROOT}/templates/tools/devtools.py" ] && \
+  "$PY" "${CLAUDE_PLUGIN_ROOT}/templates/tools/devtools.py" harness-version --client -p . 2>&1 | grep -E "release\(s\) behind|credited|newer harness" || true
 ```
 
 **Quote the second command's `Machine:` block in the report when it says a newer harness

@@ -565,6 +565,10 @@ class PostCommitAndUnknownKeysCase(unittest.TestCase):
         self.assertIn("ignoring unknown key 'phase4' (did you mean 'checks'?)", err)
         self.assertIn("ignoring unknown key 'notes' (did you mean 'expected'?)", err)
         self.assertIn("recorded AFTER the commit", err)
+        # plant G-058 (3rd): the denominator - keys read of keys supplied, and the defaults
+        self.assertIn("run.json: read 2 of 4 supplied key(s) (found, value)", err)
+        self.assertIn("ignored: notes, phase4", err)
+        self.assertIn("defaulted: verdict -> unknown", err)
         row = json.loads((self.root / ".devtools" / "verify-runs.jsonl").read_text(encoding="utf-8").splitlines()[-1])
         self.assertEqual(row["reach"]["post_commit_suspected"], ["game.gd"])
         self.assertNotIn("phase4", row)
