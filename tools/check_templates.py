@@ -2111,6 +2111,8 @@ def contract_rows():
         ("scripts_seen", {}, True, "G-074b: script census since launch", ["scripts"]),
         ("ping", {}, True, "gather:G-115: the bus dir and user:// are reported separately",
          ["session", "pid", "bus_dir", "user_dir"]),
+        ("batch", {"commands": [{"action": "ping", "args": {}}]}, True,
+         "0.47.0: several verbs in one round trip", ["results", "count", "succeeded", "failed", "stopped_at"]),
         ("canvas_scale", {"node_path": "/root/Main"}, True,
          "G-073/G-075: accumulated scale + effective filter"),
         ("canvas_scale", {"node_path": "/root"}, False,
@@ -3775,6 +3777,45 @@ def check_entry_hook_and_entry_points(godot, scratch):
     return True
 
 
+def check_batch(client, scratch):
+    """`batch` (0.47.0, bead ik8): N verbs, one round trip, every envelope back.
+
+    Plants: a good item, a project verb by hyphenated name, an unknown verb, and a
+    refused nested batch - the failures must land in `failed` by index with the
+    others still executed (default), and stop_on_error must stop AT the failure.
+    """
+    items = [{"action": "ping", "args": {}},
+             {"action": "get-state", "args": {"node_path": "/root/Main", "properties": ["presses"]}},
+             {"action": "no_such_verb_xyz", "args": {}},
+             {"action": "batch", "args": {"commands": []}},
+             {"action": "scene_tree", "args": {"depth": 1}}]
+    reply = client.send_command(scratch, "batch", {"commands": items}, timeout=30.0)
+    d = reply.get("data") or {}
+    res = d.get("results") or []
+    if reply.get("success") is not False or len(res) != 5 or d.get("failed") != [2, 3] \
+            or d.get("succeeded") != 3 or d.get("stopped_at") != -1:
+        return fail("batch: expected 5 results, failed=[2,3], succeeded=3, stopped_at=-1, "
+                    "success=False; got success=%r failed=%r succeeded=%r stopped_at=%r n=%d"
+                    % (reply.get("success"), d.get("failed"), d.get("succeeded"),
+                       d.get("stopped_at"), len(res)))
+    if not res[0].get("success") or "timestamp" not in (res[0].get("data") or {}):
+        return fail("batch item 0 (ping) must carry ping's own data envelope, got %r" % res[0])
+    if not res[1].get("success") or (res[1].get("data") or {}).get("presses") != 0:
+        return fail("batch item 1 (get-state, hyphenated) must succeed and read presses=0, got %r" % res[1])
+    if "Unknown action" not in str(res[2].get("message")):
+        return fail("batch item 2 must be an Unknown action failure, got %r" % res[2])
+    if "not allowed inside a batch" not in str(res[3].get("message")):
+        return fail("batch item 3 (nested batch) must be refused by name, got %r" % res[3])
+    stop = client.send_command(scratch, "batch", {"commands": items, "stop_on_error": True}, timeout=30.0)
+    sd = stop.get("data") or {}
+    if sd.get("stopped_at") != 2 or len(sd.get("results") or []) != 3:
+        return fail("batch stop_on_error must stop AT item 2 with 3 results, got stopped_at=%r n=%d"
+                    % (sd.get("stopped_at"), len(sd.get("results") or [])))
+    print("stage 5 bridge: batch ran 5 items in one round trip (3 ok incl. a hyphenated verb, "
+          "unknown verb + nested batch failed by index), stop_on_error stopped at 2")
+    return True
+
+
 def check_dispatch_reentrancy(client, scratch):
     """A command arriving mid-await must be DEFERRED, not run on top (H-038).
 
@@ -3999,6 +4040,7 @@ def stage_bridge(godot, scratch, full):
         ok = check_launch_ping_timeout_surfaces_error(scratch) and ok
         ok = check_entry_hook_and_entry_points(godot, scratch) and ok
         ok = check_dispatch_reentrancy(client, scratch) and ok
+        ok = check_batch(client, scratch) and ok
 
         if full:
             passed = 0
