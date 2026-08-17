@@ -14,14 +14,14 @@ extends Node
 ## extension loads AFTER the generic handlers, a project may override a generic
 ## verb by registering the same action string (last-writer-wins).
 
-# harness-version: 0.59.0
+# harness-version: 0.60.0
 # --- Constants ---
 
 ## Version of the godot-selftest-harness these files were copied from. Reported by the
 ## `harness_version` verb and stamped into every copied tool script, so a gap logged
 ## against a project can name the version it was seen on, and a refresh can tell a
 ## stale file from a customized one. Bump with .claude-plugin/plugin.json.
-const HARNESS_VERSION: String = "0.59.0"
+const HARNESS_VERSION: String = "0.60.0"
 
 ## Default bus filenames. With a session id (see _resolve_session) the id is spliced in
 ## before the extension, so two instances can each own a bus in the same user:// dir.
@@ -1050,21 +1050,39 @@ func _cmd_screenshot(args: Dictionary) -> Dictionary:
 	if image == null:
 		return {"success": false, "message": "Failed to capture viewport image"}
 
+	# gh#57 / plant-tower-defense:G-073 (0.60.0): the capture is OUTPUT pixels and every
+	# other spatial verb (node-bounds, contained-in, raycast, tilemap-region) speaks
+	# VIEWPORT coordinates; a window rendering 2880x1779 for a 1152x648 viewport
+	# turned a region copied from node-bounds into a valid PNG of a patch of grass,
+	# three times running, with no error. So `region` is in viewport coordinates
+	# by default and is scaled here; `region_space: "pixels"` takes the raw form.
+	# The scale is reported whenever it is not 1.0, in the reply that produced
+	# the image.
 	var region: Dictionary = {}
+	var vp_size: Vector2 = _screen_reference_rect().size
+	var scale_x: float = float(image.get_width()) / maxf(1.0, vp_size.x)
+	var scale_y: float = float(image.get_height()) / maxf(1.0, vp_size.y)
 	var raw_region: Variant = args.get("region")
+	var region_space: String = str(args.get("region_space", "viewport"))
 	if raw_region is Array and (raw_region as Array).size() == 4:
 		var a: Array = raw_region
-		var rect: Rect2i = Rect2i(int(a[0]), int(a[1]), int(a[2]), int(a[3])).intersection(
-			Rect2i(0, 0, image.get_width(), image.get_height()))
+		var given: Rect2i = Rect2i(int(a[0]), int(a[1]), int(a[2]), int(a[3]))
+		var rect: Rect2i = given
+		if region_space != "pixels":
+			rect = Rect2i(int(round(given.position.x * scale_x)), int(round(given.position.y * scale_y)),
+				int(round(given.size.x * scale_x)), int(round(given.size.y * scale_y)))
+		rect = rect.intersection(Rect2i(0, 0, image.get_width(), image.get_height()))
 		if rect.size.x <= 0 or rect.size.y <= 0:
 			return {
 				"success": false,
-				"message": "region %s does not overlap the %dx%d capture" % [
-					str(raw_region), image.get_width(), image.get_height()],
+				"message": "region %s (%s coordinates) does not overlap the %dx%d capture" % [
+					str(raw_region), region_space, image.get_width(), image.get_height()],
 			}
 		image = image.get_region(rect)
 		region = {"x": rect.position.x, "y": rect.position.y,
-			"w": rect.size.x, "h": rect.size.y}
+			"w": rect.size.x, "h": rect.size.y,
+			"given": {"x": given.position.x, "y": given.position.y, "w": given.size.x, "h": given.size.y},
+			"space": region_space}
 
 	var abs_path: String = screenshots_dir.path_join(filename)
 	var err: Error = image.save_png(abs_path)
@@ -1081,6 +1099,10 @@ func _cmd_screenshot(args: Dictionary) -> Dictionary:
 			"size_bytes": FileAccess.get_file_as_bytes(abs_path).size() if FileAccess.file_exists(abs_path) else -1,
 			"region": region,
 			"hidden": hidden_paths,
+			# gh#57: capture pixels per viewport unit, so a caller can see the
+			# mismatch that used to be silent (2.5 on a 2880x1779 window for 1152x648).
+			"scale": {"x": scale_x, "y": scale_y},
+			"viewport": {"w": vp_size.x, "h": vp_size.y},
 		},
 	}
 

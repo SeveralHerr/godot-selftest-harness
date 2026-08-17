@@ -822,6 +822,16 @@ Notable behaviors:
   same root-viewport image with the same `Rect2i` that `screenshot --region` uses. If
   the two ever disagree, the reply now carries enough to say in which coordinate space.
 
+- **`screenshot --region` takes VIEWPORT coordinates and reports the capture scale**
+  (0.60.0, gh#57.1 / plant-tower-defense:G-073). The capture is output pixels and every
+  other spatial verb (`node-bounds`, `contained-in`, `raycast`, `tilemap-region`) speaks
+  viewport coordinates; a window rendering 2880×1779 for a 1152×648 viewport turned a
+  region copied from `node-bounds` into a valid PNG of a patch of grass, three times, with
+  no error. Now the region is scaled game-side (`region_space: viewport`, the default;
+  `--pixels` for raw), the reply carries `scale{x,y}`, `viewport{w,h}` and the given
+  region beside the applied one, and the client prints `Scale: the capture is 2880x1779
+  px for a 1152x648 viewport (x2.50) - --region takes VIEWPORT coordinates` whenever the
+  scale is not 1. On a 1:1 window nothing changes. Stage 5b asserts both spaces.
 - **`ui_overflow` names the nearest ancestor the control escaped, not only the viewport**
   (0.59.0, plant-tower-defense:G-072). `GridContainer 'PlantBar' extends past viewport
   (…); extends past its ancestor Panel 'SidePanel' (/root/…/SidePanel) by right=167px -
