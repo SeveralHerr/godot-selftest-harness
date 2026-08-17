@@ -75,5 +75,21 @@ class GitReleaseState(unittest.TestCase):
                 self.assertIn("HEAD ships %s" % head_v, line)
 
 
+class DocLinks(unittest.TestCase):
+    """H-036: a relative link to a file that does not exist is named; fences and URLs skipped."""
+
+    def test_planted_dead_link_is_named_and_live_ones_are_not(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "REFERENCE.md").write_text("ok\n", encoding="utf-8")
+            (root / "README.md").write_text(
+                "See [ref](REFERENCE.md) and [gone](MISSING.md) and [web](https://x.y/z).\n"
+                "```\n[example](nope.md)\n```\n", encoding="utf-8")
+            problems, checked = record_version.check_doc_links(root, ["README.md"])
+        self.assertEqual(checked, 2)
+        self.assertEqual(problems, ["README.md: link target MISSING.md does not exist"])
+
+
 if __name__ == "__main__":
     unittest.main()

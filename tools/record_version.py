@@ -170,6 +170,44 @@ def check_doc_fanout():
     return problems, len(bus_verbs), len(cli_names)
 
 
+# Docs whose relative links must resolve (H-036, 0.54.0). A `git mv README.md` once
+# left links pointing at a file that no longer existed and nothing said so.
+LINK_DOCS = ["README.md", "REFERENCE.md", "PURPOSE.md", "CLAUDE.md",
+             "templates/CLAUDE.harness.md", "templates/log-devtools.md",
+             "commands/verify.md", "commands/scaffold-godot-harness.md"]
+_LINK_RE = re.compile(r"\]\(([^)\s#]+)(?:#[^)]*)?\)")
+
+
+def check_doc_links(root=None, docs=None):
+    """Every relative link in LINK_DOCS points at a file that exists (H-036).
+    URLs, anchors-only and template placeholders are skipped. A link that appears
+    inside a fenced code block is skipped too - it is an example, not a reference."""
+    problems = []
+    checked = 0
+    root = Path(root) if root else REPO
+    for rel in (docs or LINK_DOCS):
+        path = root / rel
+        if not path.is_file():
+            continue
+        in_fence = False
+        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            if line.strip().startswith("```"):
+                in_fence = not in_fence
+                continue
+            if in_fence:
+                continue
+            for target in _LINK_RE.findall(line):
+                if re.match(r"^[a-z]+://", target) or target.startswith(("mailto:", "<", "$", "{")):
+                    continue
+                if "%" in target or "<" in target:
+                    continue
+                checked += 1
+                candidate = (path.parent / target).resolve()
+                if not candidate.exists():
+                    problems.append("%s: link target %s does not exist" % (rel, target))
+    return problems, checked
+
+
 def check():
     version = plugin_version()
     problems = []
@@ -211,6 +249,8 @@ def check():
 
     fanout_problems, n_bus, n_cli = check_doc_fanout()
     problems.extend(fanout_problems)
+    link_problems, n_links = check_doc_links()
+    problems.extend(link_problems)
 
     if problems:
         print("version check FAILED (%d problem(s)):" % len(problems))
@@ -218,8 +258,8 @@ def check():
             print("  - %s" % p)
         return 1
     print("version check OK: %s stamped in %d shipped file(s), history recorded, "
-          "%d bus verb(s) + %d CLI command(s) documented."
-          % (version, len(SHIPPED), n_bus, n_cli))
+          "%d bus verb(s) + %d CLI command(s) documented, %d relative doc link(s) resolve."
+          % (version, len(SHIPPED), n_bus, n_cli, n_links))
     warning = git_release_state(version)
     if warning:
         print(warning)

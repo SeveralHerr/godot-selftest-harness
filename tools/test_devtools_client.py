@@ -663,6 +663,38 @@ class SamplePixelsExpectCase(unittest.TestCase):
         self.assertIn("nothing was asserted", err)
 
 
+class ReachRegressionCase(unittest.TestCase):
+    """H-026: stats flags a 20+ point reach drop between the two newest versions with 3+ rows."""
+
+    def _stats(self, rows):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / ".devtools").mkdir()
+            (root / ".devtools" / "verify-runs.jsonl").write_text(
+                "\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+            proc = subprocess.run([sys.executable, str(REPO / "templates" / "tools" / "verify_ledger.py"), "stats"],
+                                  cwd=root, capture_output=True, text=True, encoding="utf-8", errors="replace")
+        return proc.stdout + proc.stderr
+
+    def _row(self, ver, reached, unreached):
+        return {"ts": "2026-08-17T00:00:00Z", "harness": ver, "verdict": "pass", "value": "warranted",
+                "found": [{"what": "x"}], "checks": [{"name": "c", "result": "pass"}],
+                "reach": {"reached": reached, "unreached": unreached, "worktree": {"reached": reached, "unreached": unreached}}}
+
+    def test_drop_is_flagged_and_versions_sort_numerically(self):
+        rows = [self._row("0.9.0", ["a.gd"], []) for _ in range(3)] \
+             + [self._row("0.10.0", [], ["a.gd"]) for _ in range(3)]
+        out = self._stats(rows)
+        self.assertIn("REACH REGRESSION: 0.10.0 reaches 0%", out)
+        self.assertIn("against 0.9.0's 100%", out)
+
+    def test_no_flag_on_thin_or_flat_data(self):
+        rows = [self._row("0.9.0", ["a.gd"], []) for _ in range(3)] + [self._row("0.10.0", [], ["a.gd"])]
+        self.assertNotIn("REACH REGRESSION", self._stats(rows))
+        rows = [self._row("0.9.0", ["a.gd"], []) for _ in range(3)] + [self._row("0.10.0", ["a.gd"], []) for _ in range(3)]
+        self.assertNotIn("REACH REGRESSION", self._stats(rows))
+
+
 class ChangedFunctionsCase(unittest.TestCase):
     """gh#38 / moving-in:G-060: the changed functions inside a reached file."""
 
