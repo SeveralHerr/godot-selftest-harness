@@ -8251,3 +8251,26 @@ gather triage session (bead 970).
 (14 files, 58 verbs + 62 CLI). `unittest discover -s tools` — 88 OK.
 `check_templates.py --static-only` — OK (only `verify_ledger.py` and docs changed under
 templates/; the reach/coverage stages that exercise the ledger ran).
+
+## 2026-08-17 — 0.51.0: loop tick nineteen — the framebuffer verbs, under the gate
+
+Reviewed: 11 open beads, the tracker (0 open), `PURPOSE.md`, both project logs — nothing
+new. Fourth fully quiet tick. Spent on the bead filed last tick.
+
+- **[bead az2 — shipped] `check_templates.py` stage 5b: a windowed bridge run.** Launches
+  the scratch game with a window, samples a planted 40×40 `#3fa7d6` swatch (`1600 of
+  1600 px`), asserts `#ff00ff` ABSENT and `data.absent`, reads two named points (one in
+  the swatch, one on the clear colour `#2d2d2d`), quits. SKIPPED where no window can
+  open, like the windowed capture stage. Before this a verb that needs a framebuffer
+  could only have its *argument contract* proved by the gate; 0.49.0's counting was
+  proved by hand. `--stage 5` runs it.
+
+**Considered and not done:** the gather triage session (bead 970); H-031 `--self-check`.
+
+- Gap: no new gap this turn.
+
+**Validation run this turn:** `record_version.py --record` then `--check` OK at 0.51.0
+(14 files, 58 verbs + 62 CLI; templates stamp-only). `unittest discover -s tools` — 88
+OK. `check_templates.py` — OK, all stages incl. `stage 5b windowed: sample_pixels found
+the planted #3fa7d6 swatch (1600 of 1600 px), #ff00ff ABSENT, points read (3fa7d6,
+2d2d2d)`.
