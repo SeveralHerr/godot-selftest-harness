@@ -144,8 +144,8 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
-# harness-version: 0.53.0
-HARNESS_VERSION = "0.53.0"
+# harness-version: 0.54.0
+HARNESS_VERSION = "0.54.0"
 
 LEDGER_PATH = Path(".devtools") / "verify-runs.jsonl"
 
@@ -1614,9 +1614,32 @@ def cmd_stats(args, root):
 
     if len(per_version) > 1 or args.verbose:
         print("reach by harness version:")
-        for ver in sorted(per_version):
+        # H-026 (0.54.0): sorted as VERSIONS, and the newest is compared with the
+        # newest-before-it that has enough rows. A drop of 20 points or more on 3+
+        # rows each is flagged - "the honest reach number is going down and nothing
+        # flags a regression" is what this line existed to not say.
+        def _vkey(v):
+            try:
+                return tuple(int(x) for x in str(v).split("."))
+            except ValueError:
+                return (-1,)
+        ordered = sorted(per_version, key=_vkey)
+        for ver in ordered:
             got, tot = per_version[ver]
             print("  %-8s %s (%d/%d)" % (ver, _pct(got, tot), got, tot))
+        solid = [v for v in ordered if per_version[v][1] >= 3]
+        if len(solid) >= 2:
+            new, old = solid[-1], solid[-2]
+            ng, nt = per_version[new]
+            og, ot = per_version[old]
+            new_pct = 100.0 * ng / nt
+            old_pct = 100.0 * og / ot
+            if new_pct + 20.0 <= old_pct:
+                print("  REACH REGRESSION: %s reaches %.0f%% (%d/%d) against %s's %.0f%% (%d/%d) - "
+                      "%d points down on 3+ rows each. Either the harness stopped seeing "
+                      "something it saw, or the diffs changed shape; look before the number "
+                      "becomes the new normal (H-026)."
+                      % (new, new_pct, ng, nt, old, old_pct, og, ot, int(old_pct - new_pct)))
 
     print("runs where a runtime check caught something: %d (%s)"
           % (runtime_findings, _pct(runtime_findings, total)))

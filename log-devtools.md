@@ -589,7 +589,7 @@ log as prose, in the ledger as an enum, and the `Stop` hook now requires it.
   written first, `Cheaper:` must name something concrete, `_reconcile_value()` downgrades
   a `warranted` whose files were never loaded, preserving `value_reported`), none of
   which make it objective.
-  - [H-016] status: open | seen: 1 | harness: 0.7.0
+  - [H-016] status: fixed | fixed-in: by 0.24.0 (`record` downgrades a self-reported `warranted` mechanically: no reach -> insufficient, found=[] -> overkill) - 0.54.0 triage, by reading | seen: 1 | harness: 0.7.0
   - Improvement: the only real check would be an outside one — sample N `warranted` rows
     and re-derive the verdict from the row alone, without the prose. Worth doing once
     `gather` has accumulated enough rows to sample.
@@ -2455,7 +2455,7 @@ the instrument existed and had 52 real rows in it. The bad news is what it said.
   (193/354)` — which is exactly the comparison it was built for, but reading it requires
   someone to run `stats` and notice. Two versions is not yet a trend, and there is no
   point at which the tool says so itself.
-  - [H-026] status: open | seen: 1 | harness: 0.10.0
+  - [H-026] status: fixed | fixed-in: 0.54.0 (`stats` prints REACH REGRESSION when the newest version with 3+ rows is 20+ points below the one before it) | seen: 1 | harness: 0.10.0
   - Improvement: have `stats` compare the newest harness version's reach against the
     previous one and print a regression line when it drops by more than a few points with
     a comparable denominator. The data is already in the aggregate; only the sentence is
@@ -2728,7 +2728,7 @@ began — its log was written against 0.10.0 — and is marked as such, with the
   untouched — a change that passes review, passes lint, and fixes nothing. The log's
   `Improvement:` field is a hypothesis from a project that was working around the problem,
   not a diagnosis, and this repo has been treating it as the latter.
-  - [H-033] status: open | seen: 1 | harness: 0.12.0
+  - [H-033] status: fixed | fixed-in: as process (CLAUDE.md rule; applied 0.42.0 - bulk mark withdrawn after reproducing - and 0.45.0 - premise corrected) - 0.54.0 triage, by reading | seen: 1 | harness: 0.12.0
   - Improvement: require reproducing a pooled gap's *mechanism* before implementing its
     *Improvement*, and record the reproduction in the release entry. Three of the six gaps
     this session were reproduced first; this is the one where it changed the answer. Cheap
@@ -2754,7 +2754,7 @@ began — its log was written against 0.10.0 — and is marked as such, with the
   a result an implementation that does nothing whatsoever also produces. Same for the skew
   warning. Planting is now permanent for both (`check_ui_baseline`, `check_engine_skew`,
   `stage_vacuous_control`), but nothing makes it the default posture for the *next* check.
-  - [H-035] status: open | seen: 1 | harness: 0.12.0
+  - [H-035] status: fixed | fixed-in: as process (CLAUDE.md rule; every stage added since 0.12.0 plants its defect; stage 5b 0.51.0) - 0.54.0 triage, by reading | seen: 1 | harness: 0.12.0
     (third sighting of the family behind `[H-030]` and `[H-031]`)
   - Improvement: a rule for this repo, enforced by review rather than code — a new stage in
     `check_templates.py` must plant the defect it claims to detect, and the printed line
@@ -2804,7 +2804,7 @@ and all 48 CLI commands.
   REFERENCE.md` silently invalidated five cross-references in four files; four were found
   by `grep -rn README`, and the fifth (`DOC_RULES`) only because it happened to be in the
   same grep output. A rename of a doc nothing greps for by name would have shipped broken.
-  - [H-036] status: open | seen: 1 | harness: 0.12.0
+  - [H-036] status: fixed | fixed-in: 0.54.0 (`record_version.py --check` resolves every relative link in the eight docs; planted dead link is named) | seen: 1 | harness: 0.12.0
   - Improvement: a `--check` stage in `record_version.py` that resolves every relative
     markdown link (`](foo.md)` and `` `foo.md` ``) in the repo's own docs against the
     filesystem and exits 1 on a miss. It is ~15 lines and it runs in the gate that
@@ -2816,7 +2816,7 @@ and all 48 CLI commands.
   content *in* — a verb must appear in the reference or the gate fails — and there was no
   counter-pressure keeping any surface short. The result is the predictable one: the only
   entry point grew to 1195 lines because growing it was always the compliant move.
-  - [H-037] status: open | seen: 1 | harness: 0.12.0
+  - [H-037] status: wontfix (README stays the short front door by policy - CLAUDE.md; REFERENCE.md is the manual - 0.54.0 triage) | seen: 1 | harness: 0.12.0
   - Improvement: state the audience and a soft length ceiling at the top of each doc-role
     (done for `README.md` in `CLAUDE.md` this turn: "the front door and deliberately names
     almost none of them — don't grow it"). A ceiling nothing enforces is still better than
@@ -3636,7 +3636,7 @@ patches; both patches would have reviewed clean, linted clean and fixed nothing.
   and `Basis` is a builtin, so a bogus method on a builtin-typed local passes. The
   engine API index it already downloads *does* carry `builtins.Basis.members` — the
   data is present and unused.
-  - [H-045] status: open | seen: 1 | harness: 0.18.0
+  - [H-045] status: wontfix (a full GDScript compile without the engine is not possible; name_check.py is the engine-free gate and import_check.py the cheapest engine one - 0.54.0 triage, by reading) | seen: 1 | harness: 0.18.0
   - Improvement: two independent halves, smallest first. (a) Teach `name_check.py` to
     check member access on locals whose declared type is a builtin it has members for.
     It already parses `var x: Basis` and already holds the member list, so this is a
@@ -5292,7 +5292,7 @@ Shipped, ranked:
   session made landed as a clean, isolated hunk), but committing here without checking
   first would have been exactly the risk gh#17 named for a *dirty* tree, one level up: a
   release built by reading a snapshot that moved under it.
-  - [H-061] status: open | seen: 1 | harness: 0.23.0
+  - [H-061] status: fixed | fixed-in: by 0.24.0 (release re-reads git status before committing; PURPOSE names it) - 0.54.0 triage, by reading | seen: 1 | harness: 0.23.0
   - Improvement: the same discipline 0a already prescribes for a stale HEAD — re-run
     `git status`/`git log` immediately before commit, not just at the start — should be
     stated for the working tree generally, not only for the sha. Whether two sessions
@@ -8338,3 +8338,32 @@ this was forty greps).
 **Validation run this turn:** `record_version.py --record` then `--check` OK at 0.53.0
 (14 files, 58 verbs + 62 CLI). `unittest discover -s tools` — 88 OK.
 `check_templates.py --static-only` — OK (only `upstream_gaps.py` changed under templates/).
+
+## 2026-08-17 — 0.54.0: loop tick twenty-two — the harness-native backlog, and two small instruments
+
+Reviewed: 11 open beads, the tracker (0 open), `PURPOSE.md`, both project logs — nothing
+new (seventh quiet tick). With the pooled logs triaged, this tick read the 18 open
+harness-native `H-` gaps the same way, and built the two that were cheap.
+
+- **[H-036 — fixed] `record_version.py --check` resolves every relative link** in the
+  eight docs (fenced examples and URLs skipped); a planted dead link is named. Four live
+  links today — the docs mostly name files in backticks — but the check exists.
+- **[H-026 — fixed] `verify_ledger.py stats` flags a REACH REGRESSION** when the newest
+  harness version with 3+ rows reaches 20+ points below the one before it, and sorts
+  versions numerically (`0.10.0` after `0.9.0`, not before). Unit-tested both ways.
+- **Closed by reading:** H-016 (self-report bias — `record` downgrades mechanically since
+  0.24.0), H-033 and H-035 (process rules in CLAUDE.md, applied repeatedly this week),
+  H-061 (release re-reads `git status`), H-045 wontfix (an engine-free full compile is
+  not possible; `name_check` and `import_check` are the two halves), H-037 wontfix (README
+  short by policy). **Still open, and beads:** H-020, H-021, H-030, H-031, H-034, H-043,
+  H-050, H-052, H-053, H-066 (heredoc edits — it bit twice more this tick, and the fix
+  remains "use the Write tool"; the memory note exists and I did not read it in time).
+
+**Considered and not done:** the five real gather asks; bead 1hb (measuring harness
+effectiveness — the experiments/ A/B study is that, and it stays untracked by design).
+
+- Gap: no new gap this turn.
+
+**Validation run this turn:** `record_version.py --record` then `--check` OK at 0.54.0
+(14 files, 58 verbs + 62 CLI, 4 doc links). `unittest discover -s tools` — 91 OK (3
+new). `check_templates.py --static-only` — OK (only `verify_ledger.py` under templates/).
