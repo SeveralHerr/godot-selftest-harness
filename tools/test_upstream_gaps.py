@@ -177,6 +177,22 @@ class BacktickTitleIdAndFixedUpstream(unittest.TestCase):
         self.assertTrue(any("G-058" in sk for sk in r["skipped"]), r)
 
 
+class NoGapInBody(unittest.TestCase):
+    """0.58.0: an id-less Gap: entry whose body says 'no gap here' is an absence marker."""
+
+    def test_success_note_under_gap_heading_is_not_a_gap(self):
+        text = ("## t\n\n- Gap: **the ledger's `blocked` result works exactly as designed.**\n"
+                "  The downgrade is right. **No gap here** - recorded because the rule asks.\n"
+                "  - Note: no gaps this turn.\n\n" + _gap("G-071", "a real one"))
+        gaps = upstream_gaps.parse_gaps(text)
+        self.assertEqual([g["id"] for g in gaps], ["G-071"])
+
+    def test_an_entry_with_its_own_id_line_is_kept_even_if_the_body_says_no(self):
+        text = ("## t\n\n- Gap: **x says no gap here in passing** but has an id.\n"
+                "  - [G-072] status: open | seen: 1 | harness: 0.1.0\n  - Improvement: y.\n")
+        self.assertEqual([g["id"] for g in upstream_gaps.parse_gaps(text)], ["G-072"])
+
+
 class Triage(unittest.TestCase):
     """H-069: the pooled log's open set is listed by age, and only explicit ids move."""
     TEXT = ("- [gather:G-001] status: open | seen: 1 | harness: 0.8.0\n"

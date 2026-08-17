@@ -72,8 +72,8 @@ import re
 import sys
 from pathlib import Path
 
-# harness-version: 0.57.0
-HARNESS_VERSION = "0.57.0"
+# harness-version: 0.58.0
+HARNESS_VERSION = "0.58.0"
 
 DEFAULT_DEST = "log-devtools.md"
 
@@ -213,7 +213,13 @@ def parse_gaps(text):
             gap["minted"] = True
         # "no gaps this turn" entries are absence markers required by the log
         # format; they carry no id and nothing to fix, so they never upstream.
-        if not _NO_GAP_RE.match(block[0]):
+        # 0.58.0: an entry with NO id line of its own whose body says "no gap here" /
+        # "no gaps this turn" is an absence marker too - a project wrote "the ledger's
+        # `blocked` result works exactly as designed ... **No gap here**" as a success
+        # note under the Gap: heading and it arrived minted as a gap.
+        body_says_none = gap.get("minted") and re.search(
+            r"\bno gaps? (here|this turn|this session)\b", " ".join(block), re.I)
+        if not _NO_GAP_RE.match(block[0]) and not body_says_none:
             gaps.append(gap)
         i = j
     return gaps

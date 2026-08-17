@@ -144,8 +144,8 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
-# harness-version: 0.57.0
-HARNESS_VERSION = "0.57.0"
+# harness-version: 0.58.0
+HARNESS_VERSION = "0.58.0"
 
 LEDGER_PATH = Path(".devtools") / "verify-runs.jsonl"
 
@@ -181,9 +181,14 @@ reported as ignored and is NOT written to the row):
   value                warranted | overkill | insufficient | inconclusive
   verdict              pass | partial | fail | unknown  (downgraded to partial on a
                        blocked check)
-  checks               [{"name": str, "result": "pass"|"fail"|"blocked", ...}]  - the
-                       Phase 4 evidence; `warranted` with no checks is KEPT but the row is
-                       stamped `evidence: none` and `stats` counts those rows (gh#51)
+  checks               [{"name": str, "result": "pass"|"fail"|"blocked",
+                         "judged": "eye" (optional: a person decided it from a picture;
+                                   absent = a gate decided it),
+                         "artifact": "user://screenshots/....png" (optional: the picture
+                                   or file the verdict rests on, so it can be re-examined),
+                         ...}]  - the Phase 4 evidence; `warranted` with no checks is
+                       KEPT but the row is stamped `evidence: none`; `stats` counts rows
+                       resting on an eye-judged check (gh#51, gh#56)
   found                [] means "nothing, and I am saying so"; a list of findings else
   expected             free text: what the run set out to prove
   cheaper_alternative  free text: what would have answered this without the harness
@@ -1169,6 +1174,18 @@ def cmd_record(args, root):
         if isinstance(c, dict) and "check" in c and "name" not in c:
             print("verify_ledger: run.json: checks[%d] has 'check' but no 'name' - the "
                   "reported name is read from 'name'" % i, file=sys.stderr)
+        # gh#56 / plant-tower-defense:G-070: a check a person decided from a picture is
+        # byte-shaped like one a gate decided, and only one survives being wrong. Two
+        # optional per-check fields: `judged: "eye"` (the only value; absent means
+        # mechanical - a vocabulary would invite the guessing the field removes) and
+        # `artifact` (the picture the verdict rests on, so it can be re-examined).
+        if isinstance(c, dict) and c.get("judged") not in (None, "eye"):
+            print("verify_ledger: run.json: checks[%d].judged is %r - the only value is 'eye' "
+                  "(absent means a gate decided it); kept as written, not counted as eye"
+                  % (i, c.get("judged")), file=sys.stderr)
+        if isinstance(c, dict) and c.get("judged") == "eye" and not c.get("artifact"):
+            print("verify_ledger: run.json: checks[%d] is judged by eye with no 'artifact' - the "
+                  "verdict cannot be re-examined later; name the screenshot" % i, file=sys.stderr)
     found, found_note = _normalize_found(run.get("found"))
     if found_note:
         print("verify_ledger: %s" % found_note, file=sys.stderr)
@@ -1466,6 +1483,7 @@ def cmd_stats(args, root):
     experiments = 0
     tiers = {}
     no_evidence = 0
+    eye_runs = eye_n = eye_with_artifact = 0
     reached_n = unreached_n = 0
     implicit_n = 0
     implicit_files = set()
@@ -1528,6 +1546,11 @@ def cmd_stats(args, root):
             tiers[str(row["tier"])] = tiers.get(str(row["tier"]), 0) + 1
         if row.get("value") == "warranted" and not (row.get("checks") or []):
             no_evidence += 1
+        eye_checks = [c for c in (row.get("checks") or []) if isinstance(c, dict) and c.get("judged") == "eye"]
+        if eye_checks:
+            eye_runs += 1
+            eye_n += len(eye_checks)
+            eye_with_artifact += sum(1 for c in eye_checks if c.get("artifact"))
 
         reach = row.get("reach") or {}
         r, u = reach.get("reached"), reach.get("unreached")
@@ -1698,6 +1721,10 @@ def cmd_stats(args, root):
     if no_evidence:
         print("  %d warranted verdict(s) carry no check evidence (checks: [] - the claim that "
               "earned them is not in the row; gh#51)" % no_evidence)
+    if eye_runs:
+        print("  judged: %d of %d runs rest on at least one check decided by eye (%d such "
+              "check(s), %d with an artifact to re-examine; gh#56)"
+              % (eye_runs, total, eye_n, eye_with_artifact))
     if tiers:
         print("  by Phase 0.5 tier (rows that recorded one): "
               + ", ".join("%s %d" % kv for kv in sorted(tiers.items(), key=lambda kv: (-kv[1], kv[0]))))

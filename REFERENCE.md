@@ -822,6 +822,17 @@ Notable behaviors:
   same root-viewport image with the same `Rect2i` that `screenshot --region` uses. If
   the two ever disagree, the reply now carries enough to say in which coordinate space.
 
+- **A check a person decided by eye is a distinct thing in the ledger** (0.58.0, gh#56 /
+  plant-tower-defense:G-070). Two optional per-check fields in `run.json`: `judged: "eye"`
+  (the only value; absent means a gate decided it — a vocabulary would invite the
+  guessing the field removes) and `artifact` (the screenshot the verdict rests on, so a
+  verdict that turns out wrong six cycles later can be re-examined; `record` warns when
+  an eye-judged check names none). `stats` prints `judged: N of M runs rest on at least
+  one check decided by eye (K such check(s), J with an artifact)` — how much of what a
+  project calls verified rests on somebody having looked at a PNG and been satisfied,
+  which for player-facing work is exactly the work no assertion covers. `upstream_gaps.py`
+  also stops minting a gap from an id-less `Gap:` entry whose body says "no gap here" (a
+  project's success note about the `blocked` downgrade arrived as one).
 - **`press` reports what the press did** (0.57.0, gh#55 / plant-tower-defense:G-067).
   `Pressed /root/…/NotebookButton  (+37 nodes, added /root/…/Notebook)` — the tree is
   snapshotted either side of the emit; the message carries the node delta, the
