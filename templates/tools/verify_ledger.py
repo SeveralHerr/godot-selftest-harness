@@ -144,8 +144,8 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
-# harness-version: 0.38.0
-HARNESS_VERSION = "0.38.0"
+# harness-version: 0.39.0
+HARNESS_VERSION = "0.39.0"
 
 LEDGER_PATH = Path(".devtools") / "verify-runs.jsonl"
 
@@ -1226,6 +1226,9 @@ def cmd_stats(args, root):
     overkill_seconds = 0.0
     reached_n = unreached_n = 0
     implicit_n = 0
+    implicit_files = set()
+    alias_files = set()
+    base_files = set()
     # Buckets added after 0.8.0: rows written before it have no such key, and `or []`
     # is what keeps a mixed-vintage ledger aggregating instead of raising.
     alias_n = 0
@@ -1291,6 +1294,9 @@ def cmd_stats(args, root):
             implicit_n += len(reach.get("reached_implicit") or [])
             alias_n += len(reach.get("reached_alias") or [])
             base_n += len(reach.get("reached_base") or [])  # 0.21.0+ key
+            implicit_files.update(reach.get("reached_implicit") or [])
+            alias_files.update(reach.get("reached_alias") or [])
+            base_files.update(reach.get("reached_base") or [])
             test_n += len(reach.get("test_scripts") or [])
             # .get on a key added in 0.13.0: every row written before it must still
             # parse, or stats silently mixes two populations in one average.
@@ -1341,16 +1347,22 @@ def cmd_stats(args, root):
         print("       branch:   %s (%d/%d) - dilutes as branches grow; old commits "
               "drag it down through no fault of any one run"
               % (_pct(br_reached, br_denom), br_reached, br_denom))
+    # moving-in:G-059: these are cumulative CREDITS across every run, not file
+    # counts - "138 file(s)" was five files credited 51+50+21+8+8 times, and it cost
+    # a project a kanban entry, a todo and a re-audit before anyone noticed the noun.
+    # The comparison against the observed count above is still sound (both are
+    # cumulative); only the wording changes: say both numbers.
     if implicit_n:
-        print("       %d file(s) credited implicitly (autoload/extension - runs in "
-              "every session, invisible to snapshots)" % implicit_n)
+        print("       %d implicit credit(s) across %d distinct file(s) (autoload/extension - "
+              "runs in every session, invisible to snapshots)" % (implicit_n, len(implicit_files)))
     if alias_n:
-        print("       %d file(s) credited by reach_aliases - declared by the project, "
-              "not observed. If this outgrows the observed count, the number above is "
-              "mostly the config talking." % alias_n)
+        print("       %d alias credit(s) across %d distinct file(s) by reach_aliases - "
+              "declared by the project, not observed. If the credits outgrow the observed "
+              "count, the number above is mostly the config talking."
+              % (alias_n, len(alias_files)))
     if base_n:
-        print("       %d file(s) credited as base classes - an observed script extends "
-              "them (a static read of the files, 0.21.0+)" % base_n)
+        print("       %d base-class credit(s) across %d distinct file(s) - an observed script "
+              "extends them (a static read of the files, 0.21.0+)" % (base_n, len(base_files)))
     if test_n:
         print("       %d changed test script(s) excluded - they ran in Phase 1, which "
               "is not something reach can see or vouch for" % test_n)

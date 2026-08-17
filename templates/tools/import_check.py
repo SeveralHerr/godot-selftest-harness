@@ -50,8 +50,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-# harness-version: 0.38.0
-HARNESS_VERSION = "0.38.0"
+# harness-version: 0.39.0
+HARNESS_VERSION = "0.39.0"
 
 # Substrings that mean the import did not leave a parseable project behind. Every one
 # of these is taken from real captured output, not from guesswork:
@@ -174,6 +174,32 @@ def _imported_artifacts(imported_dir):
 _REIMPORT_RE = re.compile(r"\[\s*\d+%\s*\]\s*reimport\s*\|\s*(\S.*)")
 
 
+def sweep_import_tmp(project_path):
+    """Delete the `<asset>.import*.tmp` files a crashed --import leaves beside the
+    assets (plant-tower-defense:G-044, 7th sighting). They are the engine's own
+    write-then-rename temporaries for `.import` metadata; a crash mid-write strands
+    them, they show up as untracked in `git status` and invite being committed.
+    Only names containing `.import` and ending in `.tmp` (any case), never anything
+    under `.godot/`. Returns the deleted paths, relative to the project.
+    """
+    swept = []
+    for path in project_path.rglob("*"):
+        if not path.is_file():
+            continue
+        name = path.name.lower()
+        if ".import" not in name or not name.endswith(".tmp"):
+            continue
+        rel = path.relative_to(project_path)
+        if rel.parts and rel.parts[0] == ".godot":
+            continue
+        try:
+            path.unlink()
+        except OSError:
+            continue
+        swept.append(rel.as_posix())
+    return swept
+
+
 def _last_reimport_line(captured):
     """The last `[ N% ] reimport | file` line, i.e. the asset the crash happened on."""
     last = ""
@@ -268,6 +294,11 @@ def main():
             progressed = attempt == 1 or gained_now > progress_marker[0] \
                 or (last_line and last_line != progress_marker[1])
             progress_marker = (gained_now, last_line)
+            swept = sweep_import_tmp(project_path)
+            if swept:
+                print(f"Note: swept {len(swept)} stranded .import temp file(s) the crash left "
+                      f"beside the assets: {', '.join(swept[:5])}"
+                      f"{', ...' if len(swept) > 5 else ''}", file=sys.stderr)
             if progressed:
                 print(f"Note: godot --import exited {godot_rc} with no recognizable parse/load "
                       f"error in its output - a crash signature (plant-tower-defense:G-044), not "
@@ -331,6 +362,10 @@ def main():
         # scene_groups_cache.cfg) seeds this one.
         after = _imported_artifacts(imported_dir)
         gained = len(after - imported_before)
+        swept = sweep_import_tmp(project_path)
+        if swept:
+            print(f"  Swept {len(swept)} stranded .import temp file(s): {', '.join(swept[:5])}"
+                  f"{', ...' if len(swept) > 5 else ''}", file=sys.stderr)
         tmp_files = sum(1 for f in imported_dir.glob("*.tmp")) if imported_dir.is_dir() else 0
         last = _last_reimport_line(captured)
         print(f"  .godot/imported gained {gained} finished artifact(s) across this run"

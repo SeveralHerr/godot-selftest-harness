@@ -220,7 +220,44 @@ def check():
     print("version check OK: %s stamped in %d shipped file(s), history recorded, "
           "%d bus verb(s) + %d CLI command(s) documented."
           % (version, len(SHIPPED), n_bus, n_cli))
+    warning = git_release_state(version)
+    if warning:
+        print(warning)
     return 0
+
+
+def git_release_state(version, repo=None, run=None):
+    """One WARNING line when `version` is cut in the working tree but not committed
+    (bead 1kh): every stamp, hash and doc can agree with each other and with nothing
+    in git history, and `--check` used to print OK on exactly that. Returns "" on a
+    clean tree at the recorded version, or when git is unavailable (not a repo, no
+    binary) - the state is stated, never gated, so exit stays 0.
+
+    `repo`/`run` exist for the unit test, which plants a dirty tree with bumped
+    stamps and a clean one and asserts which of the two says something.
+    """
+    import subprocess
+    repo = Path(repo) if repo else REPO
+    run = run or (lambda cmd: subprocess.run(cmd, cwd=str(repo), capture_output=True,
+                                             text=True, timeout=30))
+    try:
+        status = run(["git", "status", "--porcelain", "--untracked-files=no"])
+        head = run(["git", "show", "HEAD:.claude-plugin/plugin.json"])
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    if status.returncode != 0 or head.returncode != 0:
+        return ""
+    dirty = [ln for ln in status.stdout.splitlines() if ln.strip()]
+    try:
+        head_version = json.loads(head.stdout)["version"]
+    except (ValueError, KeyError, TypeError):
+        return ""
+    if head_version == version:
+        return ""  # a dirty tree at the committed version is ordinary post-release editing
+    return ("WARNING: %s is recorded but uncommitted - HEAD ships %s and %d tracked "
+            "file(s) are dirty. Every stamp and hash agree with each other and with "
+            "nothing in git history; this is a mid-release state, not a shipped one."
+            % (version, head_version, len(dirty)))
 
 
 def record():

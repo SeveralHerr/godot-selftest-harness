@@ -51,8 +51,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-# harness-version: 0.38.0
-HARNESS_VERSION = "0.38.0"
+# harness-version: 0.39.0
+HARNESS_VERSION = "0.39.0"
 
 # The runtime-error prefixes Godot emits for a GDScript that raised mid-execution.
 # Deliberately narrower than import_check.py's FAILURE_SIGNALS: "Parse Error" /
@@ -202,6 +202,33 @@ def run_suite(godot_path: Path, project_path: Path, log_path: Path, passthrough,
 
 _ASSERT_RE = re.compile(r"\b_T\s*\.\s*assert\w*\s*\(")
 _EXECUTED_RE = re.compile(r"^\s*Assertions:\s*(\d+)\s+executed", re.M)
+_RUN_ID_RE = re.compile(r"^\s*Run:\s*([0-9a-f]+)\s+pid\s+(\d+)\s+(started|finished)", re.M)
+_TOTAL_RE = re.compile(r"^\s*Total:\s*\d+\s*\|\s*Passed:", re.M)
+
+
+def mixed_runs(text: str):
+    """plant-tower-defense:G-051b: is this capture more than one run?
+
+    A suite run moved to the background and stopped left its godot child alive,
+    still appending to the same results file a later foreground run had just
+    truncated - one file, two `Total:` lines (`519/519` and `516/519 | Failed: 3`),
+    per-test times inflated 30x by the contention, and nothing to say the
+    denominators belonged to different runs. Returns a one-line reason when the
+    text carries more than one distinct `Run:` id (0.39.0+ runner) or more than
+    one `Total:` line (any runner), else "".
+    """
+    ids = {m.group(1) + " pid " + m.group(2) for m in _RUN_ID_RE.finditer(text)}
+    totals = len(_TOTAL_RE.findall(text))
+    if len(ids) > 1:
+        return ("this output holds %d distinct runs (%s) - a stopped run's godot process "
+                "kept writing into the file a later run truncated; the tallies above are a "
+                "MIXTURE. Nothing was verified. Kill the earlier pid, or wait for it, and re-run."
+                % (len(ids), ", ".join(sorted(ids))))
+    if totals > 1:
+        return ("this output holds %d `Total:` lines - two runs wrote one file (a stopped run's "
+                "godot process kept appending); the tallies above are a MIXTURE. Nothing was "
+                "verified. Re-run once no other run_tests process is alive." % totals)
+    return ""
 
 
 def declared_assertions(project_path):
@@ -324,6 +351,12 @@ def main():
     # Print run_tests.gd's own output unchanged -- the per-test [PASS]/[FAIL]/[VACU]
     # listing and denominators are correct and worth keeping exactly as they read.
     print(captured, end="" if captured.endswith("\n") else "\n")
+
+    mixed = mixed_runs(captured)
+    if mixed:
+        print(captured, end="" if captured.endswith("\n") else "\n")
+        print(f"Error: {mixed} Log: {log_path}", file=sys.stderr)
+        sys.exit(2)
 
     findings = scan_output(captured)
     engine_errors = scan_engine_errors(captured)

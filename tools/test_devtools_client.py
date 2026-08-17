@@ -22,6 +22,8 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "templates" / "tools"))
 import devtools  # noqa: E402
+import run_tests as run_tests_py  # noqa: E402
+import import_check  # noqa: E402
 import contextlib, io
 
 
@@ -275,6 +277,26 @@ class UserstateSnapshotCase(unittest.TestCase):
     def test_no_snapshot_is_a_quiet_none(self):
         self.assertIsNone(devtools.userstate_restore(self.project, "nothing"))
 
+    def test_always_on_snapshot_is_a_recovery_point_not_an_auto_revert(self):
+        # plant-tower-defense:G-050: taken without --snapshot-userstate -> quit must
+        # NOT put it back on its own, but restore-userstate (force) must.
+        devtools.userstate_snapshot(self.project, self.user_dir, ["*.save"], restore_on_quit=False)
+        (self.user_dir / "highscore.save").write_text("36074", encoding="utf-8")
+        self.assertIsNone(devtools.userstate_restore(self.project, "quit"),
+                          "an unarmed snapshot must not revert a legitimate run")
+        self.assertEqual((self.user_dir / "highscore.save").read_text(encoding="utf-8"), "36074")
+        self.assertIsNotNone(devtools.userstate_restore(self.project, "restore-userstate", force=True))
+        self.assertEqual((self.user_dir / "highscore.save").read_text(encoding="utf-8"), "orig")
+
+    def test_previous_snapshot_is_kept_beside_the_current_one(self):
+        devtools.userstate_snapshot(self.project, self.user_dir, ["*.save"], restore_on_quit=False)
+        (self.user_dir / "highscore.save").write_text("second-launch", encoding="utf-8")
+        devtools.userstate_snapshot(self.project, self.user_dir, ["*.save"], restore_on_quit=False)
+        prev = devtools._userstate_dir(self.project).with_name(devtools.USERSTATE_DIR + "_prev")
+        self.assertEqual((prev / "highscore.save").read_text(encoding="utf-8"), "orig")
+        self.assertEqual((devtools._userstate_dir(self.project) / "highscore.save").read_text(encoding="utf-8"),
+                         "second-launch")
+
 
 class UserstateStatCase(unittest.TestCase):
     """gh#33 (a): quit names which user:// files a run wrote, always on."""
@@ -348,6 +370,71 @@ class SceneTreeCountCase(unittest.TestCase):
         # a grep -ci ambient over the JSON would say 2 for the single node above
         text = json.dumps(data, indent=2)
         self.assertEqual(sum(1 for l in text.splitlines() if "ambient" in l.lower()), 2)
+
+
+class MixedRunsCase(unittest.TestCase):
+    """plant-tower-defense:G-051b: one results file, two runs."""
+    ONE = ("  Run: 7f3a1c pid 100 started\n[PASS] a\n"
+           "  Total: 519  |  Passed: 519  |  Failed: 0  |  Skipped: 0\n"
+           "  Run: 7f3a1c pid 100 finished\n")
+    OTHER = ("  Run: 0b22e9 pid 200 started\n[FAIL] b\n"
+             "  Total: 516  |  Passed: 513  |  Failed: 3  |  Skipped: 0\n"
+             "  Run: 0b22e9 pid 200 finished\n")
+
+    def test_single_run_is_not_mixed(self):
+        self.assertEqual(run_tests_py.mixed_runs(self.ONE), "")
+
+    def test_two_nonces_refused_naming_both(self):
+        msg = run_tests_py.mixed_runs(self.ONE + self.OTHER)
+        self.assertIn("2 distinct runs", msg)
+        self.assertIn("7f3a1c pid 100", msg)
+        self.assertIn("0b22e9 pid 200", msg)
+        self.assertIn("MIXTURE", msg)
+
+    def test_interleaved_output_still_counted_by_nonce(self):
+        # A surviving process appends mid-file, not neatly after.
+        text = self.ONE.replace("[PASS] a\n", "[PASS] a\n" + self.OTHER)
+        self.assertIn("2 distinct runs", run_tests_py.mixed_runs(text))
+
+    def test_pre_nonce_runner_two_totals_refused(self):
+        # A half-refreshed install: old runner (no Run: line), two Total: lines.
+        strip = lambda t: "\n".join(l for l in t.splitlines() if "Run:" not in l) + "\n"
+        self.assertIn("2 `Total:` lines", run_tests_py.mixed_runs(strip(self.ONE) + strip(self.OTHER)))
+        self.assertEqual(run_tests_py.mixed_runs(strip(self.ONE)), "")
+
+
+class ImportTmpSweepCase(unittest.TestCase):
+    """plant-tower-defense:G-044 (7th): a crashed --import strands <asset>.import*.tmp."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.project = Path(self._tmp.name)
+        (self.project / "assets" / "audio").mkdir(parents=True)
+        (self.project / ".godot" / "imported").mkdir(parents=True)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_sweeps_only_import_temporaries_outside_dot_godot(self):
+        keep = [self.project / "assets" / "audio" / "q.ogg",
+                self.project / "assets" / "audio" / "q.ogg.import",
+                self.project / "assets" / "notes.tmp",
+                self.project / ".godot" / "imported" / "q.ogg-abc.sample.tmp"]
+        gone = [self.project / "assets" / "audio" / "q.ogg.import.tmp",
+                self.project / "assets" / "audio" / "r.png.import-1234.TMP"]
+        for f in keep + gone:
+            f.write_text("x", encoding="utf-8")
+        swept = import_check.sweep_import_tmp(self.project)
+        self.assertEqual(sorted(swept), ["assets/audio/q.ogg.import.tmp",
+                                         "assets/audio/r.png.import-1234.TMP"])
+        for f in keep:
+            self.assertTrue(f.exists(), f)
+        for f in gone:
+            self.assertFalse(f.exists(), f)
+
+    def test_clean_tree_sweeps_nothing(self):
+        (self.project / "assets" / "audio" / "q.ogg.import").write_text("x", encoding="utf-8")
+        self.assertEqual(import_check.sweep_import_tmp(self.project), [])
 
 
 if __name__ == "__main__":

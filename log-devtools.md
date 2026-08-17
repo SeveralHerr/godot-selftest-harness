@@ -6242,7 +6242,7 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   shared `.godot/` import cache), but this time the crash was a hard segfault
   rather than a truncated cache, and it happened on the FIRST import call of
   the session rather than after `/verify` was already mid-run.
-  - [plant-tower-defense:G-044] status: fixed | fixed-in: 0.29.0, 0.34.0, 0.35.0 (5th sighting: retry while progressing, up to 4; 6th sighting pooled at 0.37.0 came from a 0.33.0 cache - nothing further) | seen: 6 | harness: 0.25.0 | source: plant-tower-defense 2026-08-16
+  - [plant-tower-defense:G-044] status: fixed | fixed-in: 0.29.0, 0.34.0, 0.35.0 (5th sighting: retry while progressing, up to 4; 6th sighting pooled at 0.37.0 came from a 0.33.0 cache - nothing further; 7th sighting was a BARE --import outside import_check.py, plus .import*.tmp debris - the sweep shipped in 0.39.0) | seen: 7 | harness: 0.25.0 | source: plant-tower-defense 2026-08-16
   - Improvement: `/verify`'s import step retrying once on a non-zero exit
     before surfacing failure would turn "verified nothing, investigate a
     crash" into "verified cleanly, noted a transient" — the same shape as the
@@ -6958,7 +6958,7 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   developer's own save altered by a verification run. (The 2026-08-16 entry above
   files the *merge* half of this as "not a harness gap"; this is the other half —
   not two checkouts disagreeing, one checkout mutating state it only meant to read.)
-  - [plant-tower-defense:G-047] status: fixed | fixed-in: 0.35.0 | seen: 1 | harness: 0.32.0 | source: plant-tower-defense 2026-08-16
+  - [plant-tower-defense:G-047] status: fixed | fixed-in: 0.35.0 | seen: 2 | harness: 0.32.0 | source: plant-tower-defense 2026-08-16
   - Improvement: a `--snapshot-userstate` flag on `launch` that copies `user://*.save`
     aside and restores it on `quit` (or on the next launch, if the game died) would
     make a live check that touches persisted settings safe by default rather than by
@@ -7252,3 +7252,178 @@ already fixed 0.37.0. Nothing else moved.
 (14 files, 57 verbs + 59 CLI). `unittest discover -s tools` — 53 OK (2 new).
 `check_templates.py` — OK, all stages (client + docs only; `--full` ran clean for
 0.37.0 on the identical `dev_tools.gd`).
+
+## 2026-08-16 - Upstreamed 4 open gap(s) from plant-tower-defense (harness 0.18.0, 0.19.0, 0.21.0, 0.23.0, 0.24.0, 0.25.0, 0.32.0, 0.33.0, 0.36.0, 0.38.0)
+
+Pooled by `tools/upstream_gaps.py` from `C:\Users\gotmi\Documents\GitHub\plant-tower-defense\log-devtools.md`. Gap text is the project's,
+verbatim; only the id line is rewritten (qualified with the project name so
+ids from two projects cannot collide, plus a `source:` back-pointer).
+
+- Gap: **`launch --snapshot-userstate` is opt-in, and the warning that you needed it
+  arrives at `quit`, after the file is already unrecoverable.** The flag added for
+  G-047 works exactly as advertised — the second launch restored cleanly. The first
+  launch did not use it, and `quit` then printed:
+
+  ```
+  user://: this run wrote the developer's REAL user data in
+  C:\Users\gotmi\AppData\Roaming\Godot\app_userdata\plant-tower-defense
+  -- changed: highscore.save.
+  ```
+
+  By then the developer's campaign best had been overwritten with 36074 from a run
+  driven on 35,000 injected seeds, and the pre-existing value exists nowhere — no
+  snapshot, no history, nothing to restore from. The warning names the damage at the
+  one moment nothing can be done about it. Note the damage is not test pollution: it
+  is the *game* saving normally, which is why no test-side rule catches it.
+  - [plant-tower-defense:G-050] status: fixed | fixed-in: 0.39.0 | seen: 1 | harness: 0.36.0 | source: plant-tower-defense 2026-08-16
+  - Improvement: take the snapshot on **every** `launch` (it is a file copy of
+    `user://*.save`, cost is microseconds) and make `--snapshot-userstate` control
+    only whether `quit` restores it. Then a run that turns out to have written the
+    real save is recoverable after the fact instead of only before it. Failing that,
+    `launch` should print the "this session shares your real `user://`" line it
+    already prints *with* the names of the files that exist there and would be
+    overwritten, so the decision is offered at the moment it can still be made.
+
+- Gap: **`set_physics_process(false)` before `add_child()` does not stick, and the
+  harness's own test guidance does not say so.** A `Dandelion` built with physics
+  disabled and then hosted had already fired a seed by the first assertion
+  (`a fresh head is full: Expected 3 but got 2`), because Godot re-enables physics
+  processing at `NOTIFICATION_READY` for any script declaring `_physics_process`.
+  `test_combat.gd` already works around it by calling the setter AFTER
+  `instantiate_scene` and resetting `_cooldown` by hand, but nothing says why, so the
+  next test writer rediscovers it. Cost: one full suite round trip.
+  - [plant-tower-defense:G-050b] status: fixed | fixed-in: 0.39.0 | seen: 1 | harness: 0.36.0 | source: plant-tower-defense 2026-08-16
+  - Improvement: one paragraph in the harness's "Where the checks you write live"
+    section, beside the existing `instantiate_ui` note — headless pumps no frames for
+    Controls, but it DOES pump the settle frames for a hosted Node2D, and a node
+    quiesced before hosting is not quiesced. Better still, a `_T.quiesce(node)`
+    helper that sets the flag after the host is live, so the ordering is not
+    something each test has to know.
+
+- Gap: **`instantiate_ui`'s contract says a Control's `size` stays `(0, 0)` without it, and
+  stops there - it never says the size that lands can be LARGER than the one the code
+  assigned.** Every doc line about this helper is about the value being too small
+  (`headless pumps no frames, so without it size stays (0,0)`), so the trap it actually
+  set was the opposite one. `probe.heading.size` came back `(720.0, 42.0)` against an
+  `add_heading` that had just executed `heading.size = Vector2(panel.size.x, 40.0)`,
+  because `Control.size` is clamped up to `get_combined_minimum_size()` and a Label's
+  minimum is its font. Workaround: assert position exactly, width exactly, and height
+  with `assert_gte`. This repo's own history has hit the same clamp before from the
+  other side (a Label whose "assigned 264 width loses to its own minimum size" draws
+  past its paper) without it ever being filed.
+  - [plant-tower-defense:G-051] status: fixed | fixed-in: 0.39.0 | seen: 1 | harness: 0.38.0 | source: plant-tower-defense 2026-08-16
+  - Improvement: one sentence beside the existing `(0, 0)` warning - "and after the
+    settle frames a Control's `size` is clamped UP to `get_combined_minimum_size()`, so
+    an exact-equality assertion on a text-bearing Control's size is asserting the theme's
+    font metrics as much as the code's layout; assert position exactly and size with
+    `assert_gte`." Better still, a `_T.assert_box(control, rect)` helper that does exactly
+    that split, so the right assertion is the shortest one to write.
+
+- Gap: **a stopped background test run keeps writing to the results file, and a results
+  file containing two runs looks like one run with a contradiction in it.** A suite run
+  was moved to the background on timeout and stopped via `TaskStop`; the shell died, the
+  `godot` child did not, and it kept appending to the same redirect target a later
+  foreground run had truncated. The result was one file with two `Total:` lines —
+  `519/519 | 11310 assertions` and `516/519 | Failed: 3` — with per-test times inflated
+  from 154ms to 5610ms by the CPU contention. The house doctrine is "read the
+  denominators, not the exit code", and here there were two sets of denominators
+  disagreeing with each other in one file. Diagnosing it needed
+  `Get-CimInstance Win32_Process` to prove the surviving pids were a *sibling agent's*
+  bridge session on another checkout and not mine.
+  - [plant-tower-defense:G-051b] status: fixed | fixed-in: 0.39.0 | seen: 1 | harness: 0.38.0 | source: plant-tower-defense 2026-08-16
+  - Improvement: have `run_tests.gd` stamp a per-run nonce on both its opening and its
+    `Total:` line (`run 7f3a1c pid 12345`), and have `run_tests.py` exit `2` when its
+    captured output contains more than one distinct run nonce — "this file is two runs,
+    you are reading a mixture" rather than leaving a human to notice the duplicate
+    `Total:`. Cheap, and it turns an invisible misread into a refusal.
+
+## 2026-08-16 - Upstreamed 1 open gap(s) from moving-in (harness 0.11.0, 0.16.0, 0.19.0, 0.21.0, 0.31.0, 0.33.0 (cache) / 0.31.0 (vendored), 0.36.0)
+
+Pooled by `tools/upstream_gaps.py` from `C:\Users\gotmi\Documents\GitHub\moving-in\log-devtools.md`. Gap text is the project's,
+verbatim; only the id line is rewritten (qualified with the project name so
+ids from two projects cannot collide, plus a `source:` back-pointer).
+
+- Gap: **[G-059] — `verify_ledger.py stats` reports alias credits as a cumulative sum
+  in a sentence that reads as a file count.** The line is *"138 file(s) credited by
+  reach_aliases — declared by the project, not observed. If this outgrows the observed
+  count, the number above is mostly the config talking."* The comparison against 658 is
+  sound, both being cumulative. But "138 file(s)" is five files credited 51+50+21+8+8
+  times, and it cost this project a kanban entry, a todo item and a re-audit verdict —
+  a subagent independently recomputed 138 and called the entry accurate.
+  - [moving-in:G-059] status: fixed | fixed-in: 0.39.0 | seen: 1 | harness: 0.36.0 | source: moving-in 2026-08-16
+  - Improvement: say both, e.g. *"138 alias credit(s) across 5 distinct file(s)"*. The
+    caveat sentence is the good part and should stay; it is the noun that misleads.
+
+## 2026-08-16 — 0.39.0: loop tick seven — the friction has moved to the test-writing surface
+
+Reviewed for this tick: the 16 open beads, the tracker (0 open issues; #32–#36 all
+closed last tick), `PURPOSE.md`, and the plant-tower-defense and moving-in logs. Five
+new gaps pooled (plant G-050, G-050b, G-051, G-051b; moving-in G-059) and one 7th
+sighting (plant G-044). **Every one of the five is about the headless test surface —
+`_T` helpers, `run_tests.py`, `verify_ledger.py stats` — and none is about a bus
+verb.** The bus has 57 verbs and has not gained a gap in three ticks; the place the
+tool is actually used every turn is `test/unit/` and the wrappers around it. That is
+where this tick's work went, and it is why the three open bus-side beads (batch
+assertion verb, wedged-handler timeout, per-verb usage counts) stayed open: no project
+produced evidence for them this tick, and building to a hypothesis is what H-033 warns
+about.
+
+- **[plant G-050 — fixed] a `user://` snapshot is taken on EVERY `launch`; the flag
+  only arms the automatic restore.** `quit` used to say "this run wrote the developer's
+  REAL user data … changed: highscore.save" at the one moment nothing could be done —
+  the campaign best (35,000-seed run → 36074) existed nowhere. Now `launch` copies
+  `*.save` under `.devtools/userstate_snapshot/` (previous launch's copy kept as
+  `_prev/`), names the files at risk on the launch line, and `restore-userstate` puts
+  them back after the fact; `quit`'s warning names the copy. Two unit tests: an unarmed
+  snapshot does not revert a legitimate run; `restore-userstate` forces it.
+- **[moving-in G-059 — fixed] `stats` says "N alias credit(s) across M distinct
+  file(s)"** — "138 file(s)" was five files credited 51+50+21+8+8 times and cost a
+  project a kanban entry, a todo and a re-audit before the noun was noticed.
+- **[plant G-051b — fixed] `run_tests.py` exits 2 on a results file two runs wrote.**
+  `run_tests.gd` prints `Run: <id> pid <n> started` first and `… finished` after
+  `Total:` (`run_id`/`pid` in `--json`); the wrapper refuses >1 distinct id, or >1
+  `Total:` line from a pre-nonce runner, naming both pids: "the tallies above are a
+  MIXTURE. Nothing was verified." Stage 4 asserts one id brackets the real output; four
+  unit tests cover single/two/interleaved/old-runner captures.
+- **[plant G-051 — fixed] `_T.assert_box(control, rect)`** — position exact, size
+  `== max(assigned, combined minimum)` per axis; failure names the axis and "assigned 40
+  clamped up to combined minimum 42". Stage 4 plants a 30px Label assigned `(200, 10)`,
+  proves `assert_eq` on its size FAILS (the mechanism), and that `assert_box` passes it
+  and refuses a moved position.
+- **[plant G-050b — fixed] `_T.quiesce(node)`** — after hosting; warns and does nothing
+  on a node not yet in a tree. **The stage-4 control caught my first version of the
+  control:** the ticker quiesced after hosting had already ticked once *during
+  `instantiate_scene`'s two settle frames* (`Expected 0 but got 1`, while the
+  before-hosting ticker read 4). Real finding, and exactly the shape the plant log
+  described (`test_combat.gd` resets `_cooldown` by hand): quiesce holds from the
+  moment it is called, and state that must be pristine is reset after it. The control
+  now measures ticks *since* quiesce; the helper doc and REFERENCE say so.
+- **[plant G-044, 7th — swept] `import_check.py` deletes stranded `<asset>.import*.tmp`
+  files** on a crash retry and on the final failure path, naming them; never touches
+  `.godot/`. The 7th sighting itself was a bare `godot --import` run outside
+  `import_check.py` — the wrapper with the retry already existed; the tmp sweep is what
+  it lacked. Two unit tests (planted debris beside kept files; clean tree sweeps none).
+- **[bead 1kh — fixed] `record_version.py --check` reads git.** It printed `OK` on
+  0.18.0 with HEAD at 0.17.0 and 25 files dirty; it now adds `WARNING: 0.39.0 is
+  recorded but uncommitted - HEAD ships 0.38.0 and 24 tracked file(s) are dirty` (exit
+  still 0 — a valid mid-release state, stated). It fired on this very tick's tree, which
+  is the state it was written for. Five unit tests in `tools/test_record_version.py`
+  (dirty+bumped warns; clean quiet; dirty-at-HEAD-version quiet; no git quiet).
+- **PURPOSE.md gained a commitment: "Say it while it can still be acted on."** G-050,
+  G-051b and H-067 are one failure shape — a true report that arrives after the moment
+  of choice — and the design test for a warning is now "can the reader still do
+  something when they read it, and if not, was the way back kept open."
+
+- Gap: **`check_templates.py` has no way to run one stage.** The full run failed at the
+  new stage-4 control, kept going through stage 5/6 (correctly), and the fix cost a
+  second full run to prove — ~10 minutes for a 4-line change to one planted test.
+  - [H-068] status: open | seen: 1 | harness: 0.39.0
+  - Improvement: `--stage 4` (or `--only runners`) that assembles the scratch project
+    and runs one stage; the assemble step is cheap and every stage already takes
+    `(godot, scratch)`.
+
+**Validation run this turn:** `record_version.py --record` then `--check` OK at 0.39.0
+(14 files, 57 verbs + 60 CLI, plus the new git WARNING naming HEAD 0.38.0).
+`unittest discover -s tools` — 66 OK (13 new). `check_templates.py --full` — first
+run FAILED at the new stage-4 control (`Expected 0 but got 1`, above), everything else
+green including `stage 6 contract: 90/90`; second run (control fixed) — OK, all stages, `Run: f819a3 pid 6204 brackets the output`, `assert_box accepted a font-clamped Label and refused a moved one; quiesce() after hosting held at 0 ticks where set_physics_process(false) before hosting was undone`.

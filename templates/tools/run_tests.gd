@@ -91,10 +91,10 @@ extends SceneTree
 ## (res://addons/godot_selftest/devtools_config.json key "test_dir", default
 ## "res://test/unit") for files named test_*.gd.
 
-# harness-version: 0.38.0
+# harness-version: 0.39.0
 ## Harness revision these files were copied from. See lint_project.gd / the
 ## `harness_version` bus verb; bump with .claude-plugin/plugin.json.
-const HARNESS_VERSION: String = "0.38.0"
+const HARNESS_VERSION: String = "0.39.0"
 
 const CONFIG_PATH: String = "res://addons/godot_selftest/devtools_config.json"
 const DEFAULT_TEST_DIR: String = "res://test/unit"
@@ -147,8 +147,16 @@ static var _assertions_run: int = 0
 
 var _vacuous: int = 0
 
+## plant-tower-defense:G-051b: a per-run nonce, printed first thing and again after
+## `Total:`. A stopped background run whose godot child survived kept appending to
+## the same results file a later run had truncated, and one file with two `Total:`
+## lines read as one run with a contradiction in it. run_tests.py exits 2 when the
+## output it captured carries more than one distinct `Run:` id.
+var _run_id: String = ""
+
 
 func _initialize() -> void:
+	_run_id = "%06x" % (randi() & 0xFFFFFF)
 	var args: PackedStringArray = OS.get_cmdline_user_args()
 	var expect_value: bool = false
 	for i: int in args.size():
@@ -179,6 +187,9 @@ func _initialize() -> void:
 				_print_results()
 				quit(_exit_code())
 				return
+
+	if not _json_output:
+		print("  Run: %s pid %d started" % [_run_id, OS.get_process_id()])
 
 	# A never-imported project has no class cache, so every `class_name` in it is
 	# unresolvable and a test whose first statement uses one aborts on a runtime
@@ -587,6 +598,8 @@ func _print_results() -> void:
 	if _json_output:
 		var output: Dictionary = {
 			"harness_version": HARNESS_VERSION,
+			"run_id": _run_id,
+			"pid": OS.get_process_id(),
 			"passed": _passed,
 			"failed": _failed,
 			"skipped": _skipped,
@@ -650,6 +663,7 @@ func _print_results() -> void:
 	print("-" .repeat(60))
 	var total: int = _passed + _failed + _skipped
 	print("  Total: %d  |  Passed: %d  |  Failed: %d  |  Skipped: %d" % [total, _passed, _failed, _skipped])
+	print("  Run: %s pid %d finished" % [_run_id, OS.get_process_id()])
 	# Unconditional (G-135). On a filtered run this is the ratio the selector cut
 	# the suite down to; on a bare run it is the discovery denominator, which is
 	# the number that says whether the whole suite was even found.
@@ -891,6 +905,74 @@ static func instantiate_scene(scene: Variant, viewport_size: Vector2i = Vector2i
 		await tree.process_frame
 
 	return node
+
+
+## Asserts the box a Control actually landed in against the box the code assigned
+## (plant-tower-defense:G-051). After the settle frames a Control's `size` is
+## clamped UP to `get_combined_minimum_size()` - a Label's minimum is its font -
+## so `heading.size = Vector2(720, 40)` lands as `(720, 42)` and an exact-equality
+## assertion on a text-bearing Control's size is asserting the theme's font
+## metrics as much as the code's layout. This asserts position exactly and, per
+## axis, size == max(assigned, combined minimum): the claim that is actually true
+## of every text-bearing Control, and the one that stays green when the heading
+## font moves. Names the axis and the minimum when it fails; `tolerance` is in px.
+static func assert_box(control: Control, rect: Rect2, context: String = "",
+		tolerance: float = 0.5) -> String:
+	_assertions_run += 1
+	if control == null or not is_instance_valid(control):
+		return "%sassert_box: control is null or freed" % ("%s: " % context if context != "" else "")
+	var problems: PackedStringArray = PackedStringArray()
+	var pos: Vector2 = control.position
+	if absf(pos.x - rect.position.x) > tolerance or absf(pos.y - rect.position.y) > tolerance:
+		problems.append("position %s != assigned %s" % [str(pos), str(rect.position)])
+	var min_size: Vector2 = control.get_combined_minimum_size()
+	var expect: Vector2 = Vector2(maxf(rect.size.x, min_size.x), maxf(rect.size.y, min_size.y))
+	var size: Vector2 = control.size
+	for axis: int in [0, 1]:
+		if absf(size[axis] - expect[axis]) > tolerance:
+			var why: String = "assigned"
+			if min_size[axis] > rect.size[axis]:
+				why = "assigned %s clamped up to combined minimum" % str(rect.size[axis])
+			problems.append("size.%s %s != %s (%s %s)" % [
+				"x" if axis == 0 else "y", str(size[axis]), str(expect[axis]), why, str(expect[axis])])
+	if problems.is_empty():
+		return ""
+	var msg: String = "; ".join(problems)
+	if context != "":
+		msg = "%s: %s" % [context, msg]
+	return msg
+
+
+## Stops a hosted node from processing (plant-tower-defense:G-050b). Calling
+## `set_physics_process(false)` BEFORE `add_child()` does not stick: Godot
+## re-enables physics/process at NOTIFICATION_READY for any script that declares
+## `_physics_process` / `_process`, so a node quiesced before hosting is not
+## quiesced - a `Dandelion` built that way had fired a seed by the first
+## assertion. Call this AFTER instantiate_scene()/add_child(); on a node not yet in
+## a tree it warns and does nothing rather than silently being undone. It holds from
+## the moment it is called: the settle frames instantiate_scene() pumps have already
+## run (a physics tick lands in them), so state that must be pristine - a cooldown,
+## a spawn counter - is reset by the test after this call, not assumed.
+## `recursive` applies the same to every descendant (a Timer, an AnimationPlayer).
+static func quiesce(node: Node, physics: bool = true, process: bool = true,
+		recursive: bool = false) -> void:
+	if node == null or not is_instance_valid(node):
+		push_error("quiesce: node is null or freed")
+		return
+	if not node.is_inside_tree():
+		push_warning(("quiesce: %s is not in a tree yet - _ready() re-enables processing, so "
+			+ "this would be undone on hosting. Call quiesce() AFTER instantiate_scene().") % node.name)
+		return
+	var targets: Array[Node] = [node]
+	if recursive:
+		targets.append_array(node.find_children("*", "", true, false))
+	for n: Node in targets:
+		if physics:
+			n.set_physics_process(false)
+			n.set_physics_process_internal(false)
+		if process:
+			n.set_process(false)
+			n.set_process_internal(false)
 
 
 ## Historical name for instantiate_scene(), kept verbatim for existing tests:
