@@ -14,14 +14,14 @@ extends Node
 ## extension loads AFTER the generic handlers, a project may override a generic
 ## verb by registering the same action string (last-writer-wins).
 
-# harness-version: 0.48.0
+# harness-version: 0.49.0
 # --- Constants ---
 
 ## Version of the godot-selftest-harness these files were copied from. Reported by the
 ## `harness_version` verb and stamped into every copied tool script, so a gap logged
 ## against a project can name the version it was seen on, and a refresh can tell a
 ## stale file from a customized one. Bump with .claude-plugin/plugin.json.
-const HARNESS_VERSION: String = "0.48.0"
+const HARNESS_VERSION: String = "0.49.0"
 
 ## Default bus filenames. With a session id (see _resolve_session) the id is spliced in
 ## before the extension, so two instances can each own a bus in the same user:// dir.
@@ -5649,11 +5649,45 @@ func _layer_names_for_mask(mask: int, group: String = "2d_physics") -> Array:
 ## would have to carry (gather:G-121). The viewport texture is already in hand;
 ## this is the same capture path `screenshot` uses, summarised instead of saved.
 ##
-## args: { "rect": [x, y, w, h] (default the whole viewport) }
+## args: { "rect": [x, y, w, h] (default the whole viewport),
+##         "points": [[x, y], ...] (0.49.0, gh#49: sample exactly these pixels instead
+##                    of a rect - a cue is a point, and a 1x1 rect reads like the
+##                    workaround it is),
+##         "expect": ["RRGGBB", ...] (0.49.0, gh#49: count the sampled pixels within
+##                    `tolerance` per 8-bit channel of each colour - a 3.6 px pip
+##                    inside a 5x5 box is a few percent and `dominant` will never
+##                    name it, however plainly it is drawn),
+##         "tolerance": int per channel 0..255 (default 8) }
 ## data keys: rect{x,y,w,h}, pixels (int), mean{r,g,b}, brightest{r,g,b},
 ## darkest{r,g,b}, dominant{r,g,b} (the most common colour after quantising to
-## 5 bits per channel), dominant_share (0..1).
+## 5 bits per channel), dominant_share (0..1); with points: points[{x,y,color}];
+## with expect: expected[{color, count, fraction, absent}], absent (bool: any
+## expected colour appeared zero times - the verb still succeeds; the CLIENT
+## exits 1 on it, the way findings does).
 func _cmd_sample_pixels(args: Dictionary) -> Dictionary:
+	# Argument contract first (0.49.0): a bad `expect` or `points` is refused by name
+	# whether or not there is a framebuffer, so the headless contract table can prove
+	# the parsing that the pixel loop below (which needs an image) cannot be asked to.
+	var expect_raw: Variant = args.get("expect", [])
+	var expected: Array = []
+	if expect_raw is Array:
+		for e: Variant in expect_raw as Array:
+			var hex: String = str(e).trim_prefix("#")
+			if hex.length() != 6 or not Color.html_is_valid("#" + hex):
+				return {"success": false, "message": "expect: '%s' is not a hex colour (RRGGBB)" % str(e)}
+			expected.append({"hex": hex.to_lower(), "color": Color.html("#" + hex), "count": 0})
+	elif expect_raw != null:
+		return {"success": false, "message": "expect must be an array of RRGGBB strings"}
+	var raw_points: Variant = args.get("points", [])
+	if raw_points != null and not (raw_points is Array):
+		return {"success": false, "message": "points must be an array of [x, y] pairs"}
+	if raw_points is Array:
+		for pt: Variant in raw_points as Array:
+			if not (pt is Array and (pt as Array).size() == 2):
+				return {"success": false, "message": "points: each entry is [x, y]; got %s" % str(pt)}
+	var tolerance: int = clampi(int(args.get("tolerance", 8)), 0, 255)
+	var tol_f: float = float(tolerance) / 255.0
+
 	var viewport: Viewport = get_viewport()
 	var texture: ViewportTexture = viewport.get_texture() if viewport != null else null
 	if texture == null:
@@ -5676,6 +5710,18 @@ func _cmd_sample_pixels(args: Dictionary) -> Dictionary:
 				str(raw_rect), full.size.x, full.size.y],
 		}
 
+	# The pixels to visit: every pixel of the rect, or exactly the named points.
+	var point_list: Array = []
+	if raw_points is Array:
+		for pt: Variant in raw_points as Array:
+			var px: int = int((pt as Array)[0])
+			var py: int = int((pt as Array)[1])
+			if px < 0 or py < 0 or px >= full.size.x or py >= full.size.y:
+				return {"success": false, "message": "point (%d, %d) is outside the %dx%d viewport" % [
+					px, py, full.size.x, full.size.y]}
+			point_list.append(Vector2i(px, py))
+	var use_points: bool = not point_list.is_empty()
+
 	var total: Vector3 = Vector3.ZERO
 	var brightest: Color = Color(0, 0, 0)
 	var darkest: Color = Color(1, 1, 1)
@@ -5683,20 +5729,33 @@ func _cmd_sample_pixels(args: Dictionary) -> Dictionary:
 	var worst_lum: float = 2.0
 	var buckets: Dictionary = {}
 	var count: int = 0
-	for y: int in range(rect.position.y, rect.position.y + rect.size.y):
-		for x: int in range(rect.position.x, rect.position.x + rect.size.x):
-			var c: Color = image.get_pixel(x, y)
-			total += Vector3(c.r, c.g, c.b)
-			count += 1
-			var lum: float = c.get_luminance()
-			if lum > best_lum:
-				best_lum = lum
-				brightest = c
-			if lum < worst_lum:
-				worst_lum = lum
-				darkest = c
-			var key: int = (int(c.r * 31.0) << 10) | (int(c.g * 31.0) << 5) | int(c.b * 31.0)
-			buckets[key] = int(buckets.get(key, 0)) + 1
+	var point_colors: Array = []
+	var visit: Array = []
+	if use_points:
+		visit = point_list
+	else:
+		for y: int in range(rect.position.y, rect.position.y + rect.size.y):
+			for x: int in range(rect.position.x, rect.position.x + rect.size.x):
+				visit.append(Vector2i(x, y))
+	for v: Vector2i in visit:
+		var c: Color = image.get_pixel(v.x, v.y)
+		total += Vector3(c.r, c.g, c.b)
+		count += 1
+		var lum: float = c.get_luminance()
+		if lum > best_lum:
+			best_lum = lum
+			brightest = c
+		if lum < worst_lum:
+			worst_lum = lum
+			darkest = c
+		var key: int = (int(c.r * 31.0) << 10) | (int(c.g * 31.0) << 5) | int(c.b * 31.0)
+		buckets[key] = int(buckets.get(key, 0)) + 1
+		for ex: Dictionary in expected:
+			var ec: Color = ex["color"]
+			if absf(c.r - ec.r) <= tol_f and absf(c.g - ec.g) <= tol_f and absf(c.b - ec.b) <= tol_f:
+				ex["count"] = int(ex["count"]) + 1
+		if use_points:
+			point_colors.append({"x": v.x, "y": v.y, "color": c.to_html(false)})
 
 	var mean: Vector3 = total / maxf(1.0, float(count))
 	var top_key: int = -1
@@ -5710,16 +5769,35 @@ func _cmd_sample_pixels(args: Dictionary) -> Dictionary:
 		float((top_key >> 5) & 31) / 31.0,
 		float(top_key & 31) / 31.0) if top_key >= 0 else Color(0, 0, 0)
 
+	var expected_out: Array = []
+	var any_absent: bool = false
+	for ex: Dictionary in expected:
+		var n: int = int(ex["count"])
+		expected_out.append({"color": ex["hex"], "count": n,
+			"fraction": float(n) / maxf(1.0, float(count)), "absent": n == 0})
+		if n == 0:
+			any_absent = true
+	var where: String = "%d px in (%d, %d, %d, %d)" % [
+		count, rect.position.x, rect.position.y, rect.size.x, rect.size.y] if not use_points \
+		else "%d point(s)" % count
+	var msg: String = "%s: mean #%s, dominant #%s (%.0f%%)" % [
+		where, Color(mean.x, mean.y, mean.z).to_html(false), dominant.to_html(false),
+		100.0 * float(top_count) / maxf(1.0, float(count))]
+	for eo: Dictionary in expected_out:
+		msg += "; expected #%s (tol %d): %d px (%.1f%%)%s" % [
+			eo["color"], tolerance, eo["count"], 100.0 * float(eo["fraction"]),
+			" <- ABSENT" if eo["absent"] else ""]
 	return {
 		"success": true,
-		"message": "%d px in (%d, %d, %d, %d): mean #%s, dominant #%s (%.0f%%)" % [
-			count, rect.position.x, rect.position.y, rect.size.x, rect.size.y,
-			Color(mean.x, mean.y, mean.z).to_html(false), dominant.to_html(false),
-			100.0 * float(top_count) / maxf(1.0, float(count))],
+		"message": msg,
 		"data": {
 			"rect": {"x": rect.position.x, "y": rect.position.y,
 				"w": rect.size.x, "h": rect.size.y},
 			"pixels": count,
+			"points": point_colors,
+			"expected": expected_out,
+			"tolerance": tolerance,
+			"absent": any_absent,
 			"mean": {"r": mean.x, "g": mean.y, "b": mean.z},
 			"brightest": {"r": brightest.r, "g": brightest.g, "b": brightest.b},
 			"darkest": {"r": darkest.r, "g": darkest.g, "b": darkest.b},

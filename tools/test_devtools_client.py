@@ -606,6 +606,63 @@ class FixedUpstreamCase(unittest.TestCase):
         self.assertEqual(stale, ["G-003"])            # open, credited in what it runs
 
 
+class SamplePixelsExpectCase(unittest.TestCase):
+    """gh#49: --expect turns sample-pixels into an assertion; --points parses."""
+
+    def test_arg_parsers(self):
+        self.assertEqual(devtools.points_arg("180,232;176,232 184,232"), [[180, 232], [176, 232], [184, 232]])
+        self.assertEqual(devtools.colors_arg("#FFC500,24894a"), ["ffc500", "24894a"])
+        import argparse
+        with self.assertRaises(argparse.ArgumentTypeError):
+            devtools.colors_arg("ffc5")
+        with self.assertRaises(argparse.ArgumentTypeError):
+            devtools.points_arg("1,2,3")
+
+    def _run(self, reply, expect=None, points=None):
+        args = type("A", (), {})()
+        args.rect = None
+        args.points = points
+        args.expect = expect
+        args.tolerance = 8
+        sent = {}
+        real = devtools.send_command
+        devtools.send_command = lambda pp, action, cargs=None, **kw: (sent.update({"action": action, "args": cargs}) or reply)
+        buf, err = io.StringIO(), io.StringIO()
+        code = 0
+        try:
+            with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(err):
+                try:
+                    devtools.cmd_sample_pixels(args, Path("."))
+                except SystemExit as e:
+                    code = int(e.code or 0)
+        finally:
+            devtools.send_command = real
+        return code, buf.getvalue(), err.getvalue(), sent
+
+    def test_absent_colour_exits_1_and_present_exits_0(self):
+        reply = {"success": True, "message": "25 px in (178, 230, 5, 5): mean #24894a, dominant #19844a (36%)",
+                 "data": {"mean": {"r": 0.1, "g": 0.5, "b": 0.3}, "tolerance": 8,
+                          "expected": [{"color": "ffc500", "count": 0, "fraction": 0.0, "absent": True},
+                                       {"color": "19844a", "count": 9, "fraction": 0.36, "absent": False}],
+                          "absent": True}}
+        code, out, err, sent = self._run(reply, expect=["ffc500", "19844a"])
+        self.assertEqual(code, 1)
+        self.assertIn("<- ABSENT", out)
+        self.assertIn("ABSENT: #ffc500", err)
+        self.assertEqual(sent["args"]["expect"], ["ffc500", "19844a"])
+        self.assertEqual(sent["args"]["tolerance"], 8)
+        reply["data"]["expected"][0].update({"count": 3, "fraction": 0.12, "absent": False})
+        reply["data"]["absent"] = False
+        code, out, err, _ = self._run(reply, expect=["ffc500", "19844a"])
+        self.assertEqual(code, 0)
+
+    def test_old_game_without_expected_key_is_exit_2_not_a_pass(self):
+        reply = {"success": True, "message": "x", "data": {"mean": {"r": 0, "g": 0, "b": 0}}}
+        code, out, err, _ = self._run(reply, expect=["ffc500"])
+        self.assertEqual(code, 2)
+        self.assertIn("nothing was asserted", err)
+
+
 class ChangedFunctionsCase(unittest.TestCase):
     """gh#38 / moving-in:G-060: the changed functions inside a reached file."""
 

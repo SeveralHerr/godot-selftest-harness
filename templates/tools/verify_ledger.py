@@ -144,8 +144,8 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
-# harness-version: 0.48.0
-HARNESS_VERSION = "0.48.0"
+# harness-version: 0.49.0
+HARNESS_VERSION = "0.49.0"
 
 LEDGER_PATH = Path(".devtools") / "verify-runs.jsonl"
 
@@ -153,8 +153,14 @@ LEDGER_PATH = Path(".devtools") / "verify-runs.jsonl"
 # ignored, by name, with the nearest known key. Keep this in step with cmd_record.
 RUN_JSON_KEYS = {
     "value", "verdict", "checks", "found", "expected", "cheaper_alternative",
-    "lint", "tests", "runtime", "duration_s", "harness",
+    "lint", "tests", "runtime", "duration_s", "harness", "kind",
 }
+# gh#50 (0.49.0): `kind: "experiment"` marks a run whose diff is its OUTPUT (a skill
+# doc, a REFERENCE correction, a gap report written FROM a live session), not its
+# subject. Reach is not expected of it - the changed file is not code the game loads
+# - so the reach downgrade is skipped and the row says why; the verdict is judged on
+# what the session established (`found`), not on what it verified.
+RUN_KINDS = ("verify", "experiment")
 RUN_JSON_ALIASES = {"phase4": "checks", "phase_4": "checks", "evidence": "checks",
                     "notes": "expected", "note": "expected", "result": "verdict",
                     "outcome": "verdict", "phases": "runtime",
@@ -178,6 +184,9 @@ reported as ignored and is NOT written to the row):
   runtime              {"scene": ..., "fps": ..., ...}  (any JSON; entry_point dropped)
   duration_s           number
   harness              version string (default: this tool's)
+  kind                 verify (default) | experiment - the diff is the run's OUTPUT
+                       (a doc, a recipe, a gap report written from the live game);
+                       reach is recorded as not-applicable and never downgrades it
 
 Reach (worktree/branch, changed files, sha, branch, ts) is DERIVED, never read from
 run.json. Record the row BEFORE committing: reach is computed from the diff.
@@ -937,7 +946,7 @@ def _normalize_found(found):
     return out, ("; ".join(notes) or None)
 
 
-def _reconcile_value(value, reached, unreached, checks, found=None):
+def _reconcile_value(value, reached, unreached, checks, found=None, kind="verify"):
     """Cross-check a self-reported verdict against what the snapshots actually show.
 
     The verdict is the one field here the run grades itself on, so it gets every
@@ -950,7 +959,8 @@ def _reconcile_value(value, reached, unreached, checks, found=None):
     if value not in VALUES:
         return "inconclusive", ("value %r is not one of %s - recorded as inconclusive"
                                 % (value, ", ".join(VALUES)))
-    if value == "warranted" and reached is not None and not reached and unreached:
+    if value == "warranted" and kind != "experiment" \
+            and reached is not None and not reached and unreached:
         return "insufficient", (
             "downgraded warranted -> insufficient: no changed file was loaded at "
             "runtime (%s), so nothing runtime said was about this diff"
@@ -1056,6 +1066,16 @@ def cmd_record(args, root):
     implicit = implicit_scripts(root, cfg)
 
     observed = _observed(args)
+    kind = str(run.get("kind") or "verify")
+    if kind not in RUN_KINDS:
+        print("verify_ledger: run.json: kind %r is not one of %s - recorded as 'verify'"
+              % (kind, ", ".join(RUN_KINDS)), file=sys.stderr)
+        kind = "verify"
+    if kind == "experiment" and observed is None:
+        # gh#50: an experiment's diff is its output; there is nothing for reach to
+        # score, and refusing to record it would drop the one row that says a full
+        # session ran. --no-reach is implied, with the reason on the row.
+        args.no_reach = True
     if observed is None and not args.no_reach:
         print("verify_ledger: refusing to record with unknown reach - no readable "
               "--scene-tree and no readable --scripts-seen were given. Re-run "
@@ -1142,7 +1162,7 @@ def cmd_record(args, root):
               "caught anything, which is the one question the ledger exists to answer. "
               "Record `found: []` if it genuinely found nothing.", file=sys.stderr)
     value, note = _reconcile_value(run.get("value"), u["reached"], u["unreached"],
-                                   checks, found)
+                                   checks, found, kind)
     cheaper = (run.get("cheaper_alternative") or "").strip()
 
     # A blocked check is one the run could not execute at all - and a run that could
@@ -1192,6 +1212,10 @@ def cmd_record(args, root):
         # top-level lists are computed over worktree|branch so old readers keep
         # working; `worktree` and `branch` are the same split per denominator.
         "reach": reach_obj,
+        # gh#50: verify (default) or experiment; absent on rows before 0.49.0.
+        "kind": kind,
+        "reach_note": ("experiment: the session produced the diff; reach is not applicable"
+                       if kind == "experiment" and reach_obj is None else None),
     }
 
     path = root / LEDGER_PATH
@@ -1421,6 +1445,7 @@ def cmd_stats(args, root):
     values = defaultdict(int)
     cheaper = []
     overkill_seconds = 0.0
+    experiments = 0
     reached_n = unreached_n = 0
     implicit_n = 0
     implicit_files = set()
@@ -1477,6 +1502,8 @@ def cmd_stats(args, root):
             cheaper.append((val, row["cheaper_alternative"]))
         if val == "overkill" and isinstance(row.get("duration_s"), (int, float)):
             overkill_seconds += row["duration_s"]
+        if row.get("kind") == "experiment":
+            experiments += 1
 
         reach = row.get("reach") or {}
         r, u = reach.get("reached"), reach.get("unreached")
@@ -1618,6 +1645,9 @@ def cmd_stats(args, root):
 
     if overkill_seconds:
         print("  time spent on runs judged overkill: %.0f min" % (overkill_seconds / 60.0))
+    if experiments:
+        print("  experiments (kind=experiment, gh#50 - the diff was the run's output; "
+              "reach not applicable): %d of %d" % (experiments, total))
 
     if cheaper:
         print("\nwhat would have been cheaper (most recent first):")
