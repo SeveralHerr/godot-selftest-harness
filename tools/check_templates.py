@@ -1465,6 +1465,15 @@ def check_test_denominators(out, scratch):
     else:
         print("stage 4 tests: autoloads %s of %s ready" % (m.group(1), m.group(2)))
 
+    # plant-tower-defense:G-051b (0.39.0): one run id, printed at start and after
+    # Total:, so run_tests.py can refuse a file two runs wrote.
+    ids = re.findall(r"^\s*Run: ([0-9a-f]+) pid (\d+) (started|finished)$", out, re.M)
+    if len(ids) != 2 or ids[0][0] != ids[1][0] or ids[0][2] != "started" or ids[1][2] != "finished":
+        ok = fail("run_tests must print `Run: <id> pid <n> started` first and `... finished` "
+                  "after Total: with the SAME id; got %r" % (ids,))
+    else:
+        print("stage 4 tests: Run: %s pid %s brackets the output" % (ids[0][0], ids[0][1]))
+
     m = re.search(r"Assertions: (\d+) executed", out)
     if not m:
         ok = fail("run_tests printed no `Assertions:` line")
@@ -1710,6 +1719,73 @@ def check_run_tests_py(godot, scratch):
     finally:
         margin_test.unlink(missing_ok=True)
 
+    # plant-tower-defense:G-051 / G-050b (0.39.0): _T.assert_box and _T.quiesce.
+    # Each test asserts the MECHANISM it exists for: a Label assigned (200, 10) lands
+    # at a height clamped up to its font (so exact equality fails and assert_box
+    # passes), and set_physics_process(false) BEFORE hosting is undone by _ready()
+    # while quiesce() after hosting sticks. A helper that does nothing fails these.
+    box_test = scratch / "test" / "unit" / "test_box_quiesce_control.gd"
+    box_test.write_text(
+        "extends RefCounted\n"
+        "var _T\n"
+        "\n"
+        "class Ticker extends Node2D:\n"
+        "\tvar ticks: int = 0\n"
+        "\tfunc _physics_process(_d: float) -> void:\n"
+        "\t\tticks += 1\n"
+        "\n"
+        "func test_assert_box_passes_on_a_label_clamped_up_to_its_font() -> String:\n"
+        "\tvar root: Control = Control.new()\n"
+        "\tvar label: Label = Label.new()\n"
+        "\tlabel.text = \"Heading\"\n"
+        "\tlabel.add_theme_font_size_override(\"font_size\", 30)\n"
+        "\troot.add_child(label)\n"
+        "\tlabel.position = Vector2(200, 140)\n"
+        "\tlabel.size = Vector2(200, 10)\n"
+        "\tawait _T.instantiate_ui(root)\n"
+        "\tvar exact: String = _T.assert_eq(label.size, Vector2(200, 10), \"exact\")\n"
+        "\tvar boxed: String = _T.assert_box(label, Rect2(200, 140, 200, 10), \"boxed\")\n"
+        "\tvar moved: String = _T.assert_box(label, Rect2(201, 140, 200, 10), \"moved\")\n"
+        "\t_T.free_ui(root)\n"
+        "\tif exact == \"\":\n"
+        "\t\treturn \"the engine did not clamp the label up (size %s) - control invalid\" % str(label.size)\n"
+        "\tif boxed != \"\":\n"
+        "\t\treturn \"assert_box must accept a font-clamped size: \" + boxed\n"
+        "\tif moved == \"\" or not moved.contains(\"position\"):\n"
+        "\t\treturn \"assert_box must fail on a moved position naming it, got: \" + moved\n"
+        "\treturn \"\"\n"
+        "\n"
+        "func test_quiesce_after_hosting_sticks_where_before_hosting_does_not() -> String:\n"
+        "\tvar early: Ticker = Ticker.new()\n"
+        "\tearly.set_physics_process(false)\n"
+        "\tawait _T.instantiate_scene(early)\n"
+        "\tvar late: Ticker = Ticker.new()\n"
+        "\tawait _T.instantiate_scene(late)\n"
+        "\t_T.quiesce(late)\n"
+        "\tvar late_at_quiesce: int = late.ticks\n"
+        "\tvar tree: SceneTree = Engine.get_main_loop() as SceneTree\n"
+        "\tfor _i: int in 3:\n"
+        "\t\tawait tree.physics_frame\n"
+        "\tvar early_ticks: int = early.ticks\n"
+        "\tvar late_ticks: int = late.ticks - late_at_quiesce\n"
+        "\t_T.free_ui(early)\n"
+        "\t_T.free_ui(late)\n"
+        "\tif early_ticks == 0:\n"
+        "\t\treturn \"set_physics_process(false) before hosting was NOT undone by _ready (0 ticks) - control invalid\"\n"
+        "\treturn _T.assert_eq(late_ticks, 0, \"quiesced after hosting must not tick (early ticked %d)\" % early_ticks)\n",
+        encoding="utf-8")
+    try:
+        box_run = run_godot(godot, scratch,
+                            ["--script", "res://tools/run_tests.gd", "--", "--file", "test_box_quiesce_control"])
+        if box_run.returncode != 0 \
+                or "[PASS] test_assert_box_passes_on_a_label_clamped_up_to_its_font" not in box_run.stdout \
+                or "[PASS] test_quiesce_after_hosting_sticks_where_before_hosting_does_not" not in box_run.stdout:
+            return fail("assert_box/quiesce control: expected both planted tests to PASS (each "
+                        "first proves the engine mechanism it guards against); got exit %d:\n%s"
+                        % (box_run.returncode, box_run.stdout[-2000:]))
+    finally:
+        box_test.unlink(missing_ok=True)
+
     # plant-tower-defense:G-049 (0.37.0): an argument the runner does not know must
     # be refused (exit 2, named), never silently run the whole suite as "(no selector)".
     unknown = run_godot(godot, scratch, ["--script", "res://tools/run_tests.gd", "--", "--select", "test_x"])
@@ -1765,7 +1841,9 @@ def check_run_tests_py(godot, scratch):
           "assertion already ran (invisible to both the return value and [VACUOUS]) "
           "-- run_tests.gd itself reports it clean; the wrapper does not; unfiltered it "
           "printed %r and said nothing under --filter; assert_margin passed the recorded "
-          "set and refused a new near-the-line item" % declared_line)
+          "set and refused a new near-the-line item; assert_box accepted a font-clamped "
+          "Label and refused a moved one; quiesce() after hosting held at 0 ticks where "
+          "set_physics_process(false) before hosting was undone" % declared_line)
     return True
 
 

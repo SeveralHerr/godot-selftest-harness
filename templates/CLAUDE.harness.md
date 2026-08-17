@@ -61,7 +61,14 @@ bridge check. Everything else — pure logic, resources, data tables, and any la
 **Writing them.** Alongside `_T.assert_*`, use
 `await _T.instantiate_ui(scene, Vector2i(w, h))` / `_T.free_ui(node)` for anything
 `Control`-shaped: headless pumps no frames, so without it `size` stays `(0, 0)` and
-`@onready` vars never initialize. Test methods may `await`. **Always read stderr** — a
+`@onready` vars never initialize. The opposite trap too: after the settle frames a
+Control's `size` is clamped **up** to `get_combined_minimum_size()` (a Label's minimum
+is its font), so `heading.size = Vector2(720, 40)` lands as `(720, 42)` and an exact
+size assertion is asserting the theme's font metrics. Use `_T.assert_box(control,
+Rect2(pos, size))` — position exact, size `== max(assigned, minimum)` per axis. And
+`set_physics_process(false)` **before** `add_child()` does not stick (`_ready()`
+re-enables it): `_T.quiesce(node)` **after** hosting is the call that holds; a node
+quiesced before hosting is not quiesced. Test methods may `await`. **Always read stderr** — a
 runtime error inside a test aborts only that method and returns `""` for a `-> String`
 test, which is identical to a pass. `[ERR]` lines are the only signal.
 
@@ -350,11 +357,15 @@ runtime, which the static checker cannot see) and `name_check_ignore` (path pref
   `user://findings_last.json` (path printed when the count is non-zero) — a transient
   is diagnosable after the frame that produced it is gone.
 - A live check that touches persisted state (a key whose handler saves) writes the
-  developer's real `user://` file — `--isolated` does not isolate `user://`. `quit`
-  names what the run changed; `launch --isolated --snapshot-userstate` makes `quit`
-  put it back. A save left changed shows up as failing headless tests later.
+  developer's real `user://` file — `--isolated` does not isolate `user://`. Every
+  `launch` copies `*.save` aside; `quit` names what the run changed;
+  `restore-userstate` puts the copy back, `launch --snapshot-userstate` does that on
+  quit automatically. A save left changed shows up as failing headless tests later.
 - `_T.assert_margin(values, threshold, margin, recorded)` gates a tuned constant on the
   corpus items sitting near it — use it instead of hand-rolling a sweep.
+- `run_tests.py` exits 2 on a results file two runs wrote (`Run: <id> pid N` brackets
+  each run; a stopped background run's Godot keeps appending) — kill or wait for the
+  other pid, then re-run. Its tallies were a mixture, not a verdict.
 - `press` emits `pressed` without moving the mouse: an open tooltip stays open and can
   appear in a screenshot taken straight after. `mouse-move` first if the picture matters.
 - Run `/verify` **inline**; don't wrap routine validation in subagents/workflows.

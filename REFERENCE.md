@@ -478,12 +478,37 @@ Notable behaviors:
   save a live pass altered had leaked into the *headless* suite two runs later and read
   as an unrelated failure. `--snapshot-userstate` (below) is the half that puts it back.
   The `--isolated` launch line now says the failure, not the fact.
+- **`run_tests.py` exits 2 when one results file holds two runs** (0.39.0,
+  plant-tower-defense:G-051b). `run_tests.gd` prints `Run: <id> pid <n> started` first
+  and `Run: <id> pid <n> finished` after `Total:` (the id is also in `--json` output as
+  `run_id`/`pid`); the wrapper refuses a capture with more than one distinct id — or,
+  for a half-refreshed install whose runner predates the id, more than one `Total:`
+  line — naming both pids: "the tallies above are a MIXTURE. Nothing was verified."
+  A suite moved to the background and stopped left its Godot child alive, still
+  appending to the `.devtools/tests.log` a later run had truncated; one file carried
+  `519/519` and `516/519 | Failed: 3` with per-test times inflated 30x, and nothing
+  said the denominators belonged to different runs.
+- **`import_check.py` sweeps stranded `<asset>.import*.tmp` files** (0.39.0,
+  plant-tower-defense:G-044, 7th sighting) on a crash retry and on the final failure
+  path, naming what it removed. They are the engine's write-then-rename temporaries
+  for `.import` metadata; a crash mid-write leaves them beside the assets, where they
+  show up as untracked in `git status` and invite being committed. Never touches
+  `.godot/`.
 - **`_T.assert_margin(values, threshold, margin, recorded, context)`** (0.36.0,
   moving-in:G-057) — the threshold-margin gate a project had hand-rolled three times:
   sweep a corpus, one number per item; fail on any item newly within `margin` of the
   threshold, any recorded near-the-line value that moved, and any stale record. Returns
   every violation on one line. Stage 4 plants a passing recorded set and a new
   near-the-line item that must be refused.
+- **A `user://` snapshot is taken on EVERY `launch`; `--snapshot-userstate` only arms
+  the automatic restore** (0.39.0, plant-tower-defense:G-050). Before this, the report
+  that a run had overwritten a developer's campaign best arrived at `quit`, when the
+  previous value existed nowhere. Now `launch` copies `*.save` under
+  `.devtools/userstate_snapshot/` (the previous launch's copy is kept as
+  `userstate_snapshot_prev/`), names the files at risk on the launch line, and
+  **`restore-userstate`** puts them back after the fact; `quit`'s "this run wrote …"
+  line names the copy. Without the flag nothing is reverted automatically — a
+  legitimate run keeps its save; the copy is a recovery point.
 - **`launch --snapshot-userstate [GLOB ...]` / `quit` restore** (0.35.0,
   plant-tower-defense:G-047). `--isolated` isolates the bus and only the bus, so a
   live check that presses a key whose handler calls `_save()` writes the developer's
@@ -502,6 +527,11 @@ Notable behaviors:
   two retries and the cap was one. Now up to 4 attempts, each allowed only if the
   previous crash grew `.godot/imported` or moved the last `reimport | file` line; a
   crash that gained nothing twice running is reported, not retried forever.
+- **`verify_ledger.py stats` says "N alias credit(s) across M distinct file(s)"**
+  (0.39.0, moving-in:G-059) for the alias, implicit and base-class lines — the old
+  "138 file(s) credited by reach_aliases" was five files credited 51+50+21+8+8 times,
+  and cost a project a kanban entry, a todo and a re-audit before the noun was
+  noticed. The comparison against the observed count stays (both cumulative).
 - **`harness-version --client` never opens the bus** (0.34.0, moving-in:G-055) — the
   log-entry format wants the installed version on every turn, most of them with no
   game running, and the bus-first path printed a `game not running` warning before
@@ -1017,7 +1047,8 @@ set-game-speed, pause, unpause, wait-frames, clear-nodes, validate-ui, ui-snapsh
 node-bounds, save-ui-baseline, ui-snapshot-diff, tilemap-cells,
 tilemap-region, scripts-seen, canvas-scale, set-resolution,
 find-nodes, press, raycast, sample-pixels, reachable-ui, aabb, look-at, new-uid,
-mouse-move, reload, first-frame, fire-entry-point, project-settings, contained-in
+mouse-move, reload, first-frame, fire-entry-point, project-settings, contained-in,
+restore-userstate
 ```
 
 `new-uid` is the one subcommand that never touches the bus — see below.
@@ -1940,6 +1971,32 @@ may now `await`; synchronous tests are unaffected.
 This makes layout, anchors, and container sorting assertable. It does **not** make
 pixels assertable — nothing is rendered. Visual regressions still need a running game
 and a screenshot.
+
+**The size that lands can be larger than the size the code assigned** (0.39.0,
+plant-tower-defense:G-051). Every line above is about `size` being too small without
+`instantiate_ui`; the trap on the other side is that after the settle frames a
+Control's `size` is clamped **up** to `get_combined_minimum_size()`, and a Label's
+minimum is its font: `heading.size = Vector2(720, 40)` under a 30px font lands as
+`(720, 42)`, so `assert_eq(heading.size, Vector2(720, 40))` is asserting the theme's
+font metrics as much as the code's layout — and goes red the next time the heading
+font moves. `_T.assert_box(control, Rect2(pos, size), context)` is the assertion that
+is actually true of every text-bearing Control: position exact, and per axis
+`size == max(assigned, combined minimum)`; on failure it names the axis and says
+"assigned 40 clamped up to combined minimum 42". Stage 4 plants a 30px Label assigned
+`(200, 10)`, proves exact equality fails, and asserts `assert_box` passes it and refuses
+a moved position.
+
+**`set_physics_process(false)` before `add_child()` does not stick** (0.39.0,
+plant-tower-defense:G-050b). Godot re-enables physics/process at `NOTIFICATION_READY`
+for any script declaring `_physics_process`/`_process`, so a node quiesced before
+hosting has already ticked by the first assertion (a `Dandelion` had fired a seed).
+`_T.quiesce(node, physics := true, process := true, recursive := false)` **after**
+`instantiate_scene()` is the call that holds; on a node not yet in a tree it warns and
+does nothing rather than being silently undone. It holds from the moment it is called —
+the two settle frames have already run and a physics tick lands in them, so a cooldown
+or spawn counter that must be pristine is reset by the test after `quiesce()`, not
+assumed. Stage 4 hosts two tickers — one disabled before hosting (must tick: that is
+the mechanism; it ticked 4 times), one `quiesce()`d after (0 further ticks).
 
 `_T.text_width(label: Label) -> float` (gh#20 / plant-tower-defense:G-033) measures the
 widest line of a Label's text under its own resolved theme font. Use it, not

@@ -112,6 +112,20 @@ sessions have converged on one checkout and edited it at once (H-061), so a rele
 re-reads `git status` immediately before it commits, and a fan-out never runs a
 repo-wide git command — untracked work has no copy anywhere else (H-052).
 
+**Say it while it can still be acted on.** A report that arrives after the moment of
+choice is a post-mortem, and the harness has shipped several of those before noticing:
+`quit` said "this run wrote the developer's REAL user data — changed: highscore.save"
+when the previous value existed nowhere (plant G-050); a stopped test run's Godot kept
+writing into a later run's results file, and the two `Total:` lines sat there for a
+human to spot after the verdict had been read (plant G-051b); a second checkout
+shared the first one's `user://` and the launch line printed the path without saying
+so (H-067). Each fix moved the sentence earlier or made the state recoverable: every
+`launch` now copies the save aside so the warning at `quit` names a copy, not a loss;
+`run_tests.py` refuses a mixed file instead of printing it; `launch` names the other
+checkout on the line where `--snapshot-userstate` can still be added. The test for a
+new warning is not "is it true" but "can the reader still do something about it when
+they read it" — and if not, the tool's job is to have kept the way back open.
+
 **A fix is delivered when the project runs it, not when it ships.** The gaps log
 feeds this repo, and this repo feeds the projects back only through
 `/scaffold-godot-harness`; a project stays on the version it was scaffolded with until

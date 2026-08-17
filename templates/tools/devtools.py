@@ -89,11 +89,11 @@ from pathlib import Path
 from typing import Optional  # noqa: F401
 
 
-# harness-version: 0.38.0
+# harness-version: 0.39.0
 # Version of the godot-selftest-harness this client was copied from. Compared against
 # the running game's own stamp by the `harness-version` verb, so a half-refreshed
 # install (new client, old autoload) is visible instead of mysterious.
-HARNESS_VERSION = "0.38.0"
+HARNESS_VERSION = "0.39.0"
 
 COMMANDS_FILE = "devtools_commands.json"
 RESULTS_FILE = "devtools_results.json"
@@ -1820,10 +1820,21 @@ def userstate_stat_report(project_path: Path) -> None:
         parts.append("created: " + ", ".join(created))
     if deleted:
         parts.append("deleted: " + ", ".join(deleted))
+    recovery = ""
+    manifest_path = _userstate_dir(project_path) / USERSTATE_MANIFEST
+    try:
+        m = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if not m.get("restore_on_quit", True) and m.get("files"):
+            recovery = (f" A copy taken at launch of {', '.join(m['files'])} is in "
+                        f".devtools/{USERSTATE_DIR}/ - `python tools/devtools.py "
+                        f"restore-userstate` puts it back.")
+    except (OSError, ValueError):
+        pass
     print(f"user://: this run wrote the developer's REAL user data in {user_dir} -- "
           + "; ".join(parts) + ". A save changed here is loaded by the game's next start, "
-          "including the headless test suite, and reads there as an unrelated failure. "
-          "`launch --snapshot-userstate` restores such files on quit.", file=sys.stderr)
+          "including the headless test suite, and reads there as an unrelated failure."
+          + recovery + " `launch --snapshot-userstate` restores such files on quit "
+          "automatically.", file=sys.stderr)
 USERSTATE_MANIFEST = "manifest.json"
 USERSTATE_DEFAULT_GLOB = "*.save"
 
@@ -1832,17 +1843,28 @@ def _userstate_dir(project_path: Path) -> Path:
     return project_path / ".devtools" / USERSTATE_DIR
 
 
-def userstate_snapshot(project_path: Path, user_dir: Path, patterns) -> dict:
+def userstate_snapshot(project_path: Path, user_dir: Path, patterns, restore_on_quit=True) -> dict:
     """Copy user_dir files matching `patterns` under .devtools/, write a manifest.
 
     Records every file the patterns match NOW, and every pattern, so restore can
     also delete files the game creates during the run (a save that did not
     exist before must not exist after). Returns the manifest.
+
+    plant-tower-defense:G-050: taken on EVERY launch since 0.39.0 (a file copy of
+    `*.save`; microseconds), and `restore_on_quit` - the old `--snapshot-userstate`
+    flag - decides only whether `quit` puts it back automatically. Before this the
+    warning that a run had overwritten a developer's campaign best arrived at
+    `quit`, when the previous value existed nowhere. The last snapshot is kept
+    beside the current one (`userstate_snapshot_prev`) so the run before the one
+    you noticed is recoverable too.
     """
     import shutil
     dest = _userstate_dir(project_path)
+    prev = dest.with_name(dest.name + "_prev")
     if dest.exists():
-        shutil.rmtree(dest)
+        if prev.exists():
+            shutil.rmtree(prev)
+        dest.rename(prev)
     dest.mkdir(parents=True)
     files = []
     for pattern in patterns:
@@ -1859,15 +1881,18 @@ def userstate_snapshot(project_path: Path, user_dir: Path, patterns) -> dict:
         "patterns": list(patterns),
         "files": files,
         "taken_unix": time.time(),
+        "restore_on_quit": bool(restore_on_quit),
         "harness_version": HARNESS_VERSION,
     }
     (dest / USERSTATE_MANIFEST).write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     return manifest
 
 
-def userstate_restore(project_path: Path, reason: str) -> "dict | None":
+def userstate_restore(project_path: Path, reason: str, force: bool = False) -> "dict | None":
     """Put the snapshot back and delete it. Returns the manifest, or None if there
-    was nothing to restore. Prints one line either way it acted."""
+    was nothing to restore - or if the snapshot was taken without restore-on-quit
+    and `force` is False (the always-on snapshot is a recovery point, not an
+    automatic revert; `restore-userstate` forces it). Prints one line when it acts."""
     import shutil
     dest = _userstate_dir(project_path)
     manifest_path = dest / USERSTATE_MANIFEST
@@ -1878,6 +1903,8 @@ def userstate_restore(project_path: Path, reason: str) -> "dict | None":
     except (OSError, ValueError) as exc:
         print(f"userstate: snapshot manifest unreadable ({exc}); leaving {dest} in place "
               "for a human", file=sys.stderr)
+        return None
+    if not force and not manifest.get("restore_on_quit", True):
         return None
     user_dir = Path(manifest["user_dir"])
     restored, removed = 0, 0
@@ -1903,6 +1930,19 @@ def userstate_restore(project_path: Path, reason: str) -> "dict | None":
     print(f"userstate: restored {restored} file(s) and removed {removed} created during the "
           f"run ({reason}; patterns {', '.join(manifest['patterns'])}) into {user_dir}")
     return manifest
+
+
+def cmd_restore_userstate(args, project_path: Path):
+    """Put back the user:// files copied at the last launch (bus verb: none; plant G-050).
+    Exit 0 restored, 1 nothing to restore."""
+    m = userstate_restore(project_path, "restore-userstate", force=True)
+    if m is None:
+        prev = _userstate_dir(project_path).with_name(USERSTATE_DIR + "_prev")
+        hint = (f" The launch before that is under {prev.name}/ - move it to {USERSTATE_DIR}/ "
+                f"and re-run to restore it." if prev.is_dir() else "")
+        print(f"restore-userstate: no snapshot from the last launch under .devtools/{USERSTATE_DIR}/."
+              + hint, file=sys.stderr)
+        sys.exit(1)
 
 
 def cmd_quit(args, project_path: Path):
@@ -3684,18 +3724,30 @@ def cmd_launch(args, project_path: Path):
     except FileNotFoundError:
         pass  # no user:// yet (first ever launch); nothing to diff against
     snapshot_patterns = getattr(args, "snapshot_userstate", None)
-    if snapshot_patterns is not None:
-        try:
-            snap_user_dir = get_user_data_path(project_path)
-        except FileNotFoundError as exc:
+    restore_on_quit = snapshot_patterns is not None
+    try:
+        snap_user_dir = get_user_data_path(project_path)
+    except FileNotFoundError as exc:
+        snap_user_dir = None
+        if restore_on_quit:
             print(f"Error: --snapshot-userstate needs the user:// directory: {exc}",
                   file=sys.stderr)
             sys.exit(2)
+    if snap_user_dir is not None:
         patterns = snapshot_patterns or [USERSTATE_DEFAULT_GLOB]
-        manifest = userstate_snapshot(project_path, snap_user_dir, patterns)
-        print(f"userstate: snapshotted {len(manifest['files'])} file(s) matching "
-              f"{', '.join(patterns)} from {snap_user_dir}; `quit` restores them "
-              f"(files the run creates under those patterns are removed again)")
+        manifest = userstate_snapshot(project_path, snap_user_dir, patterns, restore_on_quit)
+        if restore_on_quit:
+            print(f"userstate: snapshotted {len(manifest['files'])} file(s) matching "
+                  f"{', '.join(patterns)} from {snap_user_dir}; `quit` restores them "
+                  f"(files the run creates under those patterns are removed again)")
+        elif manifest["files"]:
+            # plant-tower-defense:G-050: the copy exists either way; say so at the
+            # moment the decision can still be made, naming the files at risk.
+            print(f"userstate: {len(manifest['files'])} file(s) in {snap_user_dir} "
+                  f"({', '.join(manifest['files'][:6])}{', ...' if len(manifest['files']) > 6 else ''}) "
+                  f"copied to .devtools/{USERSTATE_DIR}/ - this run shares the developer's "
+                  f"real user://; `restore-userstate` puts them back if it writes them, or "
+                  f"relaunch with --snapshot-userstate to restore on quit automatically")
 
     with out_log.open("w", encoding="utf-8") as out_f, \
             err_log.open("w", encoding="utf-8") as err_f:
@@ -4403,6 +4455,13 @@ def main():
                         "from the installed scripts (labeled generic/project)")
     p.set_defaults(func=cmd_list_commands)
 
+    # restore-userstate
+    p = subparsers.add_parser(
+        "restore-userstate",
+        help="Put back the user:// files copied at the last launch (a run that wrote the "
+             "developer's real save is recoverable after the fact)")
+    p.set_defaults(func=cmd_restore_userstate)
+
     # launch - start the game detached
     p = subparsers.add_parser(
         "launch", help="Launch the game detached (logs under .devtools/)",
@@ -4415,11 +4474,10 @@ def main():
                         "Godot has no switch for it.")
     p.add_argument("--snapshot-userstate", dest="snapshot_userstate", nargs="*",
                    metavar="GLOB", default=None,
-                   help="Copy user:// files matching GLOB(s) (default *.save) aside before "
-                        "the game starts; `quit` puts them back and removes any the run "
-                        "created. --isolated does not isolate user://, so a live check "
-                        "that presses a key whose handler saves writes the developer's "
-                        "real file - this makes that safe by default")
+                   help="Restore the user:// files matching GLOB(s) (default *.save) on "
+                        "`quit`, removing any the run created. A copy is taken on EVERY "
+                        "launch regardless (recoverable with `restore-userstate`); this flag "
+                        "makes the restore automatic. --isolated does not isolate user://")
     p.add_argument("--no-mute", action="store_true",
                    help="Do not pass --mute (a --write-movie run records the audio bus, "
                         "and a muted run captures silence)")
