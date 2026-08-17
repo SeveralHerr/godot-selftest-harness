@@ -739,6 +739,40 @@ def stage_assemble(scratch, user_dir_name):
         "%sreturn [str(a.get_path()), str(b.get_path())]" % BT,
         "",
         "",
+        "## gh#55: two Buttons for check_press_effect - one wired to nothing, one whose",
+        "## handler adds a child. Planted/removed on demand.",
+        "var _press_dead: Button = null",
+        "var _press_adder: Button = null",
+        "",
+        "",
+        "func harness_plant_press_buttons() -> bool:",
+        BT + "if _press_dead != null:",
+        BT + BT + "return true",
+        BT + "_press_dead = Button.new()",
+        BT + "_press_dead.name = " + BQ + "PressDead" + BQ,
+        BT + "_press_dead.position = Vector2(700, 300)",
+        BT + "add_child(_press_dead)",
+        BT + "_press_adder = Button.new()",
+        BT + "_press_adder.name = " + BQ + "PressAdder" + BQ,
+        BT + "_press_adder.position = Vector2(700, 340)",
+        BT + "_press_adder.pressed.connect(func() -> void:",
+        BT + BT + "var n := Node.new()",
+        BT + BT + "n.name = " + BQ + "Spawned" + BQ,
+        BT + BT + "_press_adder.add_child(n))",
+        BT + "add_child(_press_adder)",
+        BT + "return true",
+        "",
+        "",
+        "func harness_remove_press_buttons() -> bool:",
+        BT + "for b: Node in [_press_dead, _press_adder]:",
+        BT + BT + "if b != null and is_instance_valid(b):",
+        BT + BT + BT + "remove_child(b)",
+        BT + BT + BT + "b.free()",
+        BT + "_press_dead = null",
+        BT + "_press_adder = null",
+        BT + "return true",
+        "",
+        "",
         "## plant-tower-defense:G-048b: a Panel and a SIBLING Label whose centre is on",
         "## the panel but whose box hangs 40px off its right edge, on their own",
         "## CanvasLayer. Planted/removed by check_panel_escape(); held by reference.",
@@ -3444,6 +3478,46 @@ def check_signal_findings(client, scratch):
     return True
 
 
+def check_press_effect(client, scratch):
+    """gh#55 (0.57.0): `press` says what the press did.
+
+    Three shapes, all planted through set_state/run_method on the fixture: the wired
+    Go button (+0 nodes, 1 handler ran); a fresh Button connected to nothing (NOTHING
+    is connected); a Button whose handler adds a child (+1 nodes, added <root>).
+    """
+    def call(action, args):
+        return client.send_command(scratch, action, args, timeout=20.0)
+
+    go = call("press", {"node_path": "/root/Main/Go"})
+    gd = go.get("data") or {}
+    if not go.get("success") or gd.get("nodes_delta") != 0 or gd.get("pressed_connections", 0) < 1 \
+            or "handler(s) ran" not in str(go.get("message")):
+        return fail("press on the wired Go button must report +0 nodes and >=1 handler; got %r" % go)
+    planted = call("run_method", {"node_path": "/root/Main", "method": "harness_plant_press_buttons", "args": []})
+    if not planted.get("success"):
+        return fail("harness_plant_press_buttons: %s" % planted.get("message"))
+    try:
+        dead = call("press", {"node_path": "/root/Main/PressDead"})
+        if not dead.get("success") or (dead.get("data") or {}).get("pressed_connections") != 0 \
+                or "NOTHING is connected" not in str(dead.get("message")):
+            return fail("press on an unwired button must say NOTHING is connected; got %r" % dead)
+        adder = call("press", {"node_path": "/root/Main/PressAdder"})
+        ad = adder.get("data") or {}
+        if not adder.get("success") or ad.get("nodes_delta") != 1 \
+                or ad.get("added_roots") != ["/root/Main/PressAdder/Spawned"] \
+                or "+1 nodes, added /root/Main/PressAdder/Spawned" not in str(adder.get("message")):
+            return fail("press on a button whose handler adds a child must report +1 nodes and the added "
+                        "root; got %r" % adder)
+    finally:
+        call("run_method", {"node_path": "/root/Main", "method": "harness_remove_press_buttons", "args": []})
+        # The Go press above incremented the fixture's `presses`; later rows (batch,
+        # the run_method contract row) assume the count they found before this check.
+        call("set_state", {"node_path": "/root/Main", "property": "presses", "value": 0})
+    print("stage 5 bridge: press reports +0 nodes / 1 handler on Go, NOTHING connected on the "
+          "planted dead button, +1 nodes added /root/Main/PressAdder/Spawned on the adder")
+    return True
+
+
 def check_pause_verb(client, scratch):
     """The generic `pause`/`unpause` verbs actually flip SceneTree.paused (gh#26).
 
@@ -4180,6 +4254,7 @@ def stage_bridge(godot, scratch, full):
         ok = check_reload(client, scratch) and ok
         ok = check_paused_bridge(client, scratch) and ok
         ok = check_pause_verb(client, scratch) and ok
+        ok = check_press_effect(client, scratch) and ok
         ok = check_launch_session_passthrough(godot, scratch) and ok
         ok = check_launch_ping_timeout_surfaces_error(scratch) and ok
         ok = check_entry_hook_and_entry_points(godot, scratch) and ok

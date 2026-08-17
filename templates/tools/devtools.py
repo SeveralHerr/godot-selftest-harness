@@ -89,11 +89,11 @@ from pathlib import Path
 from typing import Optional  # noqa: F401
 
 
-# harness-version: 0.56.0
+# harness-version: 0.57.0
 # Version of the godot-selftest-harness this client was copied from. Compared against
 # the running game's own stamp by the `harness-version` verb, so a half-refreshed
 # install (new client, old autoload) is visible instead of mysterious.
-HARNESS_VERSION = "0.56.0"
+HARNESS_VERSION = "0.57.0"
 
 COMMANDS_FILE = "devtools_commands.json"
 RESULTS_FILE = "devtools_results.json"
@@ -4631,6 +4631,17 @@ def cmd_find_nodes(args, project_path: Path):
         sys.exit(1)
 
 
+def _print_press_effect(data: dict) -> None:
+    """gh#55: the world after the press, from the same reply (0.57.0 keys; absent on
+    an older game, and said so rather than guessed)."""
+    if "nodes_delta" not in data:
+        print("  (this game's harness predates 0.57.0: no press effect in the reply)")
+        return
+    if data.get("pressed_connections") == 0:
+        print("  NOTHING is connected to this button's `pressed` - the press reached no handler",
+              file=sys.stderr)
+
+
 def cmd_press(args, project_path: Path):
     """Emit `pressed` on the nearest BaseButton (bus verb: press, gather:G-119)."""
     cmd_args = {"node_path": normalize_node_path(args.node)}
@@ -4640,6 +4651,8 @@ def cmd_press(args, project_path: Path):
     print(result.get("message", ""))
     if not result["success"]:
         sys.exit(1)
+    # Data keys read (0.57.0, gh#55): nodes_delta, pressed_connections, added_roots.
+    _print_press_effect(result.get("data") or {})
 
 
 def cmd_raycast(args, project_path: Path):

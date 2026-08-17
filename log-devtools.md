@@ -8584,3 +8584,106 @@ against 0.54.0 before filing.
 **Validation run this turn:** `record_version.py --record` then `--check` OK at 0.56.0
 (14 files, 59 verbs + 63 CLI). `unittest discover -s tools` — 91 OK. `check_templates.py
 --full` — OK, all stages, `stage 6 contract: 98/98` (three new node-miss rows), entry-point control prints the screen line. `run_tests.gd` unchanged.
+
+## 2026-08-17 - Upstreamed 3 open gap(s) from plant-tower-defense (harness 0.18.0, 0.19.0, 0.21.0, 0.23.0, 0.24.0, 0.25.0, 0.32.0, 0.33.0, 0.36.0, 0.38.0)
+
+Pooled by `tools/upstream_gaps.py` from `C:\Users\gotmi\Documents\GitHub\plant-tower-defense\log-devtools.md`. Gap text is the project's,
+verbatim; only the id line is rewritten (qualified with the project name so
+ids from two projects cannot collide, plus a `source:` back-pointer).
+
+- Gap: **`press` reports the button it pressed and nothing about what the press did**, which
+  is the same shape as [G-066] one verb over. The sequence that verifies this feature is
+  `press NotebookButton` then a separate `find-nodes` to discover a notebook now exists and
+  a third call to read its page. The press is the interesting moment and its reply is
+  `Pressed /root/Game/PauseLayer/PauseScreen/NotebookButton` — true, and silent about the
+  overlay that appeared as a direct result.
+  Filing it separately from G-066 rather than bumping that one's `seen:`, because the fix is
+  different: `fire-entry-point` wants the screen summary because it is *supposed* to change
+  the screen, whereas most presses change nothing visible and a full `first_frame` on every
+  one would be noise. What `press` wants is narrower — **did the tree gain or lose any
+  node** as a result, reported as a count and the topmost added path.
+  - [plant-tower-defense:G-067] status: fixed | fixed-in: 0.57.0 | dup-of: gh#55 | seen: 1 | harness: 0.38.0 | source: plant-tower-defense 2026-08-17
+  - Improvement: snapshot `get_tree().get_node_count()` either side of the emit and report
+    the delta, plus the deepest new node's path when the delta is positive. That turns
+    "pressed a button" into "pressed a button and a `Notebook` appeared", which is the claim
+    a caller is actually making when they press a menu item. Cheap, and it degrades to
+    `+0 nodes` for the presses where nothing happens — which is itself worth seeing, because
+    a button wired to nothing currently reports success.
+  - Note: no other gaps this turn.
+
+  - [G-067] status: open | seen: 1 | harness: 0.54.0 | upstream: gh#55 | note: reconciled
+    against the installed 0.54.0 before filing. `_cmd_press`'s success return
+    (`dev_tools.gd:5444`) carries `node_path`, `type`, `disabled` and `button_pressed` —
+    every field about the button, none about the world after the press. Filed cycle 93
+    after GitHub's GraphQL API recovered; the gh#54 comment owed from cycle 92 went up at
+    the same time. **Both needed `gh api -X POST repos/...` rather than `gh issue`**, which
+    goes through GraphQL and was still 503-ing while REST was fine — worth knowing as a
+    fallback rather than as a reason to give up on filing.
+
+- Gap: **a `.devtools/` path is not a durable place to park anything, and cycle 92 recorded
+  that it was.** `.gitignore:8` is `.devtools/*` with a single exception for
+  `verify-runs.jsonl` at `:9`, so the gh#54 comment text cycle 92 wrote to
+  `.devtools/pending-gh54-comment.md` was **never committed**. It survived only because this
+  session kept the same working tree; a fresh clone, a worktree, or another machine would
+  have lost it, and that cycle's commit message says it was "parked at" a repo path as
+  though it were.
+  Not a harness defect — it is mine — but it is logged here because the harness's own
+  conventions point at `.devtools/` for scratch state (`.devtools/tree.json`,
+  `.devtools/import.log`, `.devtools/lint.log` are all in the loop's instructions), so
+  "write it under `.devtools/`" is the reflex the surrounding tooling teaches, and exactly
+  the wrong one for anything that must outlive the session.
+  - [plant-tower-defense:G-068] status: wontfix (project habit - the reporter's own Improvement says 'nothing upstream to change') | seen: 1 | harness: 0.38.0 | source: plant-tower-defense 2026-08-17
+  - Improvement: nothing upstream to change. The in-project fix is a habit —
+    **durable means tracked**, so anything owed to a future cycle goes in a bead's body or a
+    committed file, and `git check-ignore -v PATH` answers it in one command. Recorded as a
+    gap rather than a note because the reflex it corrects comes from the harness's own
+    layout, so the next person will make the same move for the same reason.
+  - Note: no other gaps this turn. `gh issue comment` / `gh issue create` go through
+    GraphQL and were still 503-ing while REST was healthy — `gh api -X POST
+    repos/OWNER/REPO/issues[/N/comments] --input FILE.json` worked first try, which is worth
+    trying before parking anything.
+
+- Gap: **`cmd touch_press` silently accepts an argument shape it ignores.** The verb takes
+  `{index, position:[x,y]}`; I sent `{x, y}`, and it reported success and did nothing:
+  ```
+  cmd touch_press --args '{"x":288,"y":296}'   -> success
+  run-method --method arm_uproot                -> "nothing is selected"
+  ```
+  So a malformed click reads as a broken uproot, one verb downstream. The harness's own
+  reference warns about this class in general — `list-commands` prints each verb's arg keys
+  and says "a key not listed is silently ignored" — which makes it a documented property
+  rather than a surprise, and it is still the wrong default for a verb whose entire effect
+  is positional.
+  Filing it against the project's own extension rather than upstream: `touch_press` is
+  registered in `devtools_ext/commands.gd`, so the fix is ours. The generic case (unknown
+  keys ignored) is the harness's and is deliberate.
+  - [plant-tower-defense:G-069] status: wontfix (the project's OWN touch_press override defaults to zero; the generic verb has refused a missing position since 0.5.0 and since 0.57.0 names the keys it was given) | seen: 1 | harness: 0.38.0 | source: plant-tower-defense 2026-08-17
+  - Improvement: have the project's `touch_press` / `touch_release` / `touch_drag` **refuse**
+    a call with no `position` (or `to`) rather than defaulting to zero, and name the key they
+    wanted. Three verbs, one guard each, and it converts a silent no-op into a message. A
+    positional verb with no position is never a call anyone meant.
+  - Note: no other gaps this turn.
+
+## 2026-08-17 — 0.57.0: loop tick twenty-five — a press that says what it did
+
+Reviewed: 8 open beads, one NEW issue (gh#55), `PURPOSE.md`, both project logs (three
+new plant gaps: the issue's twin, a project habit, and a project-verb defect filed
+against the wrong owner). Plant still pinned at 0.38.0.
+
+- **[gh#55 / plant G-067 — fixed] `press` reports what the press did.** Tree snapshot
+  either side of the emit: `(+37 nodes, added /root/…/Notebook)`, `+0 nodes; N handler(s)
+  ran`, or **`NOTHING is connected to this button's pressed`** — the case that reported
+  success byte-identically to a working button. Deliberately narrower than
+  `fire-entry-point`'s screen summary, as the reporter argued. Stage 5 plants an unwired
+  button and one whose handler adds a child, and asserts all three shapes.
+- **[plant G-069 — wontfix upstream, generic message improved]** the reporter filed it
+  against their own `devtools_ext` (`touch_press` defaults to zero) — right owner. The
+  generic `touch_press` has refused a missing `position` since 0.5.0; it now names the
+  keys it was given (`got keys ["x", "y"] - did you mean position: [x, y]?`).
+- **[plant G-068 — wontfix]** "nothing upstream to change", in the reporter's words.
+
+- Gap: no new gap this turn.
+
+**Validation run this turn:** `record_version.py --record` then `--check` OK at 0.57.0
+(14 files, 59 verbs + 63 CLI). `unittest discover -s tools` — 91 OK. `check_templates.py
+--full` — first run FAILED two later rows (the new check's Go press had incremented the fixture's `presses`, so batch and the run_method contract row read one more than they expected - the check now resets it); second run OK, all stages, `press reports +0 nodes / 1 handler on Go, NOTHING connected on the planted dead button, +1 nodes added …/Spawned on the adder`, `stage 6 contract: 98/98`. `run_tests.gd` unchanged.
