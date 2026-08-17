@@ -91,10 +91,10 @@ extends SceneTree
 ## (res://addons/godot_selftest/devtools_config.json key "test_dir", default
 ## "res://test/unit") for files named test_*.gd.
 
-# harness-version: 0.51.0
+# harness-version: 0.52.0
 ## Harness revision these files were copied from. See lint_project.gd / the
 ## `harness_version` bus verb; bump with .claude-plugin/plugin.json.
-const HARNESS_VERSION: String = "0.51.0"
+const HARNESS_VERSION: String = "0.52.0"
 
 const CONFIG_PATH: String = "res://addons/godot_selftest/devtools_config.json"
 const DEFAULT_TEST_DIR: String = "res://test/unit"
@@ -390,8 +390,18 @@ func _is_selected(method_name: String, script_path: String) -> bool:
 			return false
 
 	if _filter != "":
-		var needle: String = _filter.to_lower()
-		if not (method_name.to_lower().contains(needle) or file_name.to_lower().contains(needle)):
+		# moving-in:G-048 (0.52.0): a comma list is any-of. `--filter test_a,test_b`
+		# used to be one needle containing a comma, which matched nothing and read as
+		# `SELECTED NOTHING` - correct in the narrow sense and the wrong answer.
+		var any_hit: bool = false
+		for raw: String in _filter.split(","):
+			var needle: String = raw.strip_edges().to_lower()
+			if needle.is_empty():
+				continue
+			if method_name.to_lower().contains(needle) or file_name.to_lower().contains(needle):
+				any_hit = true
+				break
+		if not any_hit:
 			return false
 
 	return true

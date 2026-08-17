@@ -822,6 +822,9 @@ Notable behaviors:
   same root-viewport image with the same `Rect2i` that `screenshot --region` uses. If
   the two ever disagree, the reply now carries enough to say in which coordinate space.
 
+- **`run_tests.gd --filter a,b` is any-of** (0.52.0, moving-in:G-048): a comma list
+  selects a method or script matching any part; two non-matching names are still
+  `SELECTED NOTHING`. Stage 4 plants three methods and asserts `Selected: 2 of`.
 - **`run.json` `tier` is a field of its own, and `/verify` has tier (f) Tooling-only**
   (0.50.0, plant-tower-defense:G-060 second sighting). A session wrote `tier` into every
   `run.json` and five releases read it nowhere (0.48.0 even aliased it to `runtime`,

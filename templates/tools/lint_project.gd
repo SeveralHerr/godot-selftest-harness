@@ -107,10 +107,10 @@ extends SceneTree
 # console. Redirect to a file and read it back. Every line this script emits goes
 # to stdout via print(), so one redirect captures the whole report.
 
-# harness-version: 0.51.0
+# harness-version: 0.52.0
 ## Harness revision these files were copied from. Printed in the header of every run so
 ## a lint result, and any gap logged from it, can name the version it was produced on.
-const HARNESS_VERSION: String = "0.51.0"
+const HARNESS_VERSION: String = "0.52.0"
 
 const CONFIG_PATH: String = "res://addons/godot_selftest/devtools_config.json"
 const DEFAULT_SCAN_ROOT: String = "res://"
