@@ -584,6 +584,26 @@ def stage_assemble(scratch, user_dir_name):
         "\toutside.position = Vector2(3000, 40)",
         "\toutside.size = Vector2(300, 60)",
         "\thud_layer.add_child(outside)",
+        "\t# plant-tower-defense:G-072: a Panel 'Frame' 200 wide at x=900 with a child",
+        "\t# 'Spill' 400 wide - it breaks the Frame first (by 200px) and the viewport",
+        "\t# after; ui_overflow must name the Frame, not only the viewport.",
+        "\t# On its own unscaled CanvasLayer: a Control straight under a Node2D root is",
+        "\t# world-space and gets only the intrinsic checks, never ui_overflow.",
+        "\tvar overflow_layer := CanvasLayer.new()",
+        '\toverflow_layer.name = "OverflowLayer"',
+        "\tadd_child(overflow_layer)",
+        "\tvar frame := Panel.new()",
+        '\tframe.name = "Frame"',
+        "\tframe.position = Vector2(900, 400)",
+        "\tframe.size = Vector2(200, 60)",
+        "\toverflow_layer.add_child(frame)",
+        "\tvar spill := ColorRect.new()",
+        '\tspill.name = "Spill"',
+        "\tspill.color = Color(0.5, 0.5, 0.5)",
+        "\tspill.position = Vector2(0, 10)",
+        "\tspill.size = Vector2(400, 40)",
+        "\tspill.mouse_filter = Control.MOUSE_FILTER_IGNORE",
+        "\tframe.add_child(spill)",
         "\t# moving-in:G-002/G-006: a 3D prop for `aabb`, planted with the exact trap",
         "\t# the verb exists to avoid. The box is 0.2 on a side; the OmniLight3D",
         "\t# beside it has range 5.0, so ITS aabb is a 10-unit cube. A walk that",
@@ -2494,6 +2514,28 @@ def check_findings_aggregate(client, scratch):
     return True
 
 
+def check_overflow_names_ancestor(client, scratch):
+    """plant-tower-defense:G-072 (0.59.0): ui_overflow names the nearest ancestor the
+    control escaped, with the overhang, and the viewport second."""
+    reply = client.send_command(scratch, "validate_ui", {"use_baseline": False}, timeout=20.0)
+    issues = (reply.get("data") or {}).get("issues", [])
+    spill = [i for i in issues if i.get("code") == "ui_overflow" and str(i.get("path", "")).endswith("/Frame/Spill")]
+    if len(spill) != 1:
+        return fail("ui_overflow must fire once for the planted Frame/Spill, got %d: %r"
+                    % (len(spill), [i.get("path") for i in issues if i.get("code") == "ui_overflow"]))
+    msg = str(spill[0].get("message"))
+    if "extends past its ancestor Panel 'Frame'" not in msg or "right=200px" not in msg \
+            or "and the viewport" not in msg or not str(spill[0].get("escaped_ancestor", "")).endswith("/Frame"):
+        return fail("ui_overflow on Frame/Spill must name the Frame with right=200px and the viewport second; got %r" % msg)
+    outside = [i for i in issues if i.get("code") == "ui_overflow" and str(i.get("path", "")).endswith("ScaledOutside")]
+    if outside and "extends past its ancestor" in str(outside[0].get("message")):
+        return fail("ScaledOutside sits directly under a CanvasLayer with no Control ancestor; it must "
+                    "NOT name one, got %r" % outside[0].get("message"))
+    print("stage 5 bridge: ui_overflow on the planted Frame/Spill names the Frame (right=200px) and "
+          "the viewport second; ScaledOutside (no Control ancestor) names only the viewport")
+    return True
+
+
 def check_geometry_caveat_and_hide(client, scratch):
     """node-bounds must say its rect is headless geometry (H-051); screenshot
     --hide must refuse a path it cannot hide, and accept a CanvasLayer (gh#5).
@@ -4243,6 +4285,7 @@ def stage_bridge(godot, scratch, full):
         ok = check_inert_overlap(client, scratch) and ok
         ok = check_panel_escape(client, scratch) and ok
         ok = check_geometry_caveat_and_hide(client, scratch) and ok
+        ok = check_overflow_names_ancestor(client, scratch) and ok
         ok = check_ui_baseline(client, scratch) and ok
         ok = check_signal_findings(client, scratch) and ok
         ok = check_validator_reach(client, scratch) and ok
