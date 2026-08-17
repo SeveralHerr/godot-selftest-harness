@@ -7731,3 +7731,83 @@ whether they should be closed as `wontfix-until-seen` next quiet tick).
 (14 files, 57 verbs + 60 CLI). `unittest discover -s tools` — 78 OK (2 new).
 `check_templates.py --static-only` — OK (only `upstream_gaps.py` changed under
 templates/; the engine stages ran green for 0.41.0 on otherwise identical templates).
+
+## 2026-08-16 - Upstreamed 1 open gap(s) from plant-tower-defense (harness 0.18.0, 0.19.0, 0.21.0, 0.23.0, 0.24.0, 0.25.0, 0.32.0, 0.33.0, 0.36.0, 0.38.0)
+
+Pooled by `tools/upstream_gaps.py` from `C:\Users\gotmi\Documents\GitHub\plant-tower-defense\log-devtools.md`. Gap text is the project's,
+verbatim; only the id line is rewritten (qualified with the project name so
+ids from two projects cannot collide, plus a `source:` back-pointer).
+
+- Gap: **`interactive_overlap` counts controls that cannot be interacted with.** Two
+  Buttons overlapping is only a defect if a player can reach both; one at
+  `FOCUS_NONE` with `MOUSE_FILTER_IGNORE` can be reached by neither channel, and
+  making a covered layer inert is the standard fix for exactly the hazard this check
+  exists to find. So the check currently fires hardest at projects that have already
+  fixed the problem, and the only way to quiet it is a baseline — which then also
+  hides a REAL overlap arriving later at the same node pair.
+  - [plant-tower-defense:G-055] status: fixed | fixed-in: 0.43.0 | seen: 1 | harness: 0.38.0 | source: plant-tower-defense 2026-08-16 | dup-of: gh#42
+  - Improvement: skip a Control whose `focus_mode == FOCUS_NONE` **and** whose
+    `mouse_filter == MOUSE_FILTER_IGNORE` when pairing for `interactive_overlap`, and
+    say so in the finding's own text for the ones it does report ("both reachable").
+    That turns "these overlap" into "these overlap and both can be used", which is
+    the claim the check is actually making. Cheap: both properties are already read
+    by `reachable-ui`.
+
+## 2026-08-16 — 0.43.0: loop tick eleven — the first regression the loop shipped, and what caught it
+
+Reviewed: 12 open beads, two NEW issues (gh#42, gh#43), `PURPOSE.md`, both project logs
+(one new gap, plant G-055 — which arrived carrying `dup-of: gh#42` from last tick's
+change, on its first real run). gh#43 is the tick: **0.42.0 segfaults a real 552-test
+suite that 0.38.0 passes, deterministically, bisected by the reporter against unchanged
+project code.** The plugin cache was refreshed to 0.42.0 last tick; this is the first
+project to run it, and it is a regression the loop shipped.
+
+- **[gh#43 — fixed] the runner clamps physics catch-up to one tick per frame; the
+  per-test `user://` walk is top-level only.** Reproduced by reading first, then by
+  mechanism: the failing test's own comment says a pest parked on leg 3 "escaped and
+  freed itself during the settle frames" if it advances one leg too far — and 0.40.0's
+  recursive md5 walk of `user://` (178 files / 11 MB on the reporter's machine:
+  `screenshots/`, `shader_cache/`, `logs/`), run right before each test, is a stall,
+  and Godot's physics catch-up turns a stall into up to 8 `_physics_process` ticks in
+  the next process frame instead of 1. `instantiate_scene`'s two settle frames went
+  from 2 ticks to as many as 16; the pest advanced past its last safe leg, freed
+  itself, and the typed array built after the `await` held a freed object (`Attempted
+  to set an invalid (previously freed?) object instance into a 'TypedArray'` — the
+  reporter's first error line, verbatim). **Reproduced the mechanism, not the crash:**
+  a copy of the plant repo under 0.42.0 ran 554/554 twice on this machine, once with
+  the reporter's real 11 MB `user://` copied in — hashing here was fast enough, and
+  their run shared the box with other sessions. Stage 4 now plants the mechanism and
+  it fired: `Engine.max_physics_steps_per_frame = 8` + a 400 ms stall → >2 ticks in
+  the settle frames; `= 1` → ≤2. Fix is both halves: the runner sets the clamp for
+  the whole suite (two settle frames are two ticks whatever the wall clock says; N
+  ticks = await N `physics_frame`s, as before), and the walk reads only top-level
+  `user://` files with a 256 KB md5 cap — the same set devtools.py stats, for the same
+  reason. The plant copy under the fixed runner: 554/554, `Errors: 0`, exit 0 — the clamp does not disturb a real 554-test suite.
+- **[gh#42 / plant G-055 — fixed] `interactive_overlap` skips a control inert by both
+  channels** (`FOCUS_NONE` + `MOUSE_FILTER_IGNORE`); the finding says `both reachable`.
+  Stage 5: overlap A/B → 1 finding; B inert → 0; one channel back → 1.
+
+**What this says about the loop.** Three ticks (0.39–0.41) shipped with `--full` green
+and 66–78 unit tests green, and none of that could see a real suite's physics timing.
+The scratch project's tests host nothing that frees itself on a tick count. CLAUDE.md
+already says the scratch cannot measure a *false-positive rate* for static analysis
+(H-030); the same is true of *timing* for the runner: **any change to what
+`run_tests.gd` does synchronously between tests must be run against a real suite that
+hosts self-mutating nodes** — the plant copy under `scratchpad/`, four minutes a side,
+is that. Written into CLAUDE.md. Distribution cut both ways this tick: refreshing the
+cache last tick is what let the regression be found in an hour instead of a week.
+
+- Gap: **the loop's gate cannot see runner timing.** A real suite's tick-sensitive
+  tests are the only instrument, and there is no step that runs one. Real output:
+  gh#43's `3 runs out of 3` against `check_templates: OK`.
+  - [H-070] status: open | seen: 1 | harness: 0.42.0
+  - Improvement: a `tools/check_real_suite.py <project>` that copies a sibling project
+    to scratch (custom user dir set correctly — the 0.37.0 trap), installs the working
+    tree's templates, runs `run_tests.py`, and compares `Total:` against the project's
+    own last recorded run; the release skill runs it when `run_tests.gd` changed.
+
+**Validation run this turn:** `record_version.py --record` then `--check` OK at 0.43.0
+(14 files, 57 verbs + 60 CLI). `unittest discover -s tools` — 78 OK. `check_templates.py
+--stage 4` — OK with the new stall control (loose >2, clamped ≤2). `check_templates.py
+--full` — OK, all stages, `interactive_overlap pairs the overlapping A/B (both reachable), skips B once inert by both channels, pairs again with one channel back`, `stage 6 contract: 90/90`. Plant copy (554 tests) under 0.42.0: 554/554 (small user dir),
+554/554 (11 MB user dir).

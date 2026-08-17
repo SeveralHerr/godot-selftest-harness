@@ -525,6 +525,33 @@ Notable behaviors:
   _process, <top-level>` — from `git diff -U0` intersected with the enclosing `func`;
   it never gates and never claims execution. It leaves the reader one `get-state` /
   `run-method` from the answer instead of a 1/1 that reads stronger than it is.
+- **`run_tests.gd` clamps physics catch-up to one tick per frame, and the per-test
+  `user://` walk is top-level only** (0.43.0, gh#43 — a deterministic segfault on a real
+  suite that 0.38.0 passed). Godot catches up on lost real time by running up to
+  `max_physics_steps_per_frame` (default 8) physics ticks in one process frame, so
+  ANY slow synchronous step in the runner — 0.40.0's recursive md5 walk of `user://`
+  (178 files / 11 MB on the reporting project: `screenshots/`, `shader_cache/`,
+  `logs/`), a slow `setup()`, a slow test before — changed how many `_physics_process`
+  calls the next `instantiate_scene()`'s two settle frames delivered. A pest the test
+  had parked on its last safe leg advanced, escaped, freed itself, and the typed array
+  built after the `await` held a freed object. The runner, not the test, had changed.
+  Now `Engine.max_physics_steps_per_frame = 1` for the whole run (two settle frames
+  are two ticks, whatever the wall clock says; a test wanting N ticks awaits N
+  `physics_frame`s as before), the walk reads only top-level `user://` files (the
+  engine's subdirectories are never a save) with a 256 KB md5 cap, and stage 4 plants
+  the mechanism: a 400 ms stall under 8 catch-up steps delivers >2 ticks in the settle
+  frames; under the clamp ≤2. The crash itself did not reproduce on the maintainer's
+  machine (554/554 twice, once with the reporter's real 11 MB `user://` copied in);
+  the mechanism did, and it is the only thing in the 0.38.0→0.42.0 runner diff that
+  can free a node.
+- **`interactive_overlap` skips a control inert by both channels** (0.43.0, gh#42 /
+  plant-tower-defense:G-055): a `Button` at `FOCUS_NONE` + `MOUSE_FILTER_IGNORE` can be
+  reached neither by Tab nor by pointer, and making a covered layer inert is the
+  standard fix for the hazard this check exists to find — so the check fired hardest
+  at projects that had already fixed it, and the only way to quiet it was a baseline
+  that would also hide a genuine overlap arriving later at the same pair. The finding
+  text now says `both reachable (focusable or clickable)`. Stage 5 overlaps the A/B
+  pair, makes B inert (no finding), restores one channel (finding again).
 - **`upstream_gaps.py --triage` / `--mark-unverified ID…`** (0.42.0, H-069). `--triage`
   lists a log's open pooled gaps by project, oldest first, flagging `STALE` any logged
   against a harness more than `--older-than N` (default 15) minor releases behind this

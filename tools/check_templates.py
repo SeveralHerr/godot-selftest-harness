@@ -1788,14 +1788,34 @@ def check_run_tests_py(godot, scratch):
         "\t_T.free_ui(late)\n"
         "\tif early_ticks == 0:\n"
         "\t\treturn \"set_physics_process(false) before hosting was NOT undone by _ready (0 ticks) - control invalid\"\n"
-        "\treturn _T.assert_eq(late_ticks, 0, \"quiesced after hosting must not tick (early ticked %d)\" % early_ticks)\n",
+        "\treturn _T.assert_eq(late_ticks, 0, \"quiesced after hosting must not tick (early ticked %d)\" % early_ticks)\n"
+        "\n"
+        "func test_a_stall_before_hosting_does_not_change_the_settle_tick_count() -> String:\n"
+        "\t# gh#43: with the engine default (8 catch-up steps) a 400ms stall makes the two\n"
+        "\t# settle frames deliver MANY ticks; the runner clamps to 1 so they deliver <= 2.\n"
+        "\tEngine.max_physics_steps_per_frame = 8\n"
+        "\tOS.delay_msec(400)\n"
+        "\tvar loose: Ticker = Ticker.new()\n"
+        "\tawait _T.instantiate_scene(loose)\n"
+        "\tvar loose_ticks: int = loose.ticks\n"
+        "\t_T.free_ui(loose)\n"
+        "\tEngine.max_physics_steps_per_frame = 1\n"
+        "\tOS.delay_msec(400)\n"
+        "\tvar clamped: Ticker = Ticker.new()\n"
+        "\tawait _T.instantiate_scene(clamped)\n"
+        "\tvar clamped_ticks: int = clamped.ticks\n"
+        "\t_T.free_ui(clamped)\n"
+        "\tif loose_ticks <= 2:\n"
+        "\t\treturn \"control invalid: 8 catch-up steps after a 400ms stall gave only %d tick(s)\" % loose_ticks\n"
+        "\treturn _T.assert_true(clamped_ticks <= 2, \"clamped settle frames must deliver <= 2 ticks, got %d (unclamped gave %d)\" % [clamped_ticks, loose_ticks])\n",
         encoding="utf-8")
     try:
         box_run = run_godot(godot, scratch,
                             ["--script", "res://tools/run_tests.gd", "--", "--file", "test_box_quiesce_control"])
         if box_run.returncode != 0 \
                 or "[PASS] test_assert_box_passes_on_a_label_clamped_up_to_its_font" not in box_run.stdout \
-                or "[PASS] test_quiesce_after_hosting_sticks_where_before_hosting_does_not" not in box_run.stdout:
+                or "[PASS] test_quiesce_after_hosting_sticks_where_before_hosting_does_not" not in box_run.stdout \
+                or "[PASS] test_a_stall_before_hosting_does_not_change_the_settle_tick_count" not in box_run.stdout:
             return fail("assert_box/quiesce control: expected both planted tests to PASS (each "
                         "first proves the engine mechanism it guards against); got exit %d:\n%s"
                         % (box_run.returncode, box_run.stdout[-2000:]))
@@ -1901,7 +1921,8 @@ def check_run_tests_py(godot, scratch):
           "printed %r and said nothing under --filter; assert_margin passed the recorded "
           "set and refused a new near-the-line item; assert_box accepted a font-clamped "
           "Label and refused a moved one; quiesce() after hosting held at 0 ticks where "
-          "set_physics_process(false) before hosting was undone; user:// writes attributed "
+          "set_physics_process(false) before hosting was undone; a 400ms stall no longer "
+          "changes the settle-frame tick count (max_physics_steps_per_frame clamped to 1); user:// writes attributed "
           "to their test as [created] then [rewritten identically]; assert_ne named the value"
           % declared_line)
     return True
@@ -2463,6 +2484,51 @@ def check_controls_touching(client, scratch):
                         % removed.get("message"))
     print("stage 5 bridge: min_control_gap=4 names the planted flush pair as "
           "controls_touching (0px apart); 0 reports none; pair removed")
+    return True
+
+
+def check_inert_overlap(client, scratch):
+    """gh#42 (0.43.0): interactive_overlap skips a control inert by BOTH channels.
+
+    Reuses the touching-pair fixture: B is moved up to overlap A (finding, message
+    says both reachable), then B is made FOCUS_NONE + MOUSE_FILTER_IGNORE (no
+    finding for the pair - the standard fix for a covered layer must not keep
+    firing), then only one channel is restored (finding again: one channel is
+    still reachable). Removed afterwards so nothing else's counts move.
+    """
+    def call(action, args):
+        return client.send_command(scratch, action, args, timeout=20.0)
+
+    def pair(paths):
+        data = call("validate_ui", {"use_baseline": False}).get("data") or {}
+        return [i for i in data.get("issues", []) if i.get("code") == "interactive_overlap"
+                and i.get("path") in paths and any(pth in str(i.get("message")) for pth in paths)]
+
+    planted = call("run_method", {"node_path": "/root/Main", "method": "harness_plant_touching_pair", "args": []})
+    paths = planted.get("data", {}).get("result")
+    if not isinstance(paths, list) or len(paths) != 2:
+        return fail("harness_plant_touching_pair returned %r" % planted.get("message"))
+    a_path, b_path = paths
+    try:
+        call("set_state", {"node_path": b_path, "property": "position", "value": {"x": 100, "y": 420}})
+        hits = pair(paths)
+        if len(hits) != 1 or "both reachable" not in str(hits[0].get("message")):
+            return fail("overlapping A/B must be ONE interactive_overlap saying both reachable, got %r" % hits)
+        call("set_state", {"node_path": b_path, "property": "focus_mode", "value": 0})
+        call("set_state", {"node_path": b_path, "property": "mouse_filter", "value": 2})
+        if pair(paths):
+            return fail("B inert by both channels (FOCUS_NONE + MOUSE_FILTER_IGNORE) must not be "
+                        "paired, got %r" % pair(paths))
+        call("set_state", {"node_path": b_path, "property": "mouse_filter", "value": 0})
+        if len(pair(paths)) != 1:
+            return fail("B clickable again (one channel) must be paired again, got %r" % pair(paths))
+    finally:
+        removed = call("run_method", {"node_path": "/root/Main", "method": "harness_remove_touching_pair", "args": []})
+        if removed.get("data", {}).get("result") is not True:
+            return fail("harness_remove_touching_pair did not remove the planted layer: %r"
+                        % removed.get("message"))
+    print("stage 5 bridge: interactive_overlap pairs the overlapping A/B (both reachable), skips B "
+          "once inert by both channels, pairs again with one channel back")
     return True
 
 
@@ -3903,6 +3969,7 @@ def stage_bridge(godot, scratch, full):
         # gating so a zero here means "the check did not run".
         ok = check_findings_aggregate(client, scratch) and ok
         ok = check_controls_touching(client, scratch) and ok
+        ok = check_inert_overlap(client, scratch) and ok
         ok = check_panel_escape(client, scratch) and ok
         ok = check_geometry_caveat_and_hide(client, scratch) and ok
         ok = check_ui_baseline(client, scratch) and ok
