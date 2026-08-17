@@ -40,6 +40,10 @@ Options:
                        age-based bulk mark was tried first and would have relabelled
                        real, still-wanted requests (asset conformance, collider
                        planes) as "not re-checked". Combine with --dry-run to preview.
+    A `status: fixed-upstream` gap (0.48.0) is one a project has seen fixed in a
+    release it does not run yet - plant ran 0.38.0 on purpose after gh#43 while the
+    fix for its G-058 sat in 0.44.0 - and it is skipped like `fixed`: the pool already
+    holds it as fixed. It flips to `fixed` when the project refreshes.
     --older-than N     Minor releases behind HARNESS_VERSION that --triage flags
                        as STALE (default 15). A flag for the reader, never a rewrite.
 
@@ -68,8 +72,8 @@ import re
 import sys
 from pathlib import Path
 
-# harness-version: 0.47.0
-HARNESS_VERSION = "0.47.0"
+# harness-version: 0.48.0
+HARNESS_VERSION = "0.48.0"
 
 DEFAULT_DEST = "log-devtools.md"
 
@@ -96,7 +100,7 @@ _SEEN_RE = re.compile(r"(seen:\s*)(\d+)")
 # paragraph, not on a `- [G-025] status:` list item of their own. The parser read
 # only the list-item form and minted an `auto-` id for each: one gap seen twice
 # arrived as two new gaps, and a `status: fixed` sighting arrived as open.
-_TITLE_ID_RE = re.compile(r"^\s*-\s*Gap[^:]*:\s*\**\s*\[(?P<id>[A-Za-z]+-\d+[a-z]?)\]")
+_TITLE_ID_RE = re.compile(r"^\s*-\s*Gap[^:]*:\s*[*`\s]*\[(?P<id>[A-Za-z]+-\d+[a-z]?)\]")
 _INLINE_STATUS_RE = re.compile(r"\bstatus:\s*(?P<status>[a-z][a-z-]*)")
 
 

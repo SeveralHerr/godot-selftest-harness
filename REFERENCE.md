@@ -822,6 +822,18 @@ Notable behaviors:
   same root-viewport image with the same `Rect2i` that `screenshot --region` uses. If
   the two ever disagree, the reply now carries enough to say in which coordinate space.
 
+- **`record` prints its denominator every run, and `fixed-upstream` is a status**
+  (0.48.0, plant-tower-defense:G-058 third sighting). `run.json: read K of N supplied
+  key(s) (…); ignored: …; defaulted: verdict -> unknown` — `difflib` catches a key near
+  a real one; the denominator catches the rest, including the silent `verdict: unknown`
+  that turned a clean run into a wrong row on a project pinned at 0.38.0. Flat gate
+  numbers (`lint_exit`, `tests_total`, `assertions`, …) alias to their nested homes.
+  The project's log format gained `status: fixed-upstream: X.Y.Z` — fixed in a release
+  the project does not run yet, still open *here* until the refresh (the state the
+  reporter said the ledger had no word for); `upstream_gaps.py` skips it like `fixed`
+  and reads a title id even inside backticks. `/verify` Phase 0 also runs the
+  *plugin's* `devtools.py harness-version --client -p .`, because a project's own client
+  can be too old to know how to compare.
 - **`batch`** (0.47.0) runs several verbs in ONE round trip. Every bus call costs a
   command-file write, up to a 100 ms poll and a result-file read; `verb-usage` on the
   two live projects showed ~13k calls, most of them `get_state` / `set_state` /

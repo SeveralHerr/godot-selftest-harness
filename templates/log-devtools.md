@@ -89,7 +89,7 @@ narrated in a sentence.
 | Field | Values | Meaning |
 |---|---|---|
 | `[G-NNN]` | `G-001`, `G-002`, … | **Stable id, never reused.** Allocate the next unused number; ids are per-file, so `G-007` here and `G-007` in another project are different gaps (`tools/upstream_gaps.py` qualifies them with the project name when pooling). |
-| `status:` | `open` / `fixed` / `wontfix` | `wontfix` needs a reason on the Improvement line. |
+| `status:` | `open` / `fixed` / `wontfix` / `fixed-upstream` | `wontfix` needs a reason on the Improvement line. `fixed-upstream` = fixed in a harness release this project does not run yet (say which, e.g. `fixed-upstream: 0.44.0`); it is still open *here* until the refresh, and flips to `fixed` then. `harness-version --client` names the gaps in this state. |
 | `fixed-in:` | a harness version | Only on `status: fixed`. Omit otherwise. |
 | `seen:` | an integer | How many times this gap has been hit. **Bump this instead of writing a second entry** — a recurrence is a stronger signal than a new gap, and only a counter makes that visible. |
 | `harness:` | `X.Y.Z` | The installed harness version it was observed against, from `python tools/devtools.py harness-version --client` (`python3` outside Windows — probe by executing, the Store alias lies). Without it, a gap logged before an upgrade can't be told from a regression after one. |

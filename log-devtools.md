@@ -7864,7 +7864,7 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   Both halves of the information were present in the same invocation and never met. `tier`,
   `phases` and `notes` were dropped the same way. The warning is good and it is what made
   me look; what it cannot do is say *you supplied this under the wrong name*.
-  - [plant-tower-defense:G-058] status: fixed | fixed-in: 0.44.0 | seen: 2 | harness: 0.38.0 | source: plant-tower-defense 2026-08-17 | dup-of: gh#46
+  - [plant-tower-defense:G-058] status: fixed | fixed-in: 0.44.0 (3rd sighting on 0.38.0 cost a wrong row: verdict defaulted silently; 0.48.0 adds the read-K-of-N line + gate-number aliases) | seen: 3 | harness: 0.38.0 | source: plant-tower-defense 2026-08-17 | dup-of: gh#46
   - Process note, recorded because it nearly cost something: I wrote the issue's
     Environment line claiming the code was unchanged at 0.42.0 BEFORE checking it,
     then checked. It holds (`checks = run.get("checks") or []` at 0.42.0:1031, and
@@ -8098,3 +8098,42 @@ session (bead 970 — a session, not a tick); H-031 `--self-check`.
 **Validation run this turn:** `record_version.py --record` then `--check` OK at 0.47.0
 (14 files, 58 verbs + 62 CLI). `unittest discover -s tools` — 84 OK. `check_templates.py
 --full` — OK, all stages, `batch ran 5 items in one round trip (3 ok incl. a hyphenated verb, unknown verb + nested batch failed by index), stop_on_error stopped at 2`, `stage 6 contract: 91/91`. `run_tests.gd` unchanged (no real-suite run).
+
+## 2026-08-17 — 0.48.0: loop tick sixteen — a project pinned on purpose, and the word it lacked
+
+Reviewed: 10 open beads, the tracker (0 open), `PURPOSE.md`, both project logs. One
+sighting arrived, and it was the most instructive line of the week: plant G-058 a THIRD
+time — and this time not a warning but a well-formed wrong row (`verdict: unknown` on a
+clean run), because the session passed flat gate numbers as top-level keys and 0.38.0's
+`record` dropped them silently. **Plant runs 0.38.0 on purpose** — pinned after gh#43 —
+so the fix that shipped in 0.44.0 (and would have named `lint_exit` at them) is one the
+project cannot have, and the reporter wrote: "that pair is a status the ledger has no
+word for. Do not file it again; do not mark it plainly fixed either." Also: the entry
+arrived minted `auto-` because its `[G-058]` sat inside backticks in the title.
+
+- **[plant G-058 (3rd) — additive fix] `record` prints `run.json: read K of N supplied
+  key(s) (…); ignored: …; defaulted: verdict -> unknown` every run** — the reporter's
+  exact ask, additive to 0.44.0's difflib line, and gate-number aliases (`lint_exit`,
+  `tests_total`, `assertions` → their nested homes). Unit-tested on the scratch repo.
+- **The word: `status: fixed-upstream: X.Y.Z`** in the project log format — fixed in a
+  release this project does not run yet, still open here until the refresh, and
+  `harness-version --client` names the gaps in that state. `upstream_gaps.py` skips it
+  like `fixed`; the title-id regex now tolerates backticks. Re-pooled: the auto- entry
+  resolved to G-058 (fixed here, seen 3).
+- **`/verify` Phase 0 also runs the PLUGIN's `devtools.py harness-version --client -p .`**
+  — a project's own client can be too old to know how to compare (a 0.38.0
+  `devtools.py` prints no fixed-upstream line by construction), and this session's
+  plugin copy always can. That is the only route by which a pinned project learns that
+  the reason for its pin was fixed five releases ago.
+
+**Read critically:** plant is pinned at 0.38.0 because 0.42.0 segfaulted its suite and
+nothing it runs told it 0.43.0 fixed that. The pin is rational and the information gap
+is the harness's; the Phase 0 line above is the fix, and until plant runs a `/verify`
+from a fresh session it stays pinned. Nothing further to do from here — refreshing
+another session's working tree is not this loop's to do.
+
+- Gap: no new gap this turn.
+
+**Validation run this turn:** `record_version.py --record` then `--check` OK at 0.48.0
+(14 files, 58 verbs + 62 CLI). `unittest discover -s tools` — 85 OK (1 new + 3
+assertions). `check_templates.py` — OK, all stages (`dev_tools.gd` stamp-only).

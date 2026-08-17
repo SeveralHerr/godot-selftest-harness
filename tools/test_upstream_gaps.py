@@ -156,6 +156,27 @@ class TitleEmbeddedIds(unittest.TestCase):
         self.assertNotIn("moving-in:auto-", out.split("aabb")[0])
 
 
+class BacktickTitleIdAndFixedUpstream(unittest.TestCase):
+    """0.48.0: `[G-058]` inside backticks in the title still resolves; a
+    `fixed-upstream` gap is not open and is skipped like fixed."""
+
+    def test_backticked_title_id_and_fixed_upstream_status(self):
+        text = ("## t\n\n- Gap: **`[G-058]` a third time.**\n"
+                "  - **[G-058] status: fixed-upstream: 0.44.0 | seen: 3 | harness: 0.38.0**\n"
+                "  - Improvement: none.\n")
+        gaps = upstream_gaps.parse_gaps(text)
+        self.assertEqual([g["id"] for g in gaps], ["G-058"])
+        self.assertEqual(gaps[0]["fields"]["status"], "fixed-upstream")
+        with tempfile.TemporaryDirectory() as td:
+            src = Path(td) / "log-devtools.md"
+            dst = Path(td) / "dest.md"
+            src.write_text(text, encoding="utf-8")
+            dst.write_text("# d\n", encoding="utf-8")
+            r = upstream_gaps.upstream(src, dst, "plant", False, False)
+        self.assertEqual(r["appended"], [])
+        self.assertTrue(any("G-058" in sk for sk in r["skipped"]), r)
+
+
 class Triage(unittest.TestCase):
     """H-069: the pooled log's open set is listed by age, and only explicit ids move."""
     TEXT = ("- [gather:G-001] status: open | seen: 1 | harness: 0.8.0\n"
