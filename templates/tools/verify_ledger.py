@@ -144,8 +144,8 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
-# harness-version: 0.54.0
-HARNESS_VERSION = "0.54.0"
+# harness-version: 0.55.0
+HARNESS_VERSION = "0.55.0"
 
 LEDGER_PATH = Path(".devtools") / "verify-runs.jsonl"
 
@@ -182,7 +182,8 @@ reported as ignored and is NOT written to the row):
   verdict              pass | partial | fail | unknown  (downgraded to partial on a
                        blocked check)
   checks               [{"name": str, "result": "pass"|"fail"|"blocked", ...}]  - the
-                       Phase 4 evidence; `warranted` with no checks is downgraded
+                       Phase 4 evidence; `warranted` with no checks is KEPT but the row is
+                       stamped `evidence: none` and `stats` counts those rows (gh#51)
   found                [] means "nothing, and I am saying so"; a list of findings else
   expected             free text: what the run set out to prove
   cheaper_alternative  free text: what would have answered this without the harness
@@ -982,8 +983,14 @@ def _reconcile_value(value, reached, unreached, checks, found=None, kind="verify
             "what was already known - which is what overkill means. If it did catch "
             "something, record it in `found` rather than only in prose")
     if value == "warranted" and not checks:
+        # gh#51 / plant-tower-defense:G-061b: kept, not downgraded - the run may
+        # genuinely have earned it and just not recorded how; destroying an honest
+        # verdict is worse than flagging one. But flagged ON THE ROW (`evidence:
+        # none`) and counted by `stats`, so it is not a stderr line that scrolls
+        # away and leaves the row indistinguishable from an evidenced one.
         return value, ("warranted with no Phase 4 checks recorded - the claim that "
-                       "earned it is not in the row")
+                       "earned it is not in the row; kept, stamped evidence: none "
+                       "(stats counts these)")
     return value, None
 
 
@@ -1223,6 +1230,8 @@ def cmd_record(args, root):
         # gh#50: verify (default) or experiment; absent on rows before 0.49.0.
         "kind": kind,
         "tier": (str(run.get("tier")).strip() or None) if run.get("tier") is not None else None,
+        # gh#51: a verdict with no check evidence is a fact about the row, kept on it.
+        "evidence": "checks" if checks else "none",
         "reach_note": ("experiment: the session produced the diff; reach is not applicable"
                        if kind == "experiment" and reach_obj is None else None),
     }
@@ -1456,6 +1465,7 @@ def cmd_stats(args, root):
     overkill_seconds = 0.0
     experiments = 0
     tiers = {}
+    no_evidence = 0
     reached_n = unreached_n = 0
     implicit_n = 0
     implicit_files = set()
@@ -1516,6 +1526,8 @@ def cmd_stats(args, root):
             experiments += 1
         if row.get("tier"):
             tiers[str(row["tier"])] = tiers.get(str(row["tier"]), 0) + 1
+        if row.get("value") == "warranted" and not (row.get("checks") or []):
+            no_evidence += 1
 
         reach = row.get("reach") or {}
         r, u = reach.get("reached"), reach.get("unreached")
@@ -1683,6 +1695,9 @@ def cmd_stats(args, root):
     if experiments:
         print("  experiments (kind=experiment, gh#50 - the diff was the run's output; "
               "reach not applicable): %d of %d" % (experiments, total))
+    if no_evidence:
+        print("  %d warranted verdict(s) carry no check evidence (checks: [] - the claim that "
+              "earned them is not in the row; gh#51)" % no_evidence)
     if tiers:
         print("  by Phase 0.5 tier (rows that recorded one): "
               + ", ".join("%s %d" % kv for kv in sorted(tiers.items(), key=lambda kv: (-kv[1], kv[0]))))

@@ -91,10 +91,10 @@ extends SceneTree
 ## (res://addons/godot_selftest/devtools_config.json key "test_dir", default
 ## "res://test/unit") for files named test_*.gd.
 
-# harness-version: 0.54.0
+# harness-version: 0.55.0
 ## Harness revision these files were copied from. See lint_project.gd / the
 ## `harness_version` bus verb; bump with .claude-plugin/plugin.json.
-const HARNESS_VERSION: String = "0.54.0"
+const HARNESS_VERSION: String = "0.55.0"
 
 const CONFIG_PATH: String = "res://addons/godot_selftest/devtools_config.json"
 const DEFAULT_TEST_DIR: String = "res://test/unit"
@@ -778,6 +778,15 @@ func _print_results() -> void:
 	# is the one a fresh session should read first: it says how much checking
 	# previous sessions left behind for this one to extend.
 	print("  Suite: %d test script(s) in %s" % [_test_files, _test_dir])
+	# gh#52 / plant-tower-defense:G-063 (0.55.0): the denominator that MOVED, printed
+	# beside the one that did not. A script lost to a parse error was discovered
+	# (Suite: 7) but never loaded, and Total fell 596 -> 531 with Passed == Total -
+	# the run already exits 2 with RUNNER ERROR and [ERR] lines, but the summary's
+	# own numbers read like a clean, smaller suite. Say it in the numbers.
+	if _test_files > 0:
+		var loaded: int = _test_files - _selected_load_failures.size()
+		print("  Scripts: %d of %d loaded%s" % [loaded, _test_files,
+			"" if _selected_load_failures.is_empty() else "  DID NOT LOAD: %s" % ", ".join(_selected_load_failures)])
 	if not _user_writes.is_empty():
 		# gh#39: the test, not just the file. One line per (file, test); a suite
 		# whose write is unconditional over the developer's real save is named

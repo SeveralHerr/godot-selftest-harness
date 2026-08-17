@@ -822,6 +822,32 @@ Notable behaviors:
   same root-viewport image with the same `Rect2i` that `screenshot --region` uses. If
   the two ever disagree, the reply now carries enough to say in which coordinate space.
 
+- **`repaint [--node PATH]`, and `pause` names the frozen-canvas asymmetry** (0.55.0,
+  gh#51 / plant-tower-defense:G-061). A paused tree does not run `_process`, so a
+  `_draw()` cue whose owner repaints from `_process` (`func _process(_d):
+  queue_redraw()`) keeps its LAST frame however much `run_method` changes under it — a
+  screenshot after `pause` showed the pre-pause frame and read as a failed method, a
+  wrong region or a dead bus. The workaround needed the node's source read first (which
+  node draws it, and from where); neither is discoverable from the bus. `repaint` calls
+  `queue_redraw()` on a node and every `CanvasItem` under it (tree root by default) and
+  reports `touched`; `pause`'s reply now says so and carries `canvas_repaint:
+  frozen_for_process_driven_redraw` beside the `PROCESS_MODE_ALWAYS` note (the two
+  directions of one asymmetry). Stage 5 asserts the note and that `repaint` under pause
+  touches the fixture's CanvasItems.
+- **A check-less `warranted` is kept, stamped `evidence: none`, and counted** (0.55.0,
+  gh#51.2 / plant-tower-defense:G-061b). The schema text said "downgraded" and the code
+  kept the value — one of the two was wrong. Decision: keep the honest verdict
+  (destroying it is worse than flagging it), stamp the row `evidence: none` (`checks`
+  otherwise), and have `stats` print `N warranted verdict(s) carry no check evidence`,
+  so the state is visible after the stderr line has scrolled away.
+- **`run_tests.gd` prints `Scripts: N of M loaded  DID NOT LOAD: …`** (0.55.0, gh#52 /
+  plant-tower-defense:G-063). A script lost to a parse error is discovered (`Suite: 7`)
+  but never loaded, and `Total` fell 596 → 531 with `Passed == Total`. The run already
+  exited 2 with `RUNNER ERROR` and an `[ERR]` line — the report's "indistinguishable
+  from a clean run" undersold the existing signal — but the summary's own numbers read
+  like a smaller clean suite; now the denominator that moved is printed beside the one
+  that did not. Stage 4 runs the planted uncompilable script on a FULL run and asserts
+  the line and exit 2.
 - **`run_tests.gd --filter a,b` is any-of** (0.52.0, moving-in:G-048): a comma list
   selects a method or script matching any part; two non-matching names are still
   `SELECTED NOTHING`. Stage 4 plants three methods and asserts `Selected: 2 of`.
@@ -1287,7 +1313,7 @@ node-bounds, save-ui-baseline, ui-snapshot-diff, tilemap-cells,
 tilemap-region, scripts-seen, canvas-scale, set-resolution,
 find-nodes, press, raycast, sample-pixels, reachable-ui, aabb, look-at, new-uid,
 mouse-move, reload, first-frame, fire-entry-point, project-settings, contained-in,
-restore-userstate, verb-usage, batch
+restore-userstate, verb-usage, batch, repaint
 ```
 
 `new-uid` is the one subcommand that never touches the bus — see below.

@@ -89,11 +89,11 @@ from pathlib import Path
 from typing import Optional  # noqa: F401
 
 
-# harness-version: 0.54.0
+# harness-version: 0.55.0
 # Version of the godot-selftest-harness this client was copied from. Compared against
 # the running game's own stamp by the `harness-version` verb, so a half-refreshed
 # install (new client, old autoload) is visible instead of mysterious.
-HARNESS_VERSION = "0.54.0"
+HARNESS_VERSION = "0.55.0"
 
 COMMANDS_FILE = "devtools_commands.json"
 RESULTS_FILE = "devtools_results.json"
@@ -3106,6 +3106,24 @@ def cmd_fire_entry_point(args, project_path: Path):
         sys.exit(1)
 
 
+def cmd_repaint(args, project_path: Path):
+    """queue_redraw() on a node and its CanvasItem descendants (bus verb: repaint,
+    gh#51). Data keys read: touched, node_path, paused."""
+    cmd_args = {}
+    if getattr(args, "node", None):
+        cmd_args["node_path"] = args.node
+    result = send_command(project_path, "repaint", cmd_args)
+    if not result.get("success"):
+        print(f"Failed: {result.get('message')}", file=sys.stderr)
+        sys.exit(1)
+    data = result.get("data") or {}
+    if "touched" not in data:
+        print("repaint: the reply carried no 'touched' key - this game's harness predates "
+              f"0.55.0. Keys present: {sorted(data)}", file=sys.stderr)
+        sys.exit(2)
+    print(result.get("message", ""))
+
+
 def cmd_pause(args, project_path: Path):
     """Pause SceneTree.paused directly (gh#26). Data keys read: always_count,
     always_roots (0.40.0, moving-in:G-061) - the nodes that keep processing."""
@@ -5202,8 +5220,15 @@ def main():
 
     # pause / unpause
     p = subparsers.add_parser(
-        "pause", help="Pause SceneTree.paused (the bus keeps answering)")
+        "pause", help="Pause SceneTree.paused (the bus keeps answering; a CanvasItem that "
+                      "repaints from _process keeps its last frame - see repaint)")
     p.set_defaults(func=cmd_pause)
+    p = subparsers.add_parser(
+        "repaint", help="queue_redraw() on a node and every CanvasItem under it (default: the "
+                        "whole tree) - makes pause + mutate + screenshot honest for a _draw() cue "
+                        "whose owner repaints from _process (gh#51)")
+    p.add_argument("--node", metavar="PATH", help="Subtree root (default: the tree root)")
+    p.set_defaults(func=cmd_repaint)
     p = subparsers.add_parser("unpause", help="Reverse `pause`")
     p.set_defaults(func=cmd_unpause)
 
