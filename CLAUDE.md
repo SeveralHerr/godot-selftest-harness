@@ -101,6 +101,17 @@ and `name_check.py` passed every stage on it while emitting 466 bogus warnings o
 project ([H-030]). For any change to a *static analysis* template, also run it against a
 real scaffolded project and report the count.
 
+**The scratch project cannot see runner timing either** ([H-070], gh#43). 0.40.0 added a
+synchronous `user://` walk between tests; three releases passed `--full` and every unit
+test, and the first real suite to run it segfaulted — the stall changed how many physics
+ticks the next test's settle frames delivered, and a node that frees itself on a tick
+count did. For any change to what `run_tests.gd` does *between* or *around* tests, copy
+a sibling project with a tick-sensitive suite to the scratchpad (set BOTH
+`use_custom_user_dir=true` and `custom_user_dir_name`), install the working tree's
+templates with `tools/scaffold_install.py full`, run its `run_tests.py`, and quote the
+`Total:` line in the release entry. Four minutes a side; `plant-tower-defense` is the
+one that has caught it.
+
 Run it before committing any change under `templates/`, alongside
 `python tools/record_version.py --check`. Say plainly which you actually ran — "templates
 unchanged since last verified run" is a fine answer; "should be fine" is not. Stage 5

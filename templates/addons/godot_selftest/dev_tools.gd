@@ -14,14 +14,14 @@ extends Node
 ## extension loads AFTER the generic handlers, a project may override a generic
 ## verb by registering the same action string (last-writer-wins).
 
-# harness-version: 0.42.0
+# harness-version: 0.43.0
 # --- Constants ---
 
 ## Version of the godot-selftest-harness these files were copied from. Reported by the
 ## `harness_version` verb and stamped into every copied tool script, so a gap logged
 ## against a project can name the version it was seen on, and a refresh can tell a
 ## stale file from a customized one. Bump with .claude-plugin/plugin.json.
-const HARNESS_VERSION: String = "0.42.0"
+const HARNESS_VERSION: String = "0.43.0"
 
 ## Default bus filenames. With a session id (see _resolve_session) the id is spliced in
 ## before the extension, so two instances can each own a bus in the same user:// dir.
@@ -3440,7 +3440,7 @@ func _cmd_validate_ui(args: Dictionary) -> Dictionary:
 			"path": str(overlap["node_a"]),
 			"severity": "warning",
 			"code": "interactive_overlap",
-			"message": "Interactive controls overlap: '%s' and '%s' (overlap area: %.0fpx)" % [
+			"message": "Interactive controls overlap, both reachable (focusable or clickable): '%s' and '%s' (overlap area: %.0fpx)" % [
 				overlap["node_a"], overlap["node_b"], overlap["overlap_area"],
 			],
 		})
@@ -3787,9 +3787,18 @@ func _validate_ui_recursive(node: Node, vp: Vector2, issues: Array, interactive_
 		# camera happens to be, not a layout defect.
 		var world_space: bool = _is_world_space_control(control)
 
-		# Collect interactive controls for overlap detection
+		# Collect interactive controls for overlap detection. gh#42 (0.43.0): a
+		# control that cannot be focused AND cannot be clicked is not interactive,
+		# whatever its class - making a covered layer inert (FOCUS_NONE +
+		# MOUSE_FILTER_IGNORE) is the standard fix for the hazard this check
+		# exists to find, so counting those fired hardest at projects that had
+		# already fixed it, and the only way to quiet it was a baseline that
+		# would also hide a genuine overlap arriving later at the same pair.
 		if (control is Button or control is TextureButton or control is LinkButton) and control.visible and not world_space:
-			interactive_controls.append({"path": str(control.get_path()), "rect": rect})
+			if control.focus_mode == Control.FOCUS_NONE and control.mouse_filter == Control.MOUSE_FILTER_IGNORE:
+				pass  # inert by both channels: a player can reach it neither by Tab nor by pointer
+			else:
+				interactive_controls.append({"path": str(control.get_path()), "rect": rect})
 
 		# Check 1: Viewport overflow
 		if not world_space and (rect.position.x + rect.size.x > vp.x or rect.position.y + rect.size.y > vp.y):

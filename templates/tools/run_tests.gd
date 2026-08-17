@@ -91,10 +91,10 @@ extends SceneTree
 ## (res://addons/godot_selftest/devtools_config.json key "test_dir", default
 ## "res://test/unit") for files named test_*.gd.
 
-# harness-version: 0.42.0
+# harness-version: 0.43.0
 ## Harness revision these files were copied from. See lint_project.gd / the
 ## `harness_version` bus verb; bump with .claude-plugin/plugin.json.
-const HARNESS_VERSION: String = "0.42.0"
+const HARNESS_VERSION: String = "0.43.0"
 
 const CONFIG_PATH: String = "res://addons/godot_selftest/devtools_config.json"
 const DEFAULT_TEST_DIR: String = "res://test/unit"
@@ -162,7 +162,14 @@ var _run_id: String = ""
 ## | "created" | "deleted"}. Bridge files (devtools_*) are excluded.
 var _user_writes: Array[Dictionary] = []
 var _user_snapshot: Dictionary = {}
-const USER_WRITES_MAX_FILE_BYTES: int = 4 * 1024 * 1024
+## gh#43 (0.43.0): TOP-LEVEL files only, and a small md5 cap. 0.40.0 walked
+## user:// recursively and md5'd everything twice per test - 178 files / 11 MB
+## on a real project (screenshots/, shader_cache/, logs/) - and that stall was
+## enough for the engine's physics catch-up to run up to 8 ticks in the next
+## settle frame instead of 1, which advanced a pest past the leg a test had
+## parked it on, freed it, and segfaulted the suite. Same numbers as
+## devtools.py's stat (top level), same reason.
+const USER_WRITES_MAX_FILE_BYTES: int = 256 * 1024
 
 
 func _initialize() -> void:
@@ -200,6 +207,16 @@ func _initialize() -> void:
 
 	if not _json_output:
 		print("  Run: %s pid %d started" % [_run_id, OS.get_process_id()])
+
+	# gh#43 (0.43.0): one physics tick per process frame, whatever the wall clock
+	# says. Godot catches up on lost real time by running up to
+	# max_physics_steps_per_frame (default 8) ticks in one frame, so ANY slow
+	# synchronous step - a big user:// walk, a slow setup(), a slow test before -
+	# changed how many _physics_process calls the next instantiate_scene()'s two
+	# settle frames delivered. A pest parked on leg 3 escaped and freed itself
+	# under 0.42.0 where 0.38.0 left it alone; the runner, not the test, had
+	# changed. Deterministic now: two settle frames are two ticks.
+	Engine.max_physics_steps_per_frame = 1
 
 	# A never-imported project has no class cache, so every `class_name` in it is
 	# unresolvable and a test whose first statement uses one aborts on a runtime
@@ -613,36 +630,30 @@ func _run_single_test(
 ## recorded by mtime+size only).
 func _user_files_snapshot() -> Dictionary:
 	var out: Dictionary = {}
-	_walk_user_dir("user://", "", out)
-	return out
-
-
-func _walk_user_dir(abs_dir: String, rel_prefix: String, out: Dictionary) -> void:
-	var dir: DirAccess = DirAccess.open(abs_dir)
+	var dir: DirAccess = DirAccess.open("user://")
 	if dir == null:
-		return
+		return out
 	dir.list_dir_begin()
 	var name: String = dir.get_next()
 	while name != "":
-		if name != "." and name != "..":
-			var rel: String = rel_prefix + name
-			var abs_path: String = abs_dir.path_join(name)
-			if dir.current_is_dir():
-				if not name.begins_with("."):
-					_walk_user_dir(abs_path, rel + "/", out)
-			elif not name.begins_with("devtools_") and name != "logs":
-				var size: int = 0
-				var f: FileAccess = FileAccess.open(abs_path, FileAccess.READ)
-				if f != null:
-					size = f.get_length()
-					f.close()
-				out[rel] = {
-					"mtime": FileAccess.get_modified_time(abs_path),
-					"size": size,
-					"md5": FileAccess.get_md5(abs_path) if size <= USER_WRITES_MAX_FILE_BYTES else "",
-				}
+		# Top level only (gh#43) - subdirectories are the engine's (logs/,
+		# shader_cache/, vulkan/, screenshots/) and a save lives at the top.
+		if not dir.current_is_dir() and not name.begins_with("devtools_") \
+				and not name.ends_with("_baseline.json") and name != "findings_last.json":
+			var abs_path: String = "user://" + name
+			var size: int = 0
+			var f: FileAccess = FileAccess.open(abs_path, FileAccess.READ)
+			if f != null:
+				size = f.get_length()
+				f.close()
+			out[name] = {
+				"mtime": FileAccess.get_modified_time(abs_path),
+				"size": size,
+				"md5": FileAccess.get_md5(abs_path) if size <= USER_WRITES_MAX_FILE_BYTES else "",
+			}
 		name = dir.get_next()
 	dir.list_dir_end()
+	return out
 
 
 func _attribute_user_writes(script_path: String, method_name: String) -> void:
