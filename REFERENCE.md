@@ -525,6 +525,17 @@ Notable behaviors:
   _process, <top-level>` — from `git diff -U0` intersected with the enclosing `func`;
   it never gates and never claims execution. It leaves the reader one `get-state` /
   `run-method` from the answer instead of a 1/1 that reads stronger than it is.
+- **`upstream_gaps.py --triage` / `--mark-unverified ID…`** (0.42.0, H-069). `--triage`
+  lists a log's open pooled gaps by project, oldest first, flagging `STALE` any logged
+  against a harness more than `--older-than N` (default 15) minor releases behind this
+  one; an unknown `harness:` prints `?` and is never flagged (unknown is not old);
+  harness-native `H-NNN` are listed, never flagged. `--mark-unverified` rewrites the
+  *named* pooled gaps to `status: unverified | stale-since: <version>` — a third state
+  meaning "logged against templates since rewritten and not re-checked", which is not a
+  claim of fixed; the id stays known to the dedupe so re-pooling does not re-append it.
+  Explicit ids on purpose: an age-based bulk mark was built first and would have
+  relabelled real, still-wanted requests. The first `--triage` run found three gaps
+  whose fixing release had said "closes" in prose while the status line stayed `open`.
 - **`upstream_gaps.py` carries `dup-of: gh#NN` and prints open gaps by source**
   (0.41.0, H-044 / H-028). A project that filed its gap upstream says so on its id line
   (`filed upstream: gh#40`); the pooled entry now names the issue it duplicates, so a

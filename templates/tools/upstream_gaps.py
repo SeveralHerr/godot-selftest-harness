@@ -29,6 +29,26 @@ Options:
                        file's parent directory name)
     --include-fixed    Also carry over `fixed` / `wontfix` gaps (default: open only)
     --dry-run          Print what would happen; write nothing
+    --triage           List the destination's OPEN pooled gaps grouped by project,
+                       oldest first, marking those logged against a harness more
+                       than --older-than minor releases behind this one as STALE.
+                       Reads only; sources are optional with this flag.
+    --mark-unverified ID [ID ...]
+                       Rewrite the named pooled gaps' status lines to
+                       `status: unverified | stale-since: <this version>` (H-069).
+                       Explicit ids only, after a session has re-read them: an
+                       age-based bulk mark was tried first and would have relabelled
+                       real, still-wanted requests (asset conformance, collider
+                       planes) as "not re-checked". Combine with --dry-run to preview.
+    --older-than N     Minor releases behind HARNESS_VERSION that --triage flags
+                       as STALE (default 15). A flag for the reader, never a rewrite.
+
+`unverified` is the honest third state between open and fixed: the gap was logged
+against templates that have since been rewritten and nobody has re-checked its
+mechanism. It is not a claim that it is fixed. An `unverified` id is still known to
+the dedupe, so re-pooling the project's still-open copy does not re-append it; a
+project that sees it again bumps `seen:` as usual, and a session that re-checks it
+sets `open` or `fixed` by hand.
 
 Ids
 ---
@@ -48,8 +68,8 @@ import re
 import sys
 from pathlib import Path
 
-# harness-version: 0.41.0
-HARNESS_VERSION = "0.41.0"
+# harness-version: 0.42.0
+HARNESS_VERSION = "0.42.0"
 
 DEFAULT_DEST = "log-devtools.md"
 
@@ -212,12 +232,67 @@ def gaps_by_source(dest_text):
         if not m:
             continue
         fields = _parse_fields(m.group("fields"))
-        if fields.get("status", "open").split()[0] != "open":
+        status = fields.get("status", "open").split()[0]
+        if status not in ("open", "unverified"):
             continue
         gid = m.group("id")
         proj = gid.split(":", 1)[0] if ":" in gid else "harness"
-        counts[proj] = counts.get(proj, 0) + 1
+        key = proj if status == "open" else proj + " (unverified)"
+        counts[key] = counts.get(key, 0) + 1
     return counts
+
+
+def _minor(version):
+    """`0.41.0` -> 41; anything unparseable -> None."""
+    m = re.match(r"\s*(\d+)\.(\d+)", str(version or ""))
+    if not m:
+        return None
+    return int(m.group(1)) * 1000 + int(m.group(2))
+
+
+def triage(dest_text, older_than=15, current=None):
+    """[{id, project, harness, seen, stale, line_no}] for every OPEN pooled gap in
+    a log (H-069). `stale` when its `harness:` is more than `older_than` minor
+    releases behind `current` (HARNESS_VERSION by default); an unparseable or
+    missing `harness:` is listed as `?` and never flagged (unknown is not old).
+    Harness-native ids (no project prefix) are listed but never stale-flagged."""
+    cur = _minor(current or HARNESS_VERSION)
+    out = []
+    for i, line in enumerate(dest_text.splitlines()):
+        m = _ID_LINE_RE.match(line)
+        if not m:
+            continue
+        fields = _parse_fields(m.group("fields"))
+        if fields.get("status", "open").split()[0] != "open":
+            continue
+        gid = m.group("id")
+        project = gid.split(":", 1)[0] if ":" in gid else ""
+        hv = fields.get("harness", "")
+        mv = _minor(hv)
+        stale = bool(project) and mv is not None and cur is not None and cur - mv > older_than
+        out.append({"id": gid, "project": project or "harness", "harness": hv or "?",
+                    "seen": _seen(fields), "stale": stale, "line_no": i})
+    return out
+
+
+def mark_unverified(dest_text, ids, current=None):
+    """Rewrite the named OPEN pooled gaps' status lines. Returns (new_text, [ids
+    marked]). Only `status: open` becomes `status: unverified`; every other field on
+    the line is kept and `stale-since: <current>` is appended after it. Ids not found,
+    not open, or harness-native (no project prefix) are left alone."""
+    lines = dest_text.splitlines()
+    marked = []
+    wanted = set(ids)
+    for row in triage(dest_text, 10 ** 6, current):
+        if row["id"] not in wanted or ":" not in row["id"]:
+            continue
+        line = lines[row["line_no"]]
+        new = re.sub(r"status:\s*open\b", "status: unverified | stale-since: %s"
+                     % (current or HARNESS_VERSION), line, count=1)
+        if new != line:
+            lines[row["line_no"]] = new
+            marked.append(row["id"])
+    return "\n".join(lines) + ("\n" if dest_text.endswith("\n") else ""), marked
 
 
 def _seen(fields):
@@ -378,7 +453,7 @@ def main():
     ap = argparse.ArgumentParser(
         description="Append a project log's open gaps to the harness repo's gaps log.",
     )
-    ap.add_argument("sources", nargs="+", metavar="SOURCE_LOG",
+    ap.add_argument("sources", nargs="*", metavar="SOURCE_LOG",
                     help="Project log-devtools.md file(s) to read")
     ap.add_argument("--into", default=DEFAULT_DEST, metavar="PATH",
                     help="Destination log (default: ./%s)" % DEFAULT_DEST)
@@ -388,6 +463,14 @@ def main():
                     help="Also carry over fixed/wontfix gaps (default: open only)")
     ap.add_argument("--dry-run", action="store_true",
                     help="Report what would change; write nothing")
+    ap.add_argument("--triage", action="store_true",
+                    help="List the destination's open pooled gaps by project, oldest first, "
+                         "flagging STALE ones (H-069); reads only")
+    ap.add_argument("--mark-unverified", nargs="+", metavar="ID", default=None,
+                    help="Rewrite the named pooled gaps to status: unverified | stale-since: "
+                         + HARNESS_VERSION + " (explicit ids, never H-NNN); --dry-run previews")
+    ap.add_argument("--older-than", type=int, default=15, metavar="N",
+                    help="Minor releases behind %s that count as stale (default 15)" % HARNESS_VERSION)
     args = ap.parse_args()
 
     dest_path = Path(args.into).expanduser().resolve()
@@ -395,6 +478,43 @@ def main():
         print("error: destination directory does not exist: %s" % dest_path.parent,
               file=sys.stderr)
         return 1
+
+    if args.triage or args.mark_unverified:
+        if not dest_path.is_file():
+            print("error: no such log: %s" % dest_path, file=sys.stderr)
+            return 1
+        text = dest_path.read_text(encoding="utf-8")
+        rows = triage(text, args.older_than)
+        by_proj = {}
+        for r in rows:
+            by_proj.setdefault(r["project"], []).append(r)
+        for proj in sorted(by_proj, key=lambda k: (-len(by_proj[k]), k)):
+            rs = sorted(by_proj[proj], key=lambda r: (_minor(r["harness"]) or -1, r["id"]))
+            stale_n = sum(1 for r in rs if r["stale"])
+            print("%s: %d open, %d STALE (harness more than %d minor releases behind %s)"
+                  % (proj, len(rs), stale_n, args.older_than, HARNESS_VERSION))
+            for r in rs:
+                print("  %s %s  harness %s  seen %d" % (
+                    "STALE" if r["stale"] else "     ", r["id"], r["harness"], r["seen"]))
+        if args.mark_unverified:
+            new_text, marked = mark_unverified(text, args.mark_unverified)
+            missing = sorted(set(args.mark_unverified) - set(marked))
+            if missing:
+                print("\nnot marked (not found, not open, or harness-native): %s"
+                      % ", ".join(missing))
+            if args.dry_run:
+                print("\ndry run: would mark %d gap(s) unverified: %s"
+                      % (len(marked), ", ".join(marked)))
+            elif marked:
+                dest_path.write_text(new_text, encoding="utf-8")
+                print("\nmarked %d gap(s) `status: unverified | stale-since: %s`: %s"
+                      % (len(marked), HARNESS_VERSION, ", ".join(marked)))
+            else:
+                print("\nnothing to mark.")
+        if not args.sources:
+            return 0
+    elif not args.sources:
+        ap.error("at least one SOURCE_LOG is required (or --triage / --mark-unverified)")
 
     total_new = 0
     for raw in args.sources:

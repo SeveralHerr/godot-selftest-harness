@@ -3025,7 +3025,7 @@ report) applied to a gap this repo wrote itself.
   parented), or it snapshots before the validator loads. Unlike the headless-tool case
   this one is a *real* miss the metric should be able to close, because the script
   genuinely executed.
-  - [H-040] status: open | seen: 1 | harness: 0.14.0
+  - [H-040] status: fixed | fixed-in: 0.29.0 (gh#30; status line left open until 0.42.0's --triage) | seen: 1 | harness: 0.14.0
   - **Not reproduced** — inferred from one ledger row, so per [H-033] the mechanism above
     is a hypothesis. The probe is small: scaffold a scratch project, call `validate_ui`
     over the bus, then call `scripts_seen` and check whether the validator's path is in
@@ -4543,7 +4543,7 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   raised part-way through a checker that had already made twenty successful calls, so
   half its measurements were from one process and half from another. Workaround: kill
   every Godot process from PowerShell and relaunch.
-  - [plant-tower-defense:G-021] status: open | seen: 1 | harness: 0.19.0 | source: plant-tower-defense 2026-08-15
+  - [plant-tower-defense:G-021] status: fixed | fixed-in: by 0.41.0 (launch ignores a dead owner - gather:G-112; survivors listed and killed via quit --kill / the launch ledger - gh#14.1, gh#24; found by 0.42.0's --triage) | seen: 1 | harness: 0.19.0 | source: plant-tower-defense 2026-08-15
   - Improvement: `launch` already refuses when a live bus answers; it should also
     recognise a *stale* owner whose pid is dead and reclaim it, and grow a
     `launch --reap` that kills instances pointed at this project's `user://` before
@@ -5328,7 +5328,7 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   `game/plant.gd`), which the harness correctly buckets as a declaration rather
   than an observation. This is the same shape as G-015 (a base class invisible
   because only a subclass owned the live node).
-  - [plant-tower-defense:G-028] status: open | seen: 3 | harness: 0.23.0 | source: plant-tower-defense 2026-08-15
+  - [plant-tower-defense:G-028] status: fixed | fixed-in: 0.29.0 (gh#30 mark_script_reached; the 0.29.0 entry said 'closes G-028' and this line was never edited - found by 0.42.0's --triage) | seen: 3 | harness: 0.23.0 | source: plant-tower-defense 2026-08-15
   - Improvement: `scripts-seen` already records every script the engine *loaded*,
     which for a static-only class is exactly the right signal and is an
     observation rather than a declaration. Reach consults it today only as a
@@ -7675,7 +7675,7 @@ timeout — still architectural); the bus-side beads (unchanged, no evidence);
   logged against 0.8.0–0.10.0 templates that have been rewritten since, and the log's
   own rule ("the project's copy stays open until that project refreshes") means they
   can never close from here. Real output: the by-source line above.
-  - [H-069] status: open | seen: 1 | harness: 0.41.0
+  - [H-069] status: fixed | fixed-in: 0.42.0 (--triage listing + explicit --mark-unverified; the age-based bulk mark the Improvement line asked for was built, tried, and withdrawn - see the 0.42.0 entry) | seen: 1 | harness: 0.41.0
   - Improvement: a `stale-since:` field (or an `upstream_gaps.py --triage` that lists
     every open pooled gap whose `harness:` predates the last N releases, grouped by
     project, so a session can re-check mechanisms and mark `status: unverified` /
@@ -7686,3 +7686,48 @@ timeout — still architectural); the bus-side beads (unchanged, no evidence);
 (14 files, 57 verbs + 60 CLI). `unittest discover -s tools` — 76 OK (7 new).
 `check_templates.py` — OK, all stages (`--full` not run: `dev_tools.gd` is stamp-only
 since 0.40.0's `--full` green; stage 5 still launches/quits with the new client).
+
+## 2026-08-16 — 0.42.0: loop tick ten — nothing arrived, so the backlog got looked at
+
+Reviewed: 12 open beads, the tracker (0 open), `PURPOSE.md`, both project logs. **No new
+issue and no new gap** — the first quiet tick since the loop began. So the tick went to
+the thing last tick's by-source line exposed (H-069): 83 "open" pooled gaps, most against
+templates rewritten long ago.
+
+- **[H-069 — fixed] `upstream_gaps.py --triage` and `--mark-unverified ID…`.** `--triage`
+  lists the open pooled set by project, oldest first, `STALE` on anything logged 15+
+  minor releases behind this one (`?` for an unknown `harness:`, never flagged; `H-NNN`
+  never flagged). **H-033 earned its keep here:** the Improvement line asked for an
+  age-based bulk rewrite to `unverified`, I built it, ran it in dry-run, and read the
+  first five it would have relabelled — plant G-031 (asset conformance), moving-in G-005
+  (same), moving-in G-052 (collider planes), G-021, G-028. Three are still-wanted
+  requests that no template rewrite touched; "not re-checked" would have been a lie
+  about them. So the mark takes explicit ids only, after a session has re-read them,
+  and the STALE flag stays a flag for the reader. Unit-tested (age flag project-only,
+  unknown-not-old, H- never flagged; mark rewrites only named open project gaps and
+  `gaps_by_source` reports `unverified` separately).
+- **The first `--triage` pass re-checked the plant set and closed three by reading:**
+  plant G-028 and H-040 were fixed in 0.29.0 (`mark_script_reached`, gh#30) — that
+  release's entry says "closes H-040/G-028 for real" and neither status line was ever
+  edited, thirteen releases ago; plant G-021 (dead owner on the bus) — `launch` ignores a
+  dead owner and `quit --kill` / the launch ledger reap survivors. CLAUDE.md now says
+  "edit the status line, not just the prose", and why. Gather's 36 STALE and moving-in's
+  12 are listed and left as-is: re-checking each is a session's work, and the mark exists
+  now for the session that does it.
+- **Distribution.** The installed plugin cache is 0.38.0 (`installed_plugins.json`,
+  sha `cd79697`) — every issue filed since (#38–#41) came from that cache, and three of
+  them were fixed before they were filed. Plant runs 0.38.0, moving-in 0.36.0, gather and
+  findmyballs 0.10.0. This tick ends by running `claude plugin update` so new sessions
+  scaffold from current; the projects' own refresh is theirs to run and is not touched
+  from here (another session's working tree).
+
+**Considered and not done:** re-checking gather's 36 (a session, not an hour); H-031's
+`--self-check`; the bus-side beads (no evidence, fourth tick running — worth asking
+whether they should be closed as `wontfix-until-seen` next quiet tick).
+
+- Gap: no new gap this turn.
+
+**Validation run this turn:** `record_version.py --record` then `--check` OK at 0.42.0
+(14 files, 57 verbs + 60 CLI). `unittest discover -s tools` — 78 OK (2 new).
+`check_templates.py --static-only` — OK (only `upstream_gaps.py` changed under
+templates/; the engine stages ran green for 0.41.0 on otherwise identical templates).

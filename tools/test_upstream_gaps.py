@@ -119,5 +119,33 @@ class GapsBySource(unittest.TestCase):
         self.assertEqual(upstream_gaps.gaps_by_source(text), {"gather": 2, "plant": 1, "harness": 1})
 
 
+class Triage(unittest.TestCase):
+    """H-069: the pooled log's open set is listed by age, and only explicit ids move."""
+    TEXT = ("- [gather:G-001] status: open | seen: 1 | harness: 0.8.0\n"
+            "- [gather:G-002] status: open | seen: 2 | harness: 0.30.0\n"
+            "- [plant:auto-abc123] status: open | seen: 1\n"
+            "- [plant:G-050] status: fixed | fixed-in: 0.39.0 | seen: 1 | harness: 0.36.0\n"
+            "- [H-016] status: open | seen: 1 | harness: 0.7.0\n")
+
+    def test_stale_flag_is_age_based_project_only_and_unknown_is_not_old(self):
+        rows = {r["id"]: r for r in upstream_gaps.triage(self.TEXT, older_than=15, current="0.41.0")}
+        self.assertEqual(sorted(rows), ["H-016", "gather:G-001", "gather:G-002", "plant:auto-abc123"])
+        self.assertTrue(rows["gather:G-001"]["stale"])
+        self.assertFalse(rows["gather:G-002"]["stale"])
+        self.assertFalse(rows["plant:auto-abc123"]["stale"], "unknown version is not old")
+        self.assertEqual(rows["plant:auto-abc123"]["harness"], "?")
+        self.assertFalse(rows["H-016"]["stale"], "harness-native gaps are never stale-flagged")
+
+    def test_mark_unverified_rewrites_only_named_open_project_gaps(self):
+        new, marked = upstream_gaps.mark_unverified(
+            self.TEXT, ["gather:G-001", "H-016", "plant:G-050", "nope:G-9"], current="0.42.0")
+        self.assertEqual(marked, ["gather:G-001"])
+        self.assertIn("- [gather:G-001] status: unverified | stale-since: 0.42.0 | seen: 1 | harness: 0.8.0", new)
+        self.assertIn("- [H-016] status: open", new)
+        self.assertIn("- [plant:G-050] status: fixed", new)
+        by = upstream_gaps.gaps_by_source(new)
+        self.assertEqual(by, {"gather": 1, "gather (unverified)": 1, "plant": 1, "harness": 1})
+
+
 if __name__ == "__main__":
     unittest.main()
