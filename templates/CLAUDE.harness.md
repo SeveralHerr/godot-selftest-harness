@@ -401,6 +401,9 @@ runtime, which the static checker cannot see) and `name_check_ignore` (path pref
 - A `Node not found` reply names the longest prefix that resolved, its children, a
   case-only mismatch, and where a node of that leaf name does exist — read it before
   concluding the node is absent (fourteen polls of a `Hud`/`HUD` typo once did not).
+- `press` says what the press did: `(+37 nodes, added …)`, `+0 nodes; N handler(s) ran`,
+  or **`NOTHING is connected to this button's pressed`** — read the parenthesis before
+  concluding the feature behind the button is broken.
 - `fire-entry-point` prints a `screen:` line — visible layers and the topmost Control
   with its text — because arriving somewhere is the verb's whole job.
 - `run_tests.gd` prints `Scripts: N of M loaded  DID NOT LOAD: …` — a script lost to a

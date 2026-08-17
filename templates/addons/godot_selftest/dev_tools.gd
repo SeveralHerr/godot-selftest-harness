@@ -14,14 +14,14 @@ extends Node
 ## extension loads AFTER the generic handlers, a project may override a generic
 ## verb by registering the same action string (last-writer-wins).
 
-# harness-version: 0.56.0
+# harness-version: 0.57.0
 # --- Constants ---
 
 ## Version of the godot-selftest-harness these files were copied from. Reported by the
 ## `harness_version` verb and stamped into every copied tool script, so a gap logged
 ## against a project can name the version it was seen on, and a refresh can tell a
 ## stale file from a customized one. Bump with .claude-plugin/plugin.json.
-const HARNESS_VERSION: String = "0.56.0"
+const HARNESS_VERSION: String = "0.57.0"
 
 ## Default bus filenames. With a session id (see _resolve_session) the id is spliced in
 ## before the extension, so two instances can each own a bus in the same user:// dir.
@@ -2704,7 +2704,12 @@ func _cmd_touch_press(args: Dictionary) -> Dictionary:
 	elif _active_touches.has(index):
 		position = _active_touches[index]
 	else:
-		return {"success": false, "message": "touch_press on a new index requires 'position' as [x, y]"}
+		# plant-tower-defense:G-069 (0.57.0): name the keys that WERE sent, so a
+		# `{x, y}` shape reads as "did you mean position" and not as a broken
+		# downstream verb one call later.
+		var given: Array = args.keys()
+		return {"success": false, "message": "touch_press on a new index requires 'position' as [x, y]%s" % [
+			(" (got keys %s - did you mean position: [x, y]?)" % str(given)) if not given.is_empty() else ""]}
 
 	_dispatch_touch(index, position, true)
 	_active_touches[index] = position
@@ -5499,18 +5504,63 @@ func _cmd_press(args: Dictionary) -> Dictionary:
 
 	if button.toggle_mode and args.has("toggle"):
 		button.button_pressed = bool(args["toggle"])
+	# gh#55 / plant-tower-defense:G-067 (0.57.0): what the press DID. A button wired
+	# to nothing reported success byte-identically to a working one; the reply
+	# described the button, never the world after it. Snapshot the tree either
+	# side of the emit: the node-count delta plus the shallowest added subtree
+	# roots (a menu that appeared is one root, not 37 nodes). `+0 nodes` is the
+	# honest answer for an ordinary press and worth seeing in its own right.
+	var before: Dictionary = {}
+	_collect_node_paths(get_tree().root, before)
+	var connections: int = button.get_signal_connection_list("pressed").size()
 	button.emit_signal("pressed")
+	var after: Dictionary = {}
+	_collect_node_paths(get_tree().root, after)
+	var added_roots: Array = []
+	for path: Variant in after:
+		if before.has(path):
+			continue
+		var parent: String = str(path).get_base_dir()
+		if before.has(parent) or not after.has(parent):
+			added_roots.append(str(path))
+	var removed: int = 0
+	for path: Variant in before:
+		if not after.has(path):
+			removed += 1
+	added_roots.sort()
+	var delta: int = after.size() - before.size()
+	var effect: String = ""
+	if delta != 0 or removed > 0:
+		effect = "  (%+d nodes%s%s)" % [delta,
+			(", added %s" % ", ".join(added_roots.slice(0, 3)) + (" (+%d more)" % (added_roots.size() - 3) if added_roots.size() > 3 else "")) if not added_roots.is_empty() else "",
+			(", %d removed" % removed) if removed > 0 else ""]
+	elif connections == 0:
+		effect = "  (+0 nodes; NOTHING is connected to this button's `pressed` - the press reached no handler)"
+	else:
+		effect = "  (+0 nodes; %d handler(s) ran, no node added or removed - an effect that is not a node change, or none)" % connections
 
 	return {
 		"success": true,
-		"message": "Pressed %s" % button.get_path(),
+		"message": "Pressed %s%s" % [button.get_path(), effect],
 		"data": {
 			"node_path": str(button.get_path()),
 			"type": button.get_class(),
 			"disabled": false,
 			"button_pressed": button.button_pressed,
+			"pressed_connections": connections,
+			"nodes_delta": delta,
+			"nodes_removed": removed,
+			"added_roots": added_roots.slice(0, 20),
 		},
 	}
+
+
+func _collect_node_paths(node: Node, out: Dictionary) -> void:
+	if node == self:
+		return
+	out[str(node.get_path())] = true
+	for child: Node in node.get_children():
+		_collect_node_paths(child, out)
 
 
 ## Casts a ray through the 2D physics space and reports what it hit.

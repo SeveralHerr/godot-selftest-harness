@@ -822,6 +822,19 @@ Notable behaviors:
   same root-viewport image with the same `Rect2i` that `screenshot --region` uses. If
   the two ever disagree, the reply now carries enough to say in which coordinate space.
 
+- **`press` reports what the press did** (0.57.0, gh#55 / plant-tower-defense:G-067).
+  `Pressed /root/…/NotebookButton  (+37 nodes, added /root/…/Notebook)` — the tree is
+  snapshotted either side of the emit; the message carries the node delta, the
+  shallowest added subtree roots (a menu that appeared is one root, not 37 nodes) and
+  removals; `+0 nodes; N handler(s) ran` for an ordinary press; and **`+0 nodes; NOTHING
+  is connected to this button's pressed`** for the case that used to report success
+  byte-identically to a working button. Data: `pressed_connections`, `nodes_delta`,
+  `nodes_removed`, `added_roots`. Stage 5 plants an unwired button and one whose handler
+  adds a child. Deliberately narrower than `fire-entry-point`'s screen summary: a press
+  usually should not change the screen, an entry point should. `touch_press` without a
+  position now names the keys it was given (`got keys ["x", "y"] - did you mean
+  position: [x, y]?`, plant G-069 — a project override of that verb had defaulted to
+  zero).
 - **A node-path miss diagnoses itself** (0.56.0, gh#53 / plant-tower-defense:G-065). Every
   `Node not found: <path>` — thirteen sites — now walks the path and appends `resolved as
   far as /root/Game, whose children are [HUD, Entities, …]`, `did you mean 'HUD' (case
