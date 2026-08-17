@@ -822,6 +822,14 @@ Notable behaviors:
   same root-viewport image with the same `Rect2i` that `screenshot --region` uses. If
   the two ever disagree, the reply now carries enough to say in which coordinate space.
 
+- **`run.json` `tier` is a field of its own, and `/verify` has tier (f) Tooling-only**
+  (0.50.0, plant-tower-defense:G-060 second sighting). A session wrote `tier` into every
+  `run.json` and five releases read it nowhere (0.48.0 even aliased it to `runtime`,
+  which was wrong — it is the triage decision, not runtime evidence); it is now stored
+  on the row and `stats` prints `by Phase 0.5 tier: full N, headless-only M, …`, the
+  number that says how often the full run is the right call. Tier (f): a project-owned
+  `tools/*.py` checker that no GDScript imports fits none of (a)–(e) — no Godot phase can
+  speak to it; run its own tests / self-check and record `tier: tooling`.
 - **`sample-pixels --expect` / `--points`** (0.49.0, gh#49 / plant-tower-defense:G-059).
   The verb could describe a region and never assert a colour was in it: a 3.6 px pip
   inside a 5x5 box is a few percent and `dominant` will never name it however plainly
