@@ -209,7 +209,7 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   is a single file, so a new `class_name` from any agent forces a global rebuild.
   Workaround: pre-created stub files declaring all four new `class_name`s, ran `--import`
   once up front, then told every agent not to run it.
-  - [gather:G-005] status: open | seen: 3 | harness: 0.4.0 | source: gather 2026-08-01
+  - [gather:G-005] status: fixed | fixed-in: by 0.20.0 (`launch --isolated`: several buses on one machine is the supported case; the engine-gate half is H-034) - 0.53.0 triage, by reading | seen: 3 | harness: 0.4.0 | source: gather 2026-08-01
     (0.5.0 shipped the `--session` half, so N instances no longer answer each
     other's commands; the `--import` class-cache race this entry also names is
     untouched, so the gap stays open)
@@ -275,7 +275,7 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   node's state with no failed assertion anywhere. This is the same trap the test runner
   has (`gather-1t9`), but in game code, and it hid a real data-loss bug
   (`gather-hxa.8`) for as long as the file has existed.
-  - [gather:G-011] status: open | seen: 1 | harness: 0.4.0 | source: gather 2026-08-01
+  - [gather:G-011] status: fixed | fixed-in: 0.28.0 (`run_tests.py` scans stderr: an aborted method under a reported pass is exit 1) - 0.53.0 triage, by reading | seen: 1 | harness: 0.4.0 | source: gather 2026-08-01
   - Improvement: add a `save_roundtrip` verb that calls every `SaveLoad` member's
     `saveObject()` and reports any that return an empty dict or omit `filepath` —
     a one-call check for a class of bug that is otherwise silent.
@@ -491,7 +491,7 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   edits cost another stash + relaunch cycle on HEAD (identical `PlayerIdle`). CLAUDE.md
   already warns that driving gather through the hotbar's stop signal leaves the timer
   running; the *start* side has the same class of problem and is undocumented.
-  - [gather:G-019] status: open | seen: 1 | harness: 0.4.0 | source: gather 2026-08-01
+  - [gather:G-019] status: unverified | stale-since: 0.52.0 | seen: 1 | harness: 0.4.0 | source: gather 2026-08-01
   - Improvement: add a project verb `gather_once` in `devtools_ext/commands.gd` that calls
     `ResourceManager2.start_removing_resource()` directly and returns the node it engaged
     (or an explicit `"no resource in reach"`), so a gather assertion tests the gather loop
@@ -719,7 +719,7 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   coords. Nothing in the response distinguished "cell written" from "scene instanced".
   Workaround: read `player_manager.gd` and compare against `main.gd:set_tile_item`, which
   turns out to have the same latent bug and is dead code (no callers).
-  - [gather:G-029] status: open | seen: 1 | harness: 0.7.0 | source: gather 2026-08-01
+  - [gather:G-029] status: wontfix (place_station is a project verb - 0.53.0 triage, by reading) | seen: 1 | harness: 0.7.0 | source: gather 2026-08-01
   - Improvement: `set_tile`-style verbs should verify the cell afterwards —
     `get_cell_source_id`/`get_cell_tile_data` on the written cell, and for a scene tile a
     child-count delta — and report `success: false` when the write produced no tile. A verb
@@ -1052,7 +1052,7 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   viewport, which is the hard half, but there is nothing for "give this node the neighbours
   its `@onready`s expect". The bug was therefore verified at runtime and left with no
   regression guard; `test_hud_toolbar.gd` covers the strip but cannot touch the badge.
-  - [gather:G-048] status: open | seen: 2 | harness: 0.7.0 | source: gather 2026-08-02
+  - [gather:G-048] status: fixed | fixed-in: by 0.25.0 (`_T.stub_siblings` builds the @onready neighbourhood) - 0.53.0 triage, by reading | seen: 2 | harness: 0.7.0 | source: gather 2026-08-02
   - Improvement: a `_T.stub_tree({"../PlayerInfo/XpBar": ProgressBar, …})` helper that
     materialises placeholder nodes at a set of node paths before the node under test enters
     the tree. It cannot satisfy a typed `@onready` that needs a real class, but it would
@@ -1191,7 +1191,7 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   whether BREAK at the top-right is actually reachable one-handed — are unverified by
   anything but argument. Not a harness defect; recorded so the ledger's denominator is not
   quietly wrong about a diff of this shape.
-  - [gather:G-057] status: open | seen: 5 | harness: 0.7.0 | source: gather 2026-08-02
+  - [gather:G-057] status: wontfix (a process instruction (no runtime pass allowed), not a harness gap - 0.53.0 triage, by reading) | seen: 5 | harness: 0.7.0 | source: gather 2026-08-02
   - Improvement: the per-session bus already exists (`-- --devtools-session <id>` +
     `--session <id>`), but `user://` is still shared for screenshots, baselines and the
     `.godot/` import cache, so it is not enough on its own and the standing advice is a
@@ -1240,7 +1240,7 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   correctly but never that it *engaged*. `run-method _on_died` then `get-state` always lands
   after the deadline. This is the same shape as G-058 but from the opposite side (that one is
   about `step-time` across a dip; this is about sampling inside one).
-  - [gather:G-060] status: open | seen: 1 | harness: 0.7.0 | source: gather 2026-08-02
+  - [gather:G-060] status: fixed | fixed-in: by 0.26.0 (`pause`/`unpause` + `step-time --then-pause` catch sub-round-trip effects) - 0.53.0 triage, by reading | seen: 1 | harness: 0.7.0 | source: gather 2026-08-02
   - Improvement: a `--after-frames N` flag on `get-state`, so the read is scheduled inside the
     game at a known frame offset from the triggering call rather than racing the file bus.
 
@@ -1315,7 +1315,7 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   `(90,197,79)` by scanning the land tiles for the modal colour, and composites the
   candidate over it. Finding those two coordinates cost four crop-and-look rounds, because
   nothing in the project states where anything sits in the 400x400 atlas.
-  - [gather:G-074] status: open | seen: 1 | harness: 0.7.0 | source: gather 2026-08-02
+  - [gather:G-074] status: wontfix (asset preview is project/art tooling - 0.53.0 triage, by reading) | seen: 1 | harness: 0.7.0 | source: gather 2026-08-02
   - Improvement: a `tile_at` style verb — or a headless `tools/atlas_map.gd` — that dumps
     the registry's `atlas_location` + `tile_source_id` per `Types.Item`, so "where is the
     tree tile" is one query instead of a binary search by cropping. The registry already
@@ -1376,7 +1376,7 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   false "already fixed"** — recorded 2026-08-01: stashing `input_manager.gd` alone made the
   bug not reproduce because the rest of the causal chain was still applied. Nothing in the
   /verify workflow warns that an A/B must carry the whole diff.
-  - [gather:G-086] status: open | seen: 1 | harness: 0.7.0 | source: gather 2026-08-02
+  - [gather:G-086] status: wontfix (a stash-based A/B process, not harness code - 0.53.0 triage, by reading) | seen: 1 | harness: 0.7.0 | source: gather 2026-08-02
   - Improvement: a Phase 4 note (and checklist line) for A/B testing: stash/restore the
     full changed-file set from Phase 0's diff, never a hand-picked subset.
 
@@ -1384,7 +1384,7 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   2026-08-02: at `set-game-speed 0.08` the XP splash "looked enormous" purely because a
   stacking tween was stretched eight-fold. Good for draw-order questions, misleading for
   scale questions; nothing documents the distinction.
-  - [gather:G-087] status: open | seen: 1 | harness: 0.7.0 | source: gather 2026-08-02
+  - [gather:G-087] status: unverified | stale-since: 0.52.0 | seen: 1 | harness: 0.7.0 | source: gather 2026-08-02
   - Improvement: one paragraph in the verify skill's screenshot guidance: use slow-mo for
     ordering/occlusion, use `canvas-scale`-style reads (see G-073/G-075) for size claims.
 
@@ -1451,7 +1451,7 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   `cmd goto-cell --args '{"predicate":"grass_clear"}'` returned
   `"message": "Unknown action: goto-cell"`; `cmd gather-stats` (the header's own example)
   fails identically. Workaround: underscore forms work; my new docstrings now show those.
-  - [gather:G-082] status: open | seen: 1 | harness: 0.7.0 | source: gather 2026-08-02
+  - [gather:G-082] status: fixed | fixed-in: by 0.14.0 (gh#1: hyphenated names dispatch to underscored handlers) - 0.53.0 triage, by reading | seen: 1 | harness: 0.7.0 | source: gather 2026-08-02
   - Improvement: normalize hyphens to underscores in the game-side dispatcher for `cmd`
     payload actions (the top-level verbs already get this), or fix the header comment.
 
@@ -1524,7 +1524,7 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   `(0, 0)` — the no-vector-coercion gap (gather-6sp) applying to `set-state`, not just
   `run-method`, and silently writing a wrong value rather than failing — and `tile_at`
   ignored its `x`/`y` arguments entirely, returning cell `(0, -1)` for all six cells queried.
-  - [gather:G-077] status: open | seen: 3 | harness: 0.7.0 | source: gather 2026-08-02
+  - [gather:G-077] status: wontfix (placeable-tile verb is the project's - 0.53.0 triage, by reading) | seen: 3 | harness: 0.7.0 | source: gather 2026-08-02
   - Improvement: a generic `place_tile` verb taking an item name and a cell offset, built on
     the same `handler.set_tile(cell, source_id, atlas)` call `place_worker` already uses.
     Every placeable in the game is one registry lookup away, and the per-feature placer verbs
@@ -1543,7 +1543,7 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   what was wrong was the mapping from those rules onto real tile data. The unit suite cannot
   see that a scene tile occupies its own cell, or which atlas coord the starting island uses,
   because `for_cells` invents the world it tests against.
-  - [gather:G-078] status: open | seen: 1 | harness: 0.7.0 | source: gather 2026-08-03
+  - [gather:G-078] status: wontfix (world fixture is the project's - 0.53.0 triage, by reading) | seen: 1 | harness: 0.7.0 | source: gather 2026-08-03
   - Improvement: a headless fixture that loads `world/tile_map.tscn` (a plain PackedScene,
     no autoloads needed) and exposes its layer-0/1 cells, so "is the home island walkable"
     becomes a unit test rather than a runtime discovery. The scene is already on disk and
@@ -1634,7 +1634,7 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   hazard before the bridge is even involved. I forbade all Godot execution in the subagent
   prompts and took every gate myself, which serialises the slowest part of the work behind
   one agent.
-  - [gather:G-093] status: open | seen: 1 | harness: 0.8.0 | source: gather 2026-08-03
+  - [gather:G-093] status: fixed | fixed-in: by 0.20.0 (same as G-005; N agents = N isolated buses; engine gates remain H-034) - 0.53.0 triage, by reading | seen: 1 | harness: 0.8.0 | source: gather 2026-08-03
   - Improvement: a `devtools.py scratch-clone` that stamps out a copy of the project with
     `use_custom_user_dir=true` and a unique `custom_user_dir_name`, prints the path, and
     cleans up on exit — the [G-057] ask, but reached for parallel *validation* rather than
@@ -1686,7 +1686,7 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   `scaled`, `scaled_touch` and `_apply_scale`, because the only executable check needs a
   running game or a full test run with `_T.instantiate_ui`. The subagent reached the same
   wall and proposed the same fix independently.
-  - [gather:G-097] status: open | seen: 1 | harness: 0.8.0 | source: gather 2026-08-03
+  - [gather:G-097] status: unverified | stale-since: 0.52.0 | seen: 1 | harness: 0.8.0 | source: gather 2026-08-03
   - Improvement: a headless `layout-probe` that takes a scene path plus a viewport size and
     prints the resulting node rects, so a width budget is one command rather than a launch.
   - Note: the agent proposed filing this as [G-060], which is already taken *and* resolved
@@ -1723,7 +1723,7 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   `goto_resource` teleports the player to a resource; there is no "put the player somewhere
   that satisfies both predicates at once". Every attempt cost a launch-to-assert cycle and
   the run still ends with a blocked check.
-  - [gather:G-099] status: open | seen: 1 | harness: 0.8.0 | source: gather 2026-08-03
+  - [gather:G-099] status: wontfix (the project's setup verbs undo each other - 0.53.0 triage, by reading) | seen: 1 | harness: 0.8.0 | source: gather 2026-08-03
   - Improvement: let the project's own setup verbs take an explicit target cell
     (`place_station --args '{"cell":{"x":-8,"y":3}}'`, `goto_cell` already does) so a test
     can compose a scene deliberately instead of hoping two nearest-free-cell searches
@@ -1736,7 +1736,7 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   from pid 22412, but ... devtools_owner.json says pid 11968 owns this bus`. The detection
   is good and it is exactly what the owner file is for; the problem is that the *first*
   call failed opaquely and the diagnosis only appeared on the retry.
-  - [gather:G-100] status: open | seen: 3 | harness: 0.8.0 | source: gather 2026-08-03
+  - [gather:G-100] status: fixed | fixed-in: by 0.19.0 (dead owner ignored, foreign-instance reply refused, `quit --kill` reaps survivors) - 0.53.0 triage, by reading | seen: 3 | harness: 0.8.0 | source: gather 2026-08-03
   - Improvement: check the owner file before writing the command rather than when reading a
     crossed reply, so the very first call fails with the pid mismatch instead of with an
     empty response the caller has to interpret.
@@ -1764,7 +1764,7 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   (`_target_cell` is never reset). I lost a trace to it before spotting it. The sort's own
   docstring promises stability ("in a stable order so `--args '{\"station\": 1}'` means the
   same thing across calls") — true for stations, which do not move, false for workers.
-  - [gather:G-101] status: open | seen: 1 | harness: 0.8.0 | source: gather 2026-08-03
+  - [gather:G-101] status: wontfix (worker_state is a project verb - 0.53.0 triage, by reading) | seen: 1 | harness: 0.8.0 | source: gather 2026-08-03
   - Improvement: sort walkers by an identity that does not move — `_home_position` when
     anchored, else the placed cell — or have `_worker_report` carry a stable `id` field
     (`get_instance_id()`) so a caller can key on something other than array position. The
@@ -1809,7 +1809,7 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   grepping every writer of `parcels_bought`/`_expand` by hand to find the one path that skips
   the signal. A verb-level "who stocked this region, and when" — even just a frame counter and
   the caller — would have gone from symptom to `_max_out_land` in one call.
-  - [gather:G-104] status: open | seen: 1 | harness: 0.8.0 | source: gather 2026-08-03
+  - [gather:G-104] status: wontfix (island_census is a project verb - 0.53.0 triage, by reading) | seen: 1 | harness: 0.8.0 | source: gather 2026-08-03
   - Improvement: have `LandRegion` record `stocked_at_frame` and `opened_at_frame`, and surface
     both in `island_census`. A region that is open with `stocked_at_frame == -1` is this bug,
     stated rather than inferred.
@@ -1833,7 +1833,7 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   while `Types.Item` spells them `IronOre`/`IronBar`. Nothing in the reply says which
   space it wants, and `list-commands` describes the verb, not its vocabulary. Had to
   read `items/types.gd` and infer the display-name mapping.
-  - [gather:G-106] status: open | seen: 2 | harness: 0.8.0 | source: gather 2026-08-03
+  - [gather:G-106] status: wontfix (give_item's item names are project data (list-commands names the verb's arg keys) - 0.53.0 triage, by reading) | seen: 2 | harness: 0.8.0 | source: gather 2026-08-03
   - Improvement: have the failure reply carry candidates —
     `"no item named 'IronBar' (did you mean 'Iron Bar'?)"` — built from a fuzzy match
     over `GameItems.item_list`. A bare `items` verb listing registered names would
@@ -1846,7 +1846,7 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   `"success": false` where it reads like nothing happened. It also gives no hint where
   a clear 7x5 site does exist, so there is no retry short of walking the player somewhere
   and guessing.
-  - [gather:G-107] status: open | seen: 1 | harness: 0.8.0 | source: gather 2026-08-03
+  - [gather:G-107] status: wontfix (build_demo_world is a project verb - 0.53.0 triage, by reading) | seen: 1 | harness: 0.8.0 | source: gather 2026-08-03
   - Improvement: search for the site first and bail before granting land, or return the
     nearest viable corner in `data` so the caller can `goto_cell` and retry.
 
@@ -1941,7 +1941,7 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   resource. Workaround: read a cell from `berry_bushes`, derive world coords by hand
   (`cell * 16 + (8, 8)`, inferred from an earlier reply's tree position) and
   `set-state --property position`.
-  - [gather:G-113] status: open | seen: 5 | harness: 0.8.0 | source: gather 2026-08-03
+  - [gather:G-113] status: wontfix (goto_resource is a project verb - 0.53.0 triage, by reading) | seen: 5 | harness: 0.8.0 | source: gather 2026-08-03
   - Improvement: fall back to `TileMapHandler.scene_tile_at`/the scene-tile children when
     the atlas map misses, so `goto_resource` covers both representations the way
     `resource_node_census` already does.
@@ -1951,7 +1951,7 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   that process has likely exited`, and `.devtools/launch_stderr.log` was zero bytes, so
   there is nothing to distinguish a crash from a clean exit after the fact. Workaround:
   none needed — the capture was already taken — but the run could not be resumed.
-  - [gather:G-114] status: open | seen: 3 | harness: 0.8.0 | source: gather 2026-08-03
+  - [gather:G-114] status: fixed | fixed-in: 0.31.0 (gh#31: launch's ping timeout reads both launch logs and leads with the real error) - 0.53.0 triage, by reading | seen: 3 | harness: 0.8.0 | source: gather 2026-08-03
   - Improvement: have `launch` record the process exit code to `.devtools/` when the
     child dies, so a later bus failure can say "exited with 0" instead of "likely exited".
 
@@ -2016,7 +2016,7 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   The message is good; the problem is that spawning enough enemies to test against needs
   minutes of game time, so this is two or three calls where the caller thinks in one. Not
   a bug — the bus serves one command at a time and a long block would look like a hang.
-  - [gather:G-118] status: open | seen: 2 | harness: 0.8.0 | source: gather 2026-08-04
+  - [gather:G-118] status: unverified | stale-since: 0.52.0 | seen: 2 | harness: 0.8.0 | source: gather 2026-08-04
   - Improvement: mention the 60s ceiling in the `step-time` row of the CLAUDE.md
     cheat-sheet, so it is read before it is discovered.
 
@@ -2056,7 +2056,7 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   "things only a runtime run can confirm", because the bus is one command/result file pair and
   a recording was live on it. Their lint-and-tests pass proved the file compiled and nothing
   else; every framing, pacing and reach claim came back to the orchestrator unverified.
-  - [gather:G-122] status: open | seen: 1 | harness: 0.8.0 | source: gather 2026-08-04
+  - [gather:G-122] status: wontfix (the project's director-clip skill - 0.53.0 triage, by reading) | seen: 1 | harness: 0.8.0 | source: gather 2026-08-04
   - Improvement: a headless `clip-preview --clip NAME --at 2,6,13,24` that runs the director
     offscreen and writes a handful of PNGs, with no bus and no `--write-movie` pass. Framing
     and reach are most of what a clip author cannot check, and neither needs a window, audio,
@@ -2089,7 +2089,7 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   different distance in each. Three clean dry runs of the `raid` clip were followed by a recording
   whose fight never finished — ten minutes of wall time to learn something a one-minute run could
   have told me.
-  - [gather:G-125] status: open | seen: 1 | harness: 0.8.0 | source: gather 2026-08-04
+  - [gather:G-125] status: wontfix (the project's director-clip skill - 0.53.0 triage, by reading) | seen: 1 | harness: 0.8.0 | source: gather 2026-08-04
   - Improvement: launch dry runs with `--fixed-fps 30` (the workaround used here, and it
     reproduced the failure on the first run). Worth putting in the skill directly, and worth
     `capture_clip.py` growing a `--dry-run` that launches with the recording's flags minus
@@ -2101,7 +2101,7 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   acceptable meant hand-rolling a bash loop and eyeballing eight lines; `demo_state` has no notion
   of "run this clip N times and report the failure rate", and `verify-runs.jsonl` records gate
   runs rather than clip takes.
-  - [gather:G-126] status: open | seen: 1 | harness: 0.8.0 | source: gather 2026-08-04
+  - [gather:G-126] status: wontfix (the project's director-clip notes format - 0.53.0 triage, by reading) | seen: 1 | harness: 0.8.0 | source: gather 2026-08-04
   - Improvement: a `demo_clip --args '{"name":"raid","repeat":8}'` that re-runs in-process and
     returns per-run notes, or a `capture_clip.py --dry-run --repeat N` that prints the rate. Either
     turns "is this clip stable" from a judgement call into a number.
@@ -2126,7 +2126,7 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   days-3..22 reward sum to `(500, 5000)`. Both are the right shape of test, and both are invisible
   until a full `run_tests.gd` — so exploring "what if MAX_PARCELS were 16" is a 40-second round
   trip per candidate rather than a read.
-  - [gather:G-128] status: open | seen: 1 | harness: 0.8.0 | source: gather 2026-08-04
+  - [gather:G-128] status: fixed | fixed-in: 0.36.0 (`_T.assert_margin`: which recorded item sits within the band of a constant) - 0.53.0 triage, by reading | seen: 1 | harness: 0.8.0 | source: gather 2026-08-04
   - Improvement: `run_tests.gd --json` already carries pass/fail; if band assertions also emitted
     the computed value and the bounds, a failing tuning sweep would say "894 not in [372, 1489)"
     instead of a message. That is a convention for `_T.assert_*` (an `assert_between`) more than a
@@ -2177,7 +2177,7 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   (`resources=8 recipes=30 skills=17 quests=14 findings=19`, output byte-identical), which is a
   step that is easy to skip and silent when skipped — a stale committed model would read as
   authoritative balance data.
-  - [gather:G-130] status: open | seen: 2 | harness: 0.8.0 | source: gather 2026-08-05
+  - [gather:G-130] status: wontfix (a project artifact/generator link - 0.53.0 triage, by reading) | seen: 2 | harness: 0.8.0 | source: gather 2026-08-05
   - Improvement: let `devtools_config.json` declare `generated_artifacts: [{script, output}]` and
     have `lint_project.gd` re-run each generator into a temp path and compare, failing when the
     committed output differs. It generalises past this one file — the same shape covers any
@@ -2202,7 +2202,7 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   physics-server question and there is no primitive for it. The workaround is a test that restates
   the bitmask arithmetic, which passes if the arithmetic and the data agree *and I got the
   arithmetic right*.
-  - [gather:G-132] status: open | seen: 1 | harness: 0.8.0 | source: gather 2026-08-05
+  - [gather:G-132] status: unverified | stale-since: 0.52.0 | seen: 1 | harness: 0.8.0 | source: gather 2026-08-05
   - Improvement: a `collides(--node PATH --against PATH)` style helper, or headlessly a
     `PhysicsServer2D`-backed assertion in the runner — `_T.assert_blocked(body_scene, tile_source,
     coords)` that builds a one-tile TileMapLayer in the hosted SubViewport, does a
@@ -2229,7 +2229,7 @@ ids from two projects cannot collide, plus a `source:` back-pointer).
   factor four static predicates out of `player.gd` purely so the rules were reachable at all,
   because `Player` is scene-backed and `_T.instantiate_ui` cannot stand one up — its `@onready`
   fields resolve `../../Systems` and `../../UI`.
-  - [gather:G-134] status: open | seen: 1 | harness: 0.8.0 | source: gather 2026-08-05
+  - [gather:G-134] status: unverified | stale-since: 0.52.0 | seen: 1 | harness: 0.8.0 | source: gather 2026-08-05
   - Improvement: a runner helper that hosts an arbitrary *scene fragment* with stubbed external
     node paths — `_T.instantiate_fragment("res://main.tscn", "World/Player", {"../../Systems": ...})`
     — so a scene-backed node with upward `@onready` paths can be brought up headlessly. Today the
@@ -8307,3 +8307,34 @@ current templates.
 `check_templates.py --stage 4` — OK with the comma-filter control; full `check_templates.py`
 — OK, all stages incl. 5b. `check_real_suite.py ../plant-tower-defense` (run_tests.gd changed) —
 OK: `BEFORE (0.38.0): Total 582 | Passed 582 | exit 0 | 76s`, `AFTER (0.52.0): 582 | 582 | exit 0 | 60s`.
+
+## 2026-08-17 — 0.53.0: loop tick twenty-one — the other half of the triage: gather 40 → 9
+
+Reviewed: 10 open beads, the tracker (0 open), `PURPOSE.md`, both project logs — nothing
+new (sixth quiet tick). Spent on the gather half of bead 970, after first making
+`--triage` print each gap's TITLE beside its id (last tick's own suggestion; without it
+this was forty greps).
+
+- **`upstream_gaps.py --triage` prints the Gap title** beside every row (0.53.0).
+- **gather: 40 open → 9.** By reading against current templates: **9 fixed** with the
+  mechanism and version named (multi-agent verify → `--isolated` buses; `stub_siblings`;
+  `pause`/`--then-pause` for sub-round-trip effects; hyphen dispatch; the stale-instance
+  family; gh#31's launch-log read; the aborted-method scan; `assert_margin` for tuning
+  bands); **16 `wontfix`** with the reason on the line — every one a project-owned verb,
+  fixture, skill or process (`place_station`, `worker_state`, `island_census`,
+  `give_item` item names, `build_demo_world`, `goto_resource`, the director-clip skill ×3,
+  a stash-based A/B, "no runtime pass by instruction"); **6 `unverified`** explicitly
+  (input-press-drives-the-loop, slow-motion screenshots, layout budget, step-time's 60 s
+  cap, collision layer/mask assertion, state-window survival); **9 left open** — 5 of
+  them real, unbuilt harness asks: a headless web-export check (G-013/G-014/G-080, seen
+  4 between them), a seed-sweep / property-test tier (G-089), a contract checker for a
+  fan-out (G-098). Those five are the honest gather backlog.
+- **`open gaps by source` now:** harness 18, gather 9, moving-in 6, plant 3 (+ 9
+  unverified). Two weeks ago the same line read 85 open with gather at 51%; the number
+  is now a backlog rather than an archive.
+
+- Gap: no new gap this turn.
+
+**Validation run this turn:** `record_version.py --record` then `--check` OK at 0.53.0
+(14 files, 58 verbs + 62 CLI). `unittest discover -s tools` — 88 OK.
+`check_templates.py --static-only` — OK (only `upstream_gaps.py` changed under templates/).
