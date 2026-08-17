@@ -525,6 +525,33 @@ Notable behaviors:
   _process, <top-level>` — from `git diff -U0` intersected with the enclosing `func`;
   it never gates and never claims execution. It leaves the reader one `get-state` /
   `run-method` from the answer instead of a 1/1 that reads stronger than it is.
+- **`harness-version --client` names the project's own gaps fixed in releases it does
+  not have** (0.44.0, gh#45). When a newer harness is on the machine the staleness
+  block says `N release(s) behind` (from the newest root's `harness_history.json`) and
+  then reads the project's `log-devtools.md` for open `G-NNN` ids and the newest
+  templates for `<project>:G-NNN` credits (project = `config/name` and the directory
+  name), printing `N gap(s) this project filed (G-…) are credited as fixed in releases
+  it does not have` and, separately, the open ids already credited in the templates it
+  *runs* (`the fix is installed; the log's status line is what is stale`). A version
+  number was a nag on a verb almost nothing calls; `/verify` Phase 0 now runs it and
+  quotes it. On the two live projects at ship time: plant 5 + 12, moving-in 1 + 24.
+- **`verify_ledger.py record` says when a row was recorded AFTER the commit** (0.44.0,
+  gh#44 / plant-tower-defense:G-057). Reach is the diff intersected with what the game
+  loaded; after `git commit` the diff is empty by construction, and the row asserted
+  the benign reading (`a real zero: every changed file is excused`). When the working
+  tree holds no `.gd`/`.tscn` change but `HEAD~1..HEAD` touched some, `record` prints
+  `This row was almost certainly recorded AFTER the commit, which destroys reach`,
+  names the files, and writes `reach.post_commit_suspected: [files]` into the row so
+  it can be told apart afterwards; `reach` prints the same `POST-COMMIT?` note.
+- **`record` names unknown `run.json` keys with the nearest known one, and `record
+  --schema` prints the key set** (0.44.0, gh#46 / plant-tower-defense:G-058). A row
+  was written with `checks: []` from a `run.json` that carried the evidence under
+  `phase4`, and the tool then warned that the evidence was missing — both halves
+  present in one invocation and never meeting. Now: `run.json: ignoring unknown key
+  'phase4' (did you mean 'checks'?) - it is NOT in the row`, via a fixed known-key set
+  plus aliases (`phase4`/`evidence` → `checks`, `notes` → `expected`, `phases` →
+  `runtime`) and `difflib`; a `checks[]` entry with `check` but no `name` is called
+  out too.
 - **`run_tests.gd` clamps physics catch-up to one tick per frame, and the per-test
   `user://` walk is top-level only** (0.43.0, gh#43 — a deterministic segfault on a real
   suite that 0.38.0 passed). Godot catches up on lost real time by running up to

@@ -7811,3 +7811,116 @@ cache last tick is what let the regression be found in an hour instead of a week
 --stage 4` — OK with the new stall control (loose >2, clamped ≤2). `check_templates.py
 --full` — OK, all stages, `interactive_overlap pairs the overlapping A/B (both reachable), skips B once inert by both channels, pairs again with one channel back`, `stage 6 contract: 90/90`. Plant copy (554 tests) under 0.42.0: 554/554 (small user dir),
 554/554 (11 MB user dir).
+
+## 2026-08-17 - Upstreamed 3 open gap(s) from plant-tower-defense (harness 0.18.0, 0.19.0, 0.21.0, 0.23.0, 0.24.0, 0.25.0, 0.32.0, 0.33.0, 0.36.0, 0.38.0)
+
+Pooled by `tools/upstream_gaps.py` from `C:\Users\gotmi\Documents\GitHub\plant-tower-defense\log-devtools.md`. Gap text is the project's,
+verbatim; only the id line is rewritten (qualified with the project name so
+ids from two projects cannot collide, plus a `source:` back-pointer).
+
+- Gap: **nothing documents `pause` as the tool for a deterministic property read.** The
+  verb table sells it as "sets `SceneTree.paused` directly, bus keeps answering — catch a
+  sub-second effect", and `ping`'s note frames the answering-while-paused property as
+  *pause menus are verifiable*. Both are true and neither says the thing that cost me
+  three reads: **a property a `_process` timer mutates cannot be read reliably without
+  freezing the tree first.** I read an empty Label three times and had no way to tell "the
+  row is blank" from "something else is holding the row right now", because a single read
+  of a moving value carries no evidence that it was moving.
+  - [plant-tower-defense:G-056] status: fixed | fixed-in: 0.44.0 | seen: 1 | harness: 0.38.0 | source: plant-tower-defense 2026-08-16 | dup-of: gh#44
+  - Note: re-checked against 0.42.0 before filing and NARROWED. 0.42.0 does state
+    the idea for `step-time --then-pause` ("so the read that follows carries no
+    ambient drift") -- attached to stepping, not stated as a general rule about
+    reading. Filing the un-narrowed version would have been a false alarm.
+
+- Gap: **`verify_ledger.py record` reports a post-commit row as "a real zero".**
+  Recorded this cycle's row after committing and got `reached 0/0 changed file(s) -
+  a real zero: every changed file is excused from the denominator`. reach is the
+  diff intersected against what the game loaded, so after a commit it is empty by
+  construction -- and the tool asserts the benign reading of an ambiguity it cannot
+  resolve. "Nothing was in scope" and "the evidence was committed away" are opposite
+  claims and the row cannot be told apart afterwards.
+  - [plant-tower-defense:G-057] status: fixed | fixed-in: 0.44.0 | seen: 1 | harness: 0.38.0 | source: plant-tower-defense 2026-08-16 | dup-of: gh#44
+  - Improvement: when the reach denominator is 0, check whether the working tree is
+    clean while HEAD just touched the run's files, and say so instead of glossing it.
+    Failing that, write `reach: null` with a reason -- honest beats reassuring.
+  - Improvement: one line in the Gotchas list — `**A single read of a timer-driven
+    property is not a measurement.** Anything a `_process`/`_physics_process` timer
+    mutates should be read after `pause` (the bus answers while paused), or with
+    `step-time --then-pause`. An unexpected value read live is ambiguous between "wrong"
+    and "mid-transition", and the read itself cannot tell you which.` It belongs beside
+    the existing "A run that never changes is broken, not passing" entry, which is the
+    same lesson pointing the other way.
+
+- Gap: **`verify_ledger record` silently discards unrecognised keys in `run.json`, then
+  reports the discarded evidence as missing.** I passed Phase 4 evidence under `phase4`
+  (with `check`/`result` entries). `record` accepted it without a word, wrote the row with
+  `checks: []`, and printed:
+
+  ```
+  verify_ledger: warranted with no Phase 4 checks recorded - the claim that earned it is
+  not in the row
+  ```
+
+  Both halves of the information were present in the same invocation and never met. `tier`,
+  `phases` and `notes` were dropped the same way. The warning is good and it is what made
+  me look; what it cannot do is say *you supplied this under the wrong name*.
+  - [plant-tower-defense:G-058] status: fixed | fixed-in: 0.44.0 | seen: 1 | harness: 0.38.0 | source: plant-tower-defense 2026-08-17 | dup-of: gh#46
+  - Process note, recorded because it nearly cost something: I wrote the issue's
+    Environment line claiming the code was unchanged at 0.42.0 BEFORE checking it,
+    then checked. It holds (`checks = run.get("checks") or []` at 0.42.0:1031, and
+    no unknown-key handling anywhere in that file). But the order was wrong, and
+    the whole reason skill-feedback-issue demands a re-check is that a stale claim
+    in a public issue is the most common way this loop wastes a maintainer's time.
+  - Improvement: on unknown top-level keys, name them and suggest the nearest known one —
+    `run.json: ignoring unknown key 'phase4' (did you mean 'checks'?)`. The known-key set
+    is already in the code that normalises the row; this is a set difference and a
+    `difflib.get_close_matches` call. Silent key-dropping in a file whose entire purpose
+    is to be a record is the same class as the `reach 0/0` gloss in gh#44: the tool has
+    the information needed to be unambiguous and states the convenient reading instead.
+
+## 2026-08-17 — 0.44.0: loop tick twelve — the tool knows and says the convenient thing
+
+Reviewed: 13 open beads, three NEW issues (gh#44, gh#45, gh#46), `PURPOSE.md`, both
+project logs (three new plant gaps, all arriving with `dup-of:` set — G-056/G-057 → gh#44,
+G-058 → gh#46 — so intake reconciled itself). Two reporters, one shape, named by one of
+them: *the harness knows a thing is ambiguous and reports the benign reading of it.*
+gh#44.1 (a post-commit row glossed as "a real zero"), gh#46 (a misnamed key dropped and
+then reported as missing), gh#45 (a version number printed as a nag when the tool could
+name the reporter's own fixed gaps).
+
+- **[gh#44.1 / plant G-057 — fixed] `record` and `reach` say when the row was recorded
+  AFTER the commit.** Working tree holds no `.gd`/`.tscn` change but `HEAD~1..HEAD`
+  touched some → `This row was almost certainly recorded AFTER the commit, which
+  destroys reach`, files named, `reach.post_commit_suspected` in the row. Unit-tested
+  on a real scratch git repo (dirty code → not suspected; committed → suspected, row
+  carries it). Phase 5 in `/verify` now says "before the commit, because reach is
+  computed from the diff".
+- **[gh#46 / plant G-058 — fixed] `record` names unknown `run.json` keys with the
+  nearest known one** (`'phase4' (did you mean 'checks'?)`, `'notes' → 'expected'`;
+  a `checks[]` entry with `check`/no `name` is called out), and **`record --schema`**
+  prints the key set. Unit-tested end to end.
+- **[gh#45 — fixed] `harness-version --client` names the project's own open gaps
+  credited as fixed in releases it does not have**, plus a `N release(s) behind` count,
+  plus — the half the reporter did not ask for and the more common case — the open
+  gaps already credited in the templates the project *runs* (fix installed; log line
+  stale). Read-only run against the two live checkouts: plant `5 release(s) behind`,
+  5 not-have (G-050..G-054), 12 stale-in-log; moving-in `7 behind`, 1 not-have
+  (G-058), 24 stale-in-log. `/verify` Phase 0 runs and quotes it. Unit-tested with a
+  fake project + fake newer root (config/name and dir name both searched).
+- **[gh#44.2 / plant G-056 — fixed] the Gotcha:** *a single read of a timer-driven
+  property is not a measurement* — beside "a run that never changes is broken, not
+  passing", the same lesson pointing the other way.
+
+**PURPOSE.md gained the commitment** "When the tool cannot tell two states apart, it says so — it never prints the benign one", in the reporter's own words.
+
+**Considered and not done:** rewriting the "a real zero" phrasing itself — it is still
+right when neither condition holds, and the new line prints instead of it in the
+suspect case; a `--dry-run` for `record`; the bus-side beads (unchanged).
+
+- Gap: no new gap this turn.
+
+**Validation run this turn:** `record_version.py --record` then `--check` OK at 0.44.0
+(14 files, 57 verbs + 60 CLI). `unittest discover -s tools` — 82 OK (4 new).
+`check_templates.py` — OK, all stages (`dev_tools.gd` stamp-only since 0.43.0's
+`--full`). `run_tests.gd` unchanged this tick, so no real-suite run (per CLAUDE.md the
+rule is for changes around/between tests).

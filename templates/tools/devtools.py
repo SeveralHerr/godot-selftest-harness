@@ -89,11 +89,11 @@ from pathlib import Path
 from typing import Optional  # noqa: F401
 
 
-# harness-version: 0.43.0
+# harness-version: 0.44.0
 # Version of the godot-selftest-harness this client was copied from. Compared against
 # the running game's own stamp by the `harness-version` verb, so a half-refreshed
 # install (new client, old autoload) is visible instead of mysterious.
-HARNESS_VERSION = "0.43.0"
+HARNESS_VERSION = "0.44.0"
 
 COMMANDS_FILE = "devtools_commands.json"
 RESULTS_FILE = "devtools_results.json"
@@ -2403,6 +2403,111 @@ def _plugin_versions_on_this_machine() -> dict:
     return out
 
 
+def _plugin_roots_on_this_machine() -> dict:
+    """{source key: (version, root Path)} for every harness root disk can prove
+    (gh#45, 0.44.0) - the same three sources as _plugin_versions_on_this_machine,
+    with the directory, so the newest one's templates can be read."""
+    out = {}
+    root = os.environ.get("CLAUDE_PLUGIN_ROOT")
+    if root:
+        v = _read_plugin_json_version(Path(root) / ".claude-plugin" / "plugin.json")
+        if v:
+            out["plugin_root"] = (v, Path(root))
+    home = Path(os.environ.get("USERPROFILE") or os.environ.get("HOME") or Path.home())
+    plugins = home / ".claude" / "plugins"
+    try:
+        installed = json.loads((plugins / "installed_plugins.json").read_text(encoding="utf-8"))
+        for key, entries in (installed.get("plugins") or {}).items():
+            if not key.startswith("godot-selftest-harness@"):
+                continue
+            best = None
+            for e in entries or []:
+                if _version_tuple(e.get("version")) and e.get("installPath"):
+                    if best is None or _version_tuple(e["version"]) > _version_tuple(best[0]):
+                        best = (e["version"], Path(e["installPath"]))
+            if best:
+                out["plugin_cache"] = best
+    except (OSError, ValueError, AttributeError):
+        pass
+    mp = plugins / "marketplaces" / "godot-selftest-harness"
+    v = _read_plugin_json_version(mp / ".claude-plugin" / "plugin.json")
+    if v:
+        out["marketplace"] = (v, mp)
+    return out
+
+
+_LOG_OPEN_GAP_RE = re.compile(r"^\s*-\s*\[(G-\d+[a-z]?)\]\s*status:\s*open\b", re.M)
+
+
+def _project_gap_names(project_path: Path):
+    """The names a project's gaps are credited under upstream: `config/name` from
+    project.godot and the checkout's directory name (either may be the one the pool
+    used)."""
+    names = {project_path.name}
+    try:
+        text = (project_path / "project.godot").read_text(encoding="utf-8", errors="replace")
+        m = re.search(r'^config/name="([^"]*)"', text, re.M)
+        if m and m.group(1).strip():
+            names.add(m.group(1).strip())
+    except OSError:
+        pass
+    return sorted(n for n in names if n)
+
+
+def fixed_upstream_for_project(project_path: Path, newest_root: Path):
+    """The project's still-OPEN gap ids (from its own log-devtools.md) that the newest
+    templates on this machine credit by name in their source (gh#45, 0.44.0).
+
+    Fixes credit the reporting project's id in a comment (`# moving-in:G-060: ...`),
+    which is machine-readable; a project pinned at 0.36.0 verified fixes against the
+    harness it RUNS for eleven cycles and could not find any, by construction. Returns
+    (ids fixed only in the newer templates, ids already credited in the templates the
+    project runs, [names searched]); empty when the log or templates are unreadable.
+    """
+    names = _project_gap_names(project_path)
+    log = project_path / "log-devtools.md"
+    try:
+        open_ids = set(_LOG_OPEN_GAP_RE.findall(log.read_text(encoding="utf-8", errors="replace")))
+    except OSError:
+        return [], [], names
+    if not open_ids:
+        return [], [], names
+    pats = [re.compile(r"\b%s:(G-\d+[a-z]?)\b" % re.escape(n)) for n in names]
+
+    def credits_under(*dirs):
+        found = set()
+        for d in dirs:
+            if not d.is_dir():
+                continue
+            for f in list(d.rglob("*.py")) + list(d.rglob("*.gd")) + list(d.rglob("*.md")):
+                try:
+                    text = f.read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    continue
+                for pat in pats:
+                    found.update(pat.findall(text))
+        return found
+
+    newest = credits_under(newest_root / "templates")
+    # The templates the project already RUNS: a credit there is a fix it has, so its
+    # log's status line is stale, not its install.
+    installed = credits_under(project_path / "addons" / "godot_selftest", project_path / "tools")
+    order = lambda g: (len(g), g)
+    return (sorted(open_ids & (newest - installed), key=order),
+            sorted(open_ids & installed, key=order), names)
+
+
+def _releases_behind(project_version: str, newest_root: Path):
+    """How many recorded releases sit between the project's version and the newest,
+    from the newest root's harness_history.json; None when unreadable."""
+    try:
+        hist = json.loads((newest_root / "harness_history.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    pv = _version_tuple(project_version)
+    return sum(1 for v in hist if _version_tuple(v) > pv)
+
+
 def _read_plugin_json_version(path: Path):
     try:
         return str(json.loads(path.read_text(encoding="utf-8")).get("version") or "") or None
@@ -2410,7 +2515,7 @@ def _read_plugin_json_version(path: Path):
         return None
 
 
-def _print_plugin_staleness(project_version: str) -> None:
+def _print_plugin_staleness(project_version: str, project_path: "Path | None" = None) -> None:
     """One line per source this machine has, and a verdict against the project."""
     avail = _plugin_versions_on_this_machine()
     if not avail:
@@ -2421,9 +2526,30 @@ def _print_plugin_staleness(project_version: str) -> None:
         f"{labels[k]} {avail[k]}" for k in ("plugin_root", "plugin_cache", "marketplace") if k in avail))
     newest = max(avail.values(), key=_version_tuple)
     if _version_tuple(newest) > _version_tuple(project_version):
+        # gh#45: a version number is a nag; a release count and the project's OWN
+        # gap ids credited in the newer templates are a reason to act.
+        roots = _plugin_roots_on_this_machine()
+        newest_root = None
+        for v, r in roots.values():
+            if v == newest:
+                newest_root = r
+                break
+        behind = _releases_behind(project_version, newest_root) if newest_root else None
+        gap = f" - {behind} release(s) behind" if behind else ""
         print(f"  A newer harness ({newest}) is already on this machine than this project "
-              f"runs ({project_version}). /scaffold-godot-harness refreshes it; gaps you log "
+              f"runs ({project_version}){gap}. /scaffold-godot-harness refreshes it; gaps you log "
               f"against {project_version} may be fixed there already.", file=sys.stderr)
+        if newest_root is not None:
+            fixed, stale, names = fixed_upstream_for_project(
+                project_path or Path(".").resolve(), newest_root)
+            if fixed:
+                print(f"  {len(fixed)} gap(s) this project filed ({', '.join(fixed)}) are credited "
+                      f"as fixed in releases it does not have (searched {newest}'s templates for "
+                      f"{', '.join(names)}:G-*). Run /scaffold-godot-harness.", file=sys.stderr)
+            if stale:
+                print(f"  {len(stale)} open gap(s) in this project's log ({', '.join(stale)}) are "
+                      f"already credited in the templates it RUNS - the fix is installed; the "
+                      f"log's status line is what is stale.", file=sys.stderr)
 
 
 def _warn_shared_user_dir(user_dir: Path, project_path: Path) -> None:
@@ -2472,7 +2598,7 @@ def _harness_version_offline(project_path: Path, as_json: bool, why: str) -> int
             print("Game:      unknown - the bridge is cold, so the RUNNING build was "
                   "not asked.")
             print(f"  ({why})", file=sys.stderr)
-        _print_plugin_staleness(installed or HARNESS_VERSION)
+        _print_plugin_staleness(installed or HARNESS_VERSION, project_path)
     if installed is not None and installed != HARNESS_VERSION:
         print(f"\nWARNING: half-refreshed install - the addon on disk is {installed} "
               f"and this client is {HARNESS_VERSION}. Re-run /scaffold-godot-harness.",
@@ -2534,7 +2660,7 @@ def cmd_harness_version(args, project_path: Path):
         ext = data.get("extension_loaded")
         suffix = "" if ext is None else (", extension loaded" if ext else ", no extension")
         print(f"Verbs:   {data['handlers']} registered{suffix}")
-    _print_plugin_staleness(str(game_version))
+    _print_plugin_staleness(str(game_version), project_path)
 
     if game_version != HARNESS_VERSION:
         print(f"\nWARNING: half-refreshed install - the game is on {game_version} and this "

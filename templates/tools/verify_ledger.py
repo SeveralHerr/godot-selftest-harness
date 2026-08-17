@@ -144,10 +144,39 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
-# harness-version: 0.43.0
-HARNESS_VERSION = "0.43.0"
+# harness-version: 0.44.0
+HARNESS_VERSION = "0.44.0"
 
 LEDGER_PATH = Path(".devtools") / "verify-runs.jsonl"
+
+# The keys `record` reads from run.json (gh#46). Anything else is reported as
+# ignored, by name, with the nearest known key. Keep this in step with cmd_record.
+RUN_JSON_KEYS = {
+    "value", "verdict", "checks", "found", "expected", "cheaper_alternative",
+    "lint", "tests", "runtime", "duration_s", "harness",
+}
+RUN_JSON_ALIASES = {"phase4": "checks", "phase_4": "checks", "evidence": "checks",
+                    "notes": "expected", "note": "expected", "result": "verdict",
+                    "outcome": "verdict", "phases": "runtime"}
+RUN_JSON_SCHEMA = """run.json keys `verify_ledger.py record --run` reads (everything else is
+reported as ignored and is NOT written to the row):
+
+  value                warranted | overkill | insufficient | inconclusive
+  verdict              pass | partial | fail | unknown  (downgraded to partial on a
+                       blocked check)
+  checks               [{"name": str, "result": "pass"|"fail"|"blocked", ...}]  - the
+                       Phase 4 evidence; `warranted` with no checks is downgraded
+  found                [] means "nothing, and I am saying so"; a list of findings else
+  expected             free text: what the run set out to prove
+  cheaper_alternative  free text: what would have answered this without the harness
+  lint / tests         the gate summaries (any JSON)
+  runtime              {"scene": ..., "fps": ..., ...}  (any JSON; entry_point dropped)
+  duration_s           number
+  harness              version string (default: this tool's)
+
+Reach (worktree/branch, changed files, sha, branch, ts) is DERIVED, never read from
+run.json. Record the row BEFORE committing: reach is computed from the diff.
+"""
 
 # Extensions whose reach we can actually establish from a scene-tree snapshot: a .gd
 # shows up as a node's `script`, a .tscn as an instanced node's `scene_file`. Anything
@@ -253,6 +282,26 @@ def changed_worktree(root):
 
 _FUNC_RE = re.compile(r"^\s*(?:static\s+)?func\s+([A-Za-z_]\w*)\s*\(")
 _HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
+
+
+def post_commit_suspected(root, worktree):
+    """gh#44 / plant-tower-defense:G-057 (0.44.0): the reach denominator is empty of
+    code because the diff was already committed away, not because nothing was in
+    scope. Reach is the diff intersected with what the game loaded; after `git
+    commit` the diff is empty by construction and the row used to assert the benign
+    reading ("a real zero: every changed file is excused"). Returns the reachable-
+    suffix files HEAD's own commit touched when the working tree holds none, else [].
+    Those two states mean opposite things and cannot be told apart from the row
+    afterwards, so the row must say which one it is."""
+    if worktree is None:
+        return []
+    if any(Path(p).suffix.lower() in REACHABLE_SUFFIXES for p in worktree):
+        return []
+    head_touched = _git(root, "diff", "--name-only", "HEAD~1", "HEAD")
+    if not head_touched:
+        return []
+    return sorted(_norm(p) for p in head_touched.splitlines()
+                  if p.strip() and Path(p).suffix.lower() in REACHABLE_SUFFIXES)
 
 
 def changed_functions(root, files, base=None):
@@ -970,6 +1019,9 @@ def _restrict_to_about(changed, about):
 
 
 def cmd_record(args, root):
+    if getattr(args, "schema", False):
+        print(RUN_JSON_SCHEMA.rstrip())
+        return 0
     run = _load_run(args)
     if run is None:
         return 1
@@ -1028,7 +1080,38 @@ def cmd_record(args, root):
     sha = _git(root, "rev-parse", "--short", "HEAD")
     branch = _git(root, "rev-parse", "--abbrev-ref", "HEAD")
 
+    # gh#44: an empty code denominator with HEAD having just touched code files is
+    # almost certainly a row recorded AFTER the commit. Say so, in the row too.
+    late = post_commit_suspected(root, worktree) if reach_obj is not None else []
+    if late and not (reach_obj.get("worktree") or {}).get("reached"):
+        reach_obj["post_commit_suspected"] = late
+        print("verify_ledger: reach 0 code file(s) in the working tree, but HEAD (%s) just "
+              "touched %d: %s. This row was almost certainly recorded AFTER the commit, "
+              "which destroys reach - the row carries `post_commit_suspected` naming them, "
+              "and its 0/0 must NOT be read as 'nothing was in scope'. Record the row while "
+              "the work is still uncommitted next time (Phase 5 lands before the commit)."
+              % ((sha or "").strip() or "?", len(late), ", ".join(late)), file=sys.stderr)
+
+    # gh#46 / plant-tower-defense:G-058: a key the normaliser does not read is data
+    # LOST from a file whose only purpose is to be a record. Name it, and the
+    # nearest key it might have meant, instead of dropping it and then warning
+    # that the evidence is missing.
+    unknown = sorted(set(run) - RUN_JSON_KEYS)
+    if unknown:
+        import difflib
+        for k in unknown:
+            near = difflib.get_close_matches(k, sorted(RUN_JSON_KEYS), n=1, cutoff=0.5)
+            hint = " (did you mean %r?)" % near[0] if near else ""
+            if k in RUN_JSON_ALIASES:
+                hint = " (did you mean %r?)" % RUN_JSON_ALIASES[k]
+            print("verify_ledger: run.json: ignoring unknown key %r%s - it is NOT in the row. "
+                  "`record --schema` prints the keys this reads." % (k, hint), file=sys.stderr)
+
     checks = run.get("checks") or []
+    for i, c in enumerate(checks):
+        if isinstance(c, dict) and "check" in c and "name" not in c:
+            print("verify_ledger: run.json: checks[%d] has 'check' but no 'name' - the "
+                  "reported name is read from 'name'" % i, file=sys.stderr)
     found, found_note = _normalize_found(run.get("found"))
     if found_note:
         print("verify_ledger: %s" % found_note, file=sys.stderr)
@@ -1213,6 +1296,13 @@ def cmd_reach(args, root):
     print("worktree (this session's edits - the honest number): " + _reach_line(w))
     print("branch   (all commits since base - dilutes as the branch grows): "
           + _reach_line(b))
+    late = post_commit_suspected(root, worktree)
+    if late and not (w.get("reached") or []):
+        print("POST-COMMIT? the working tree holds no code change but HEAD just touched %d "
+              "code file(s): %s. Reach is computed from the diff, so a row recorded now "
+              "cannot score this change - if that commit is the work being verified, the "
+              "0/0 above is the evidence committed away, not 'nothing in scope' (gh#44)."
+              % (len(late), ", ".join(late)))
     if u.get("changed_unavailable"):
         # Deliberately printed instead of the `insufficient` warning below, not as well
         # as it. "I cannot tell" and "nothing was reached" are different claims and the
@@ -1572,6 +1662,8 @@ def main():
                         "miss nor a silent free credit. Repeatable.")
     p.add_argument("--run", metavar="FILE",
                    help="JSON object of this run's results. Default: read stdin.")
+    p.add_argument("--schema", action="store_true",
+                   help="Print the run.json keys this reads and exit (gh#46)")
     p.set_defaults(func=cmd_record)
 
     p = sub.add_parser("reach", help="Compute reach without recording a run")

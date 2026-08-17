@@ -521,6 +521,87 @@ class UserstateUnmatchedAndBridgeOwnedCase(unittest.TestCase):
         self.assertIn("no snapshot to restore", buf.getvalue())
 
 
+class PostCommitAndUnknownKeysCase(unittest.TestCase):
+    """gh#44.1 / plant G-057: a row recorded after the commit says so; gh#46 / plant
+    G-058: unknown run.json keys are named with the nearest known one."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        for cmd in (["git", "init", "-q"], ["git", "config", "user.email", "t@t"],
+                    ["git", "config", "user.name", "t"]):
+            subprocess.run(cmd, cwd=self.root, check=True)
+        (self.root / "project.godot").write_text("[application]\n", encoding="utf-8")
+        (self.root / "game.gd").write_text("extends Node\n", encoding="utf-8")
+        subprocess.run(["git", "add", "-A"], cwd=self.root, check=True)
+        subprocess.run(["git", "commit", "-qm", "base"], cwd=self.root, check=True)
+        (self.root / "game.gd").write_text("extends Node\nvar x := 1\n", encoding="utf-8")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_dirty_code_is_not_post_commit_and_committed_code_is(self):
+        wt = verify_ledger.changed_worktree(self.root)
+        self.assertEqual(verify_ledger.post_commit_suspected(self.root, wt), [])
+        subprocess.run(["git", "commit", "-qam", "the change"], cwd=self.root, check=True)
+        (self.root / "log-devtools.md").write_text("notes\n", encoding="utf-8")  # non-code leftover
+        wt = verify_ledger.changed_worktree(self.root)
+        self.assertEqual(verify_ledger.post_commit_suspected(self.root, wt), ["game.gd"])
+
+    def test_record_names_unknown_keys_and_the_post_commit_row(self):
+        subprocess.run(["git", "commit", "-qam", "the change"], cwd=self.root, check=True)
+        (self.root / ".devtools").mkdir()
+        (self.root / ".devtools" / "tree.json").write_text(json.dumps(
+            {"success": True, "data": {"nodes": [{"path": "/root/Main", "script": "res://game.gd"}]}}),
+            encoding="utf-8")
+        run = {"value": "warranted", "phase4": [{"check": "x", "result": "pass"}], "notes": "n",
+               "found": []}
+        (self.root / "run.json").write_text(json.dumps(run), encoding="utf-8")
+        proc = subprocess.run(
+            [sys.executable, str(REPO / "templates" / "tools" / "verify_ledger.py"), "record",
+             "--scene-tree", ".devtools/tree.json", "--run", "run.json"],
+            cwd=self.root, capture_output=True, text=True)
+        err = proc.stderr
+        self.assertIn("ignoring unknown key 'phase4' (did you mean 'checks'?)", err)
+        self.assertIn("ignoring unknown key 'notes' (did you mean 'expected'?)", err)
+        self.assertIn("recorded AFTER the commit", err)
+        row = json.loads((self.root / ".devtools" / "verify-runs.jsonl").read_text(encoding="utf-8").splitlines()[-1])
+        self.assertEqual(row["reach"]["post_commit_suspected"], ["game.gd"])
+        self.assertNotIn("phase4", row)
+
+    def test_schema_prints_the_key_set(self):
+        proc = subprocess.run(
+            [sys.executable, str(REPO / "templates" / "tools" / "verify_ledger.py"), "record", "--schema"],
+            cwd=self.root, capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0)
+        for k in sorted(verify_ledger.RUN_JSON_KEYS):
+            self.assertIn(k, proc.stdout)
+
+
+class FixedUpstreamCase(unittest.TestCase):
+    """gh#45: the project's own open gap ids credited in newer templates are named."""
+
+    def test_splits_not_have_from_already_installed(self):
+        with tempfile.TemporaryDirectory() as td:
+            proj = Path(td) / "moving-in"
+            (proj / "addons" / "godot_selftest").mkdir(parents=True)
+            (proj / "tools").mkdir()
+            (proj / "project.godot").write_text('[application]\nconfig/name="Moving In"\n', encoding="utf-8")
+            (proj / "log-devtools.md").write_text(
+                "- [G-001] status: open | seen: 1\n- [G-002] status: fixed | fixed-in: 0.30.0\n"
+                "- [G-003] status: open | seen: 2\n- [G-004] status: open | seen: 1\n", encoding="utf-8")
+            (proj / "tools" / "devtools.py").write_text("# moving-in:G-003: old fix, installed\n", encoding="utf-8")
+            newest = Path(td) / "cache" / "0.44.0"
+            (newest / "templates" / "tools").mkdir(parents=True)
+            (newest / "templates" / "tools" / "verify_ledger.py").write_text(
+                "# moving-in:G-001: fixed here\n# moving-in:G-002: also\n# Moving In:G-004: by config name\n"
+                "# moving-in:G-003: still credited\n", encoding="utf-8")
+            fixed, stale, names = devtools.fixed_upstream_for_project(proj, newest)
+        self.assertEqual(names, ["Moving In", "moving-in"])
+        self.assertEqual(fixed, ["G-001", "G-004"])   # open, credited only upstream
+        self.assertEqual(stale, ["G-003"])            # open, credited in what it runs
+
+
 class ChangedFunctionsCase(unittest.TestCase):
     """gh#38 / moving-in:G-060: the changed functions inside a reached file."""
 

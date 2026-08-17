@@ -112,6 +112,19 @@ sessions have converged on one checkout and edited it at once (H-061), so a rele
 re-reads `git status` immediately before it commits, and a fan-out never runs a
 repo-wide git command — untracked work has no copy anywhere else (H-052).
 
+**When the tool cannot tell two states apart, it says so — it never prints the benign
+one.** The reporter of gh#44 named the shape better than this file had: "the harness
+knows a thing is ambiguous and reports the benign reading of it." A `reach 0/0` after a
+commit was glossed *"a real zero: every changed file is excused"* when the diff had been
+committed away; a `run.json` key the normaliser did not read was dropped and the row
+then warned the evidence was missing; a version number was printed as a nag when the
+tool could name the reporter's own fixed gaps. In each the tool held both halves of
+the answer and printed the reassuring one. The rule is the same as "failures must be
+loud" one level down: an ambiguity the tool can see is reported *as* an ambiguity —
+both readings, and what would resolve it — and if it can be resolved from disk (a
+`git diff HEAD~1`, a set difference, a grep of the newer templates) it is resolved
+before it is printed.
+
 **A verification run leaves the developer's state as it found it.** `--isolated`
 isolates the bus and only the bus; `user://` is the game's, and a verb that behaves
 correctly — `capture()` rebinding a key, `bank_score()` filing a run — persists there
