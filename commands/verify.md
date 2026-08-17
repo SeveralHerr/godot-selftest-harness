@@ -53,7 +53,18 @@ Read the installed revision once, up front — Phase 6 needs it for the `harness
 
 ```bash
 grep -m1 'harness-version:' tools/lint_project.gd   # works without a running game
+"$PY" tools/devtools.py harness-version --client     # never opens the bus; compares against the machine
 ```
+
+**Quote the second command's `Machine:` block in the report when it says a newer harness
+is on this machine.** It prints how many releases behind this install is and — the line
+that matters — which of *this project's own* open gaps are credited as fixed in
+releases it does not have (`N gap(s) this project filed (G-…) are credited as fixed in
+releases it does not have … Run /scaffold-godot-harness`), and which open gaps in the
+project's log are already credited in the templates it runs (the fix is installed; the
+log's status line is stale). A project pinned at 0.36.0 verified fixes against the
+harness it *runs* for eleven cycles and could not find any, by construction (gh#45).
+Do not spend a cycle reproducing a gap the line names as fixed; refresh first.
 
 Once the game is up (Phase 2), `"$PY" tools/devtools.py harness-version` reports the addon's version and the client's. A non-zero exit there means the two halves are on different versions — a half-refreshed install — and the fix is to re-run `/scaffold-godot-harness`.
 
@@ -616,7 +627,7 @@ Three things are no longer scored as misses, and each is printed by name so you 
 
 So `reached 1/4` with three annotated credits is not a bad run, and a 100% line built on aliases is not the same evidence as one built on observation. Quote the line as printed rather than reducing it to a fraction.
 
-Then append this run to the ledger. **Writing `run.json` and running `record` are one step, not two — if you wrote `run.json` you MUST run `record` in the same breath**, in the same command block; a summary written from a `run.json` that never reached the ledger is a row lost forever. Write the results you have into a JSON object and hand it over; everything else — timestamp, sha, branch, changed files, and reach — is derived, not asked for:
+Then append this run to the ledger — **before the commit, because reach is computed from the diff**: a row recorded after `git commit` scores 0/0 with the evidence committed away, and `record` says so (`recorded AFTER the commit`, `post_commit_suspected` in the row) rather than glossing it as "nothing in scope" (gh#44). `record --schema` prints the `run.json` keys it reads; a key it does not read is named as ignored with the nearest known one (`phase4` → `checks`), never silently dropped (gh#46). **Writing `run.json` and running `record` are one step, not two — if you wrote `run.json` you MUST run `record` in the same breath**, in the same command block; a summary written from a `run.json` that never reached the ledger is a row lost forever. Write the results you have into a JSON object and hand it over; everything else — timestamp, sha, branch, changed files, and reach — is derived, not asked for:
 
 ```bash
 cat > .devtools/run.json <<'EOF'

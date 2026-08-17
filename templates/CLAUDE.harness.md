@@ -233,6 +233,13 @@ bus — use it for a log entry's `harness:` field), `cmd <verb>`.
   `position`/`scale`/`rotation` on container children, so a scale animation on a
   `VBoxContainer` child is invisible to a property read while working on screen.
 - **A run that never changes is broken, not passing.** Check the `status` field.
+- **A single read of a timer-driven property is not a measurement.** Anything a
+  `_process`/`_physics_process` timer, tween or message queue mutates is read after
+  `pause` (the bus answers while paused), or with `step-time --then-pause`. An
+  unexpected value read live is ambiguous between "wrong" and "mid-transition", and the
+  read cannot tell you which; reading it again is not a second opinion if both reads
+  land in the same transition. (`pause`'s reply names the `PROCESS_MODE_ALWAYS` nodes
+  it does not freeze.)
 - **`performance` FPS is a mean over a window** (`--frames N`, default 30, with min/max
   and `STILL SETTLING` when the halves disagree). Read after `wait-frames 60`+ past a
   settings change; a single frame's rate is not a measurement. Its `Total nodes …
