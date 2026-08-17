@@ -8687,3 +8687,60 @@ against the wrong owner). Plant still pinned at 0.38.0.
 **Validation run this turn:** `record_version.py --record` then `--check` OK at 0.57.0
 (14 files, 59 verbs + 63 CLI). `unittest discover -s tools` — 91 OK. `check_templates.py
 --full` — first run FAILED two later rows (the new check's Go press had incremented the fixture's `presses`, so batch and the run_method contract row read one more than they expected - the check now resets it); second run OK, all stages, `press reports +0 nodes / 1 handler on Go, NOTHING connected on the planted dead button, +1 nodes added …/Spawned on the adder`, `stage 6 contract: 98/98`. `run_tests.gd` unchanged.
+
+## 2026-08-17 - Upstreamed 1 open gap(s) from plant-tower-defense (harness 0.18.0, 0.19.0, 0.21.0, 0.23.0, 0.24.0, 0.25.0, 0.32.0, 0.33.0, 0.36.0, 0.38.0)
+
+Pooled by `tools/upstream_gaps.py` from `C:\Users\gotmi\Documents\GitHub\plant-tower-defense\log-devtools.md`. Gap text is the project's,
+verbatim; only the id line is rewritten (qualified with the project name so
+ids from two projects cannot collide, plus a `source:` back-pointer).
+
+- Gap: **`verify_ledger record` has no way to say a check was about a PICTURE.** Four cycles
+  running the decisive runtime evidence has been a screenshot judged by eye — the husk pips
+  (88), the flight tip's width (90), the legend's five swatches (91), the armed bracket's
+  weight (95). Each is recorded as a `checks` entry with `"result": "pass"` and a prose note,
+  which is indistinguishable in the row from an assertion that ran.
+  That matters for the ledger's own purpose. `stats` counts passes; it cannot separate "a
+  gate returned 0" from "a person looked at a PNG and was satisfied", and the second is the
+  one that does not survive being wrong. It is also the only kind of check this project
+  cannot re-run — the artefact is in `user://screenshots/` and the row does not name it.
+  - [plant-tower-defense:G-070] status: fixed | fixed-in: 0.58.0 | dup-of: gh#56 | seen: 1 | harness: 0.38.0 | source: plant-tower-defense 2026-08-17
+  - Improvement: an optional `"evidence"` field on a `checks` entry carrying the artefact
+    path, plus a `"judged": "eye"` marker distinguishing a human verdict from a mechanical
+    one. Then `stats` can report "N of M runs rest on a judged check", which is a number
+    worth watching in a project whose most player-facing work is exactly the work no
+    assertion covers. The screenshots already have stable paths; nothing is being asked to
+    exist that does not.
+  - Note: no other gaps this turn.
+
+  - [G-070] status: open | seen: 1 | harness: 0.54.0 | upstream: gh#56 | note: reconciled
+    against the installed 0.54.0 before filing. `evidence` exists at
+    `templates/tools/verify_ledger.py:170` but only as an ALIAS for the whole `checks`
+    array (`RUN_JSON_ALIASES`), not as a per-check artefact path, and there is no `judged`
+    concept anywhere in the file. Filed with the four-cycle table (88, 90, 91, 95) as the
+    evidence, since one screenshot-judged check is a habit and four in a row is a ratio.
+
+## 2026-08-17 — 0.58.0: loop tick twenty-six — the check nobody can re-run
+
+Reviewed: 8 open beads, one NEW issue (gh#56), `PURPOSE.md`, both project logs (plant
+G-070, the twin; and a success note that arrived minted as a gap). Plant still pinned at
+0.38.0.
+
+- **[gh#56 / plant G-070 — fixed] `checks[].judged: "eye"` and `checks[].artifact`;
+  `stats` prints `judged: N of M runs rest on at least one check decided by eye`.** Four
+  cycles in a row on plant had their decisive runtime evidence be a screenshot judged by
+  eye, recorded honestly, and byte-shaped exactly like a gate's pass — the ledger is
+  careful about this family everywhere else (reach, evidence, tier (d)) and this was the
+  one member without a mechanism. `record` warns when an eye-judged check names no
+  artifact. Unit-tested.
+- **`upstream_gaps.py`: an id-less `Gap:` entry whose body says "no gap here" is an
+  absence marker**, not a gap — a project's note that the `blocked` downgrade worked as
+  designed ("nothing was missing, and here is the mechanism that caught me being sloppy")
+  arrived minted, and it is the more useful entry when it is true. Re-pooled: one gap,
+  not two. Unit-tested both ways (an entry WITH its own id line is kept).
+
+- Gap: no new gap this turn.
+
+**Validation run this turn:** `record_version.py --record` then `--check` OK at 0.58.0
+(14 files, 59 verbs + 63 CLI). `unittest discover -s tools` — 94 OK (3 new).
+`check_templates.py --static-only` — OK (only `verify_ledger.py` and `upstream_gaps.py`
+under templates/; the ledger stages ran).

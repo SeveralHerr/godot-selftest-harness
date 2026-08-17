@@ -688,6 +688,17 @@ class ReachRegressionCase(unittest.TestCase):
         self.assertIn("REACH REGRESSION: 0.10.0 reaches 0%", out)
         self.assertIn("against 0.9.0's 100%", out)
 
+    def test_eye_judged_checks_are_counted_with_artifacts(self):
+        # gh#56: a check a person decided from a picture is counted, and so are artifacts.
+        rows = [self._row("0.9.0", ["a.gd"], []) for _ in range(2)]
+        rows[0]["checks"] = [{"name": "pips countable", "result": "pass", "judged": "eye",
+                              "artifact": "user://screenshots/x.png"},
+                             {"name": "gate", "result": "pass"}]
+        rows[1]["checks"] = [{"name": "swatches distinct", "result": "pass", "judged": "eye"}]
+        out = self._stats(rows)
+        self.assertIn("judged: 2 of 2 runs rest on at least one check decided by eye (2 such check(s), 1 with an artifact", out)
+        self.assertNotIn("judged:", self._stats([self._row("0.9.0", ["a.gd"], [])]))
+
     def test_no_flag_on_thin_or_flat_data(self):
         rows = [self._row("0.9.0", ["a.gd"], []) for _ in range(3)] + [self._row("0.10.0", [], ["a.gd"])]
         self.assertNotIn("REACH REGRESSION", self._stats(rows))
