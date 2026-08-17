@@ -105,12 +105,15 @@ real scaffolded project and report the count.
 synchronous `user://` walk between tests; three releases passed `--full` and every unit
 test, and the first real suite to run it segfaulted — the stall changed how many physics
 ticks the next test's settle frames delivered, and a node that frees itself on a tick
-count did. For any change to what `run_tests.gd` does *between* or *around* tests, copy
-a sibling project with a tick-sensitive suite to the scratchpad (set BOTH
-`use_custom_user_dir=true` and `custom_user_dir_name`), install the working tree's
-templates with `tools/scaffold_install.py full`, run its `run_tests.py`, and quote the
-`Total:` line in the release entry. Four minutes a side; `plant-tower-defense` is the
-one that has caught it.
+count did. For any change to what `run_tests.gd` does *between* or *around* tests, run
+**`python tools/check_real_suite.py ../plant-tower-defense`** (0.46.0): it copies the
+sibling to a scratch dir (never touching it — another session's tree), sets BOTH
+`use_custom_user_dir=true` and `custom_user_dir_name`, runs the suite as the project
+ships it (BEFORE), installs the working tree's templates, runs it again (AFTER), and
+exits 1 on fewer passes / more failures / a worse exit, 2 when either side verified
+nothing (`Total 0` / exit 2 is never a baseline — its own first run printed OK over
+exactly that, and was corrected). Quote both lines in the release entry. Eight minutes;
+`--baseline-total N --baseline-passed M` skips the BEFORE run when you already have it.
 
 Run it before committing any change under `templates/`, alongside
 `python tools/record_version.py --check`. Say plainly which you actually ran — "templates

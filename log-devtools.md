@@ -2467,7 +2467,7 @@ the instrument existed and had 52 real rows in it. The bad news is what it said.
   run from one that has never been invoked outside its own documentation, which means "we
   added a verb" cannot currently be told apart from "we improved the harness". Related to
   the single-source problem below.
-  - [H-027] status: open | seen: 1 | harness: 0.10.0
+  - [H-027] status: fixed | fixed-in: 0.46.0 (devtools.py verb-usage) | seen: 1 | harness: 0.10.0
   - Improvement: have the bridge append `{verb, ts}` to a rotating counter file per
     session, and a `verb-usage` subcommand that reports never-invoked verbs. Cheap, and it
     turns the growth of the surface area into something with a denominator.
@@ -7800,7 +7800,7 @@ cache last tick is what let the regression be found in an hour instead of a week
 - Gap: **the loop's gate cannot see runner timing.** A real suite's tick-sensitive
   tests are the only instrument, and there is no step that runs one. Real output:
   gh#43's `3 runs out of 3` against `check_templates: OK`.
-  - [H-070] status: open | seen: 1 | harness: 0.42.0
+  - [H-070] status: fixed | fixed-in: 0.46.0 (tools/check_real_suite.py) | seen: 1 | harness: 0.42.0
   - Improvement: a `tools/check_real_suite.py <project>` that copies a sibling project
     to scratch (custom user dir set correctly — the 0.37.0 trap), installs the working
     tree's templates, runs `run_tests.py`, and compares `Total:` against the project's
@@ -8028,3 +8028,46 @@ is still a bead.
 (14 files, 57 verbs + 60 CLI). `unittest discover -s tools` — 84 OK (2 new).
 `check_templates.py --full` — OK, all stages, `baseline lives at res://.devtools/ (committable)`, `stage 6 contract: 90/90`. `run_tests.gd` unchanged this tick (no
 real-suite run needed).
+
+## 2026-08-17 — 0.46.0: loop tick fourteen — quiet again, so the two instruments the loop kept wishing for
+
+Reviewed: 13 open beads, the tracker (0 open), `PURPOSE.md`, both project logs — nothing
+new. Second quiet tick. Two backlog items got built, both instruments rather than
+features, both things this loop had been doing by hand.
+
+- **[H-070 — fixed] `tools/check_real_suite.py <sibling>`.** Copies the sibling to
+  scratch (never the sibling itself), sets BOTH custom-user-dir keys, runs the suite as
+  shipped (BEFORE), installs the working tree's templates, runs again (AFTER), exits 1
+  on a regression. **It caught itself three times before it worked**, each a lesson
+  this repo already had written down: (1) its first run printed `real suite OK … 0/0
+  passed both times` over two `exit 2` runs — the exact "success over nothing" shape
+  PURPOSE forbids; now `Total 0` / exit 2 on either side is exit 2 (BEFORE) or exit 1
+  (AFTER), never OK. (2) The exit 2 was its own doing: argparse `nargs=REMAINDER` had
+  swallowed the script's own `--godot PATH` into the passthrough and forwarded it to
+  `run_tests.gd`, which refused it — the same argparse shape moving-in G-049 hit in
+  0.37.0. Now it splits on a literal `--` itself and passes the binary via `$GODOT_BIN`
+  with nothing but `-p`, because the *project's* wrapper may be older than this one
+  and refuse an option it never had. (3) The cause sat two layers down in a tail the
+  script did not print; it prints the tail now. Real run on plant: `BEFORE (0.38.0):
+  Total 561 | Passed 560 | Failed 1 | exit 1 | 69s`, `AFTER (0.46.0): 561 | 560 | 1 |
+  exit 1 | 55s` — the one failure is the project's own, present on both sides. Wired
+  into CLAUDE.md and the release skill: required whenever `run_tests.gd` changes.
+- **[H-027 — fixed] `devtools.py verb-usage`** — a count per verb from the bridge's own
+  `devtools_log.jsonl`, generic/project told apart, and `generic verbs never called
+  here: N of M`. Read-only against both live projects: plant 8,295 commands, moving-in
+  4,653; the same seven verbs top both (`run_method`, `get_state`, `set_state`,
+  `get_node_bounds`, `ping`, `scene_tree`, `find_nodes`); 22 of 57 generic verbs never
+  called on moving-in. **Nothing trimmed** — every generic verb has a gap behind it and
+  the tail is a 3D/2D split as much as disuse — but the number is a command now.
+
+**On the bus-side beads (batch verb, wedged handler, reach-regression stats):** the
+usage data says the bus is used heavily (13k commands across two projects) and
+narrowly (seven verbs carry most of it). A batch verb would serve exactly that top
+seven; it is the one bus-side bead the data now argues *for*. Left open, noted.
+
+- Gap: no new gap this turn.
+
+**Validation run this turn:** `record_version.py --record` then `--check` OK at 0.46.0
+(14 files, 57 verbs + 61 CLI). `unittest discover -s tools` — 84 OK. `check_templates.py`
+— OK, all stages (`dev_tools.gd` stamp-only). `check_real_suite.py ../plant-tower-defense`
+— OK, lines above.

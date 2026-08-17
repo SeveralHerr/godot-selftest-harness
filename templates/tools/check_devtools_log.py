@@ -54,8 +54,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-# harness-version: 0.45.0
-HARNESS_VERSION = "0.45.0"
+# harness-version: 0.46.0
+HARNESS_VERSION = "0.46.0"
 
 DEFAULT_LOG_FILES = ["log-devtools.md"]
 

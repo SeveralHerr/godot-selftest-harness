@@ -89,11 +89,11 @@ from pathlib import Path
 from typing import Optional  # noqa: F401
 
 
-# harness-version: 0.45.0
+# harness-version: 0.46.0
 # Version of the godot-selftest-harness this client was copied from. Compared against
 # the running game's own stamp by the `harness-version` verb, so a half-refreshed
 # install (new client, old autoload) is visible instead of mysterious.
-HARNESS_VERSION = "0.45.0"
+HARNESS_VERSION = "0.46.0"
 
 COMMANDS_FILE = "devtools_commands.json"
 RESULTS_FILE = "devtools_results.json"
@@ -2301,6 +2301,84 @@ def _list_commands_offline(args, project_path: Path):
         print(f"  project: no extension script at {ext_res}")
     print("  args: keys the handler reads (args.get/has/[]), scanned from source - "
           "a key not listed is silently ignored by that verb.")
+
+
+def verb_usage_counts(log_path: Path):
+    """{verb: count} of `Executing: <verb>` lines in a bridge log (H-027, 0.46.0)."""
+    counts = {}
+    try:
+        with log_path.open(encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue
+                msg = str(rec.get("message") or rec.get("msg") or "")
+                if msg.startswith("Executing:"):
+                    parts = msg.split()
+                    if len(parts) > 1:
+                        verb = parts[1].strip(":,")
+                        counts[verb] = counts.get(verb, 0) + 1
+    except OSError:
+        return None
+    return counts
+
+
+def cmd_verb_usage(args, project_path: Path):
+    """Which verbs this project's sessions actually call (bus verb: none; H-027).
+
+    Reads the game's own `user://devtools_log.jsonl` (every `Executing: <verb>` line
+    the bridge wrote, across every session that shared the log) and prints a count
+    per verb, most-used first, with generic verbs and project verbs told apart by the
+    installed scripts' register_command() names. Never opens the bus. The question
+    it answers is the harness's own: which of the ~57 generic verbs earn their place,
+    and which does this project reach for that the harness could learn from.
+    """
+    try:
+        user_dir = get_user_data_path(project_path)
+    except FileNotFoundError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(2)
+    log_path = Path(args.log) if getattr(args, "log", None) else user_dir / LOG_FILE
+    counts = verb_usage_counts(log_path)
+    if counts is None:
+        print(f"verb-usage: no bridge log at {log_path} - nothing has been executed over "
+              "this project's bus on this machine (or the log was cleared).", file=sys.stderr)
+        sys.exit(2)
+    generic, project_verbs = set(), set()
+    try:
+        generic = set(_scan_registered(project_path / "addons" / "godot_selftest"))
+        project_verbs = set(_scan_registered(project_path / "devtools_ext"))
+    except Exception:
+        pass
+    total = sum(counts.values())
+    if args.json:
+        print(json.dumps({"log": str(log_path), "total": total, "counts": counts,
+                          "generic": sorted(generic), "project": sorted(project_verbs)}, indent=2))
+        return
+    print(f"verb-usage: {total} command(s) across {len(counts)} verb(s) in {log_path}")
+    ranked = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    for verb, n in ranked[: args.top]:
+        kind = "generic" if verb in generic else ("project" if verb in project_verbs else "?")
+        print(f"  {n:6d}  {verb:<24} {kind}")
+    if len(ranked) > args.top:
+        print(f"  ... and {len(ranked) - args.top} more; --top N to widen")
+    unused = sorted(generic - set(counts))
+    if generic:
+        print(f"generic verbs never called here: {len(unused)} of {len(generic)}"
+              + (f" ({', '.join(unused[:20])}{', ...' if len(unused) > 20 else ''})" if unused else ""))
+
+
+def _scan_registered(root: Path):
+    names = []
+    if not root.is_dir():
+        return names
+    for f in root.rglob("*.gd"):
+        try:
+            names.extend(re.findall(r'register_command\("(\w+)"', f.read_text(encoding="utf-8", errors="replace")))
+        except OSError:
+            continue
+    return names
 
 
 def cmd_list_commands(args, project_path: Path):
@@ -4704,6 +4782,16 @@ def main():
     p.set_defaults(func=cmd_cmd)
 
     # list-commands - discover registered verbs
+    p = subparsers.add_parser(
+        "verb-usage",
+        help="Count the verbs this project's sessions have actually called (from the "
+             "bridge's own log; never opens the bus)")
+    p.add_argument("--top", type=int, default=40, help="Rows to print (default 40)")
+    p.add_argument("--log", metavar="FILE", default=None,
+                   help="A devtools_log.jsonl to read instead of this project's user:// one")
+    p.add_argument("--json", "-j", action="store_true", help="Output raw JSON")
+    p.set_defaults(func=cmd_verb_usage)
+
     p = subparsers.add_parser("list-commands", help="List all registered verbs")
     p.add_argument("--json", "-j", action="store_true", help="Output raw JSON")
     p.add_argument("--offline", action="store_true",

@@ -525,6 +525,18 @@ Notable behaviors:
   _process, <top-level>` — from `git diff -U0` intersected with the enclosing `func`;
   it never gates and never claims execution. It leaves the reader one `get-state` /
   `run-method` from the answer instead of a 1/1 that reads stronger than it is.
+- **`verb-usage`** (0.46.0, H-027) — reads the game's own `user://devtools_log.jsonl`
+  (every `Executing: <verb>` line the bridge wrote, across every session that shared
+  the log) and prints a count per verb, most-used first, `generic` / `project` told
+  apart by the installed scripts' `register_command()` names, then `generic verbs never
+  called here: N of M (…)`. Never opens the bus; `--log FILE` reads another log,
+  `--json` for the raw counts. The question is the harness's own — which of the ~57
+  generic verbs earn their place — and at ship time the two live projects answered:
+  8,295 + 4,653 commands, `run_method` / `get_state` / `set_state` / `get_node_bounds`
+  / `ping` / `scene_tree` / `find_nodes` the top seven on both, 22 of 57 generic verbs
+  never called on one of them (`pause`, `contained_in`, `input_sequence`, `curve`, …).
+  Nothing was trimmed on that evidence — every generic verb has a gap behind it — but
+  the number is now one command away instead of a hand-written parser.
 - **Findings baselines live in the project's `.devtools/`, not `user://`** (0.45.0,
   gh#48 / moving-in:G-066). `findings --baseline-write` and `validate-ui
   --baseline-write` write `res://.devtools/ui_findings_baseline.json` and
@@ -1216,7 +1228,7 @@ node-bounds, save-ui-baseline, ui-snapshot-diff, tilemap-cells,
 tilemap-region, scripts-seen, canvas-scale, set-resolution,
 find-nodes, press, raycast, sample-pixels, reachable-ui, aabb, look-at, new-uid,
 mouse-move, reload, first-frame, fire-entry-point, project-settings, contained-in,
-restore-userstate
+restore-userstate, verb-usage
 ```
 
 `new-uid` is the one subcommand that never touches the bus — see below.
