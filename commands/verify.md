@@ -94,10 +94,18 @@ done
 **Then ask the question that actually decides anything — would refreshing LOSE something?**
 
 ```bash
-"$PY" tools/devtools.py harness-drift; echo "exit=$?"    # 0 lossless, 1 would lose, 2 could not tell
+# From the PLUGIN, never from tools/devtools.py. The installed client is frozen at the
+# version this project was scaffolded with, and `harness-drift` only exists from 0.63.0
+# on - so on exactly the stale installs that need this answer, the project's own copy
+# answers `invalid choice: 'harness-drift'`. Every consumer project measured on
+# 2026-08-20 was between 20 and 53 releases behind; not one could have run it.
+"$PY" "${CLAUDE_PLUGIN_ROOT}/templates/tools/devtools.py" --project . harness-drift
+echo "exit=$?"                              # 0 lossless, 1 would lose, 2 could not tell
 ```
 
-This is the one to run first, and usually the only one needed. The bearing below tells you
+This is the one to run first, and usually the only one needed. It reads files and never
+opens the bus, so it works against a project whose harness is ancient, half-installed, or
+not running. The bearing below tells you
 a file has local edits; it does not tell you *what* they are or whether the newer release
 already contains them, and that is where a decision stalls. A real project read
 `hash in NO released version -> project has local edits`, correctly declined to refresh

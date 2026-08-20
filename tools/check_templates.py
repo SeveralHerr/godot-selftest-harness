@@ -1290,7 +1290,69 @@ def stage_names(scratch, godot, cache):
     ok = check_engine_skew(scratch, cache) and ok
     ok = check_require_compile(scratch, godot, cache) and ok
     ok = check_harness_drift(scratch) and ok
+    ok = check_adoption_report(scratch) and ok
     return ok
+
+
+def check_adoption_report(scratch):
+    """H-081: `tools/adoption.py` reports what consumers RUN, and distinguishes three
+    states that a naive version folds into two.
+
+    The plant here is the bug the first version actually had: a project whose
+    `dev_tools.gd` carries no version stamp got `behind = None`, and `None` is falsy, so
+    it printed **"up to date"** for the OLDEST thing in the table. A reassuring,
+    well-formed answer for the one state that is not reassuring - the failure this repo
+    exists to prevent, committed by the tool written to measure it.
+
+    Builds a fake sibling set rather than reading the real ones: the real projects move
+    under this check, and a gate whose expected output changes when someone else commits
+    is a gate that gets ignored.
+    """
+    fake = scratch / "adoption_fixture"
+    def plant(name, stamp):
+        d = fake / name / "addons" / "godot_selftest"
+        d.mkdir(parents=True, exist_ok=True)
+        body = "extends Node\n"
+        if stamp:
+            body += 'const HARNESS_VERSION: String = "%s"\n' % stamp
+        (d / "dev_tools.gd").write_text(body, encoding="utf-8")
+        return fake / name
+
+    old_proj = plant("fixture_old", "0.10.0")
+    unstamped = plant("fixture_unstamped", None)
+    proc = subprocess.run(
+        [sys.executable, str(REPO_ROOT / "tools" / "adoption.py"),
+         str(old_proj), str(unstamped)],
+        capture_output=True, text=True, timeout=120)
+    if proc.returncode != 0:
+        return fail("adoption.py must always exit 0 (it reports, it does not gate), "
+                    "got %d:\n%s%s" % (proc.returncode, proc.stdout[-800:], proc.stderr[-800:]))
+    out = proc.stdout
+    if "behind" not in out:
+        return fail("a 0.10.0 install must be reported as behind:\n%s" % out)
+    # The planted defect: an unstamped install must NOT read as up to date.
+    if "up to date" in out:
+        return fail("an unstamped dev_tools.gd must never read as 'up to date' - it "
+                    "predates the stamp and is the OLDEST state here:\n%s" % out)
+    if "UNKNOWN" not in out:
+        return fail("an unstamped install must be named as version UNKNOWN, a third "
+                    "state, not folded into either of the other two:\n%s" % out)
+    if "NO version stamp" not in out:
+        return fail("the summary must name the unstamped project(s):\n%s" % out)
+
+    # And "I looked nowhere" must not print as "nobody is behind".
+    empty = scratch / "adoption_empty"
+    empty.mkdir(parents=True, exist_ok=True)
+    blank = subprocess.run(
+        [sys.executable, str(REPO_ROOT / "tools" / "adoption.py"), str(empty)],
+        capture_output=True, text=True, timeout=60)
+    if "0 of 0" in blank.stdout or ("behind" in blank.stdout and "0 of" in blank.stdout):
+        return fail("a project with no harness must not be summarised as a clean "
+                    "adoption table:\n%s" % blank.stdout)
+    print("stage 2.5 adoption: adoption.py reports a 0.10.0 install as behind, an "
+          "UNSTAMPED one as version UNKNOWN rather than 'up to date' (the bug the first "
+          "version had), names it in the summary, and always exits 0")
+    return True
 
 
 def check_harness_drift(scratch):

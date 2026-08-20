@@ -89,11 +89,11 @@ from pathlib import Path
 from typing import Optional  # noqa: F401
 
 
-# harness-version: 0.63.0
+# harness-version: 0.64.0
 # Version of the godot-selftest-harness this client was copied from. Compared against
 # the running game's own stamp by the `harness-version` verb, so a half-refreshed
 # install (new client, old autoload) is visible instead of mysterious.
-HARNESS_VERSION = "0.63.0"
+HARNESS_VERSION = "0.64.0"
 
 COMMANDS_FILE = "devtools_commands.json"
 RESULTS_FILE = "devtools_results.json"
@@ -2945,7 +2945,19 @@ def cmd_harness_drift(args, project_path: Path):
               "a scaffolded project?" % len(DRIFT_FILES), file=sys.stderr)
         sys.exit(2)
 
-    print(f"Installed: {installed_version or 'unreadable'}   Newest on this machine: {version}")
+    # Which copy of the client is ANSWERING, beside what the project has installed.
+    # These are routinely different and it matters: this subcommand exists only from
+    # 0.63.0, so on the stale installs that most need the answer it has to be run from
+    # the plugin. Printing one version without the other invites the reader to assume
+    # they are the same, which is the case that cannot happen here.
+    running_from = "the plugin" if HARNESS_VERSION != installed_version else "this project"
+    print(f"Installed here: {installed_version or 'unreadable (no harness in this project?)'}"
+          f"   Newest on this machine: {version}")
+    print(f"Answered by:    devtools.py {HARNESS_VERSION} ({running_from})")
+    if installed_version and _version_tuple(installed_version) < _version_tuple(version):
+        behind = _releases_behind(installed_version, newest_root)
+        if behind:
+            print(f"This install is {behind} release(s) behind {version}.")
     if base_where:
         print(f"Base for comparison: {installed_version} templates from the {base_where} - "
               "so a line upstream merely REWROTE is not counted as a local edit.")
