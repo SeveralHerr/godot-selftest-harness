@@ -195,7 +195,18 @@ they read it" — and if not, the tool's job is to have kept the way back open.
 **A fix is delivered when the project runs it, not when it ships.** The gaps log
 feeds this repo, and this repo feeds the projects back only through
 `/scaffold-godot-harness`; a project stays on the version it was scaffolded with until
-someone re-runs that. Two real projects sat on 0.21.0 and 0.25.0 through a day in which
+someone re-runs that. **And a project that has patched the harness has no path back
+unless the tool computes one** — the sharper version of the same problem, learned the
+expensive way. A refresh overwrites addon-owned files, so a local patch is a *reason* to
+decline it, and the drift audit could say only *"hash in NO released version → local
+edits"*. Declining was the correct read. One project did exactly that, having
+hand-patched an exported-build guard, and then went on declining for **25 releases**
+after that guard shipped upstream — nothing recomputes the answer, so a temporary lag
+became a permanent one and the project filed gaps against bugs that were long fixed. So
+the tool answers the decision instead of describing the state: `harness-drift` compares
+content three ways — this install, the newest templates, and the version this install
+was scaffolded from — and says what a refresh would actually remove, which is usually
+nothing. Two real projects sat on 0.21.0 and 0.25.0 through a day in which
 0.26.0–0.31.0 shipped, and roughly half the gaps they pooled upstream that evening had
 been fixed releases earlier — real friction, faithfully logged, against a bug that no
 longer existed. So the tool says so from where the project stands: `harness-version`

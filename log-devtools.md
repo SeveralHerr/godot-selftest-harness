@@ -9655,7 +9655,7 @@ phantom regression; and pooling moved into §0a, ahead of choosing the work.
   also the field's weakest point: "no mechanical check exists" is unfalsifiable, and if it
   becomes the habitual value the check degrades into a spelling exercise. Recording it now,
   at the moment the mechanism ships, rather than discovering it in ten releases.
-  - [H-077] status: open | seen: 1 | harness: 0.62.0
+  - [H-077] status: fixed | fixed-in: 0.63.0 | verified-by: tools/test_record_version.py::ClosuresAreEvidenced::test_prose_only_closures_are_counted_separately, and the ratio prints on every --check OK line | seen: 1 | harness: 0.62.0
   - Improvement: count them. `record_version.py --check` already knows every closure in
     the current version; it could report `N of M closures evidenced by a re-runnable
     check, K by prose` as a denominator on the OK line, so the ratio is visible per
@@ -9741,3 +9741,153 @@ changed by its two version-stamp lines and nothing else (`git diff` quoted: only
 `# harness-version:` and `HARNESS_VERSION`), so nothing about what the runner does
 between or around tests moved. Saying which gates ran matters more than the count of
 them.
+
+## 2026-08-20 — 0.63.0: loop tick thirty-one — the refresh nobody could risk
+
+Reviewed: 10 ready beads, 2 open issues (gh#64 held open on purpose, gh#67 filed by the
+last tick against this repo's own release skill), `PURPOSE.md`, and both project logs.
+Pooled first: **nothing new from plant for the second tick running** — 38 open,
+unchanged. That absence turned out to be the finding, not a quiet week.
+
+**plant is 25 releases behind, and the reason is a question this repo could not
+answer.** It runs **0.38.0** while shipping 0.63.0, and it is not dormant — its recent
+log entries are sophisticated work (a citation checker, a bead ledger, drift recovery
+from a worktree). It is not refreshing. The reason is in its own log, and it was
+correct: a drift audit reported `addons/godot_selftest/dev_tools.gd LOCAL EDITS -- hash
+in NO released version`, so refreshing would have reverted a hand-patched
+exported-build guard, without which `entry_hook` skips the title screen for every
+itch.io player. Declining was right. **Then that same guard shipped upstream in 0.61.0
+and nothing recomputed the answer** — the next audit prints the identical line, so the
+project declines again, forever. A temporary lag became a permanent one, and in the
+meantime it filed gaps against bugs that were fixed twenty releases ago.
+
+- **[H-080 — fixed] `harness-drift`: what would a refresh actually REMOVE?** No bus, no
+  game, no engine. The bearing line says a file has local edits; it cannot say what they
+  are or whether the newer release already contains them, and that is precisely where
+  the decision stalls. This compares **content, not hashes**, and **three ways**: a line
+  is a local edit only when the install has it, the newest templates do not, *and the
+  version this install was scaffolded from did not either*.
+  That third term is the whole feature. Without it, every line a newer release merely
+  reworded reads as something the project typed — measured on plant, the two-way version
+  reported **70 at-risk lines in `dev_tools.gd`**; with the 0.38.0 base subtracted it
+  reports **8**, and those 8 are exactly the hand-patch. Across the install it moves
+  from `8 lossless / 6 at risk` to **`12 lossless / 2 at risk`**. The base comes from the
+  plugin cache or, failing that, the plugin root's git history (`--grep "^release X.Y.Z"`,
+  since releases are not tagged); when neither has it, the reply **says so** and calls the
+  count an upper bound rather than quietly printing the two-way number as if it were the
+  answer.
+  One more bridge, because a line comparison structurally cannot cross it: where the
+  at-risk lines cite an issue id that the newest templates also cite, it adds
+  `NOTE: 0.62.0 also references #58. The behaviour these lines add may already be
+  upstream in different code`. On plant that note lands on the gh#58 patch and stays
+  silent on `verify_ledger.py`'s 213 lines of genuinely local work — which is the correct
+  split. Stated as a lead to check, never as a verdict: a shared id proves the subject
+  matches, not that the fix does.
+  Exit `0` lossless, `1` would lose something, `2` could not tell — and `2` is a state,
+  not a rounding of `0`.
+
+**`PURPOSE.md`** gained the corollary. "A fix is delivered when the project runs it, not
+when it ships" already covered the lag; what it did not say is that **a project which has
+patched the harness has no path back unless the tool computes one**, so the lag stops
+being temporary. That is a different claim and it earned its place the expensive way.
+
+- **[H-077 — fixed] The `verified-by:` ratio is reported per release.** Filed against my
+  own mechanism one tick ago: `prose only - no mechanical check exists` is a legal value
+  for a documentation fix and is unfalsifiable, so if it becomes the habitual one the
+  H-020 check degrades into a spelling exercise. No single entry can show that; only the
+  ratio can. `--check` now prints `N gap closure(s) in X.Y.Z evidenced (A by a re-runnable
+  check, B by prose)`.
+- **[gh#67.1/.2/.3 — fixed] The release skill's three remaining defects**, filed by the
+  last tick: the real-corpus rule now names `lint_project.gd` explicitly and says
+  **copy, never run in place** — a sibling is another session's live tree, and 0.62.0
+  wrote a stray file into `../plant-tower-defense/tools/` out of habit before catching
+  it; §4 now documents the `verified-by:` field that `--check` has been *enforcing*
+  since 0.62.0 without the skill mentioning it; and §3 warns that running a gate from
+  the wrong cwd makes the `&&` chain stop early while a trailing `echo` reports exit 0,
+  which silently skipped a five-minute run last tick.
+
+**Not done, and both stay open for the same reasons as last tick:** [H-071] (the export
+stage — this machine has 4.6.1 templates against a 4.7.1 binary, so the stage could only
+ever print SKIP, and a SKIP-only stage puts a reassuring line in the log) and
+[H-072]/gh#64 (call-site resolution, blocked on the real-corpus gate). The corpus gate
+itself was **scoped this tick and deliberately not built**: `harness-drift` was the
+larger and more urgent piece of the same problem — a tool that cannot tell a project
+what it is safe to do — and splitting the tick would have shipped two half-things.
+
+- Gap: **nothing measures whether a project ACTS on what the harness tells it.**
+  `harness-drift` answers the refresh question well, and this entry claims that will
+  unstick plant — a claim with no evidence behind it, since the only way to know is
+  whether plant's installed version changes. Every improvement in this log is scored on
+  whether it was implemented, never on whether it was adopted, and a 25-release lag is
+  what that blind spot looks like from the outside.
+  - [H-081] status: open | seen: 1 | harness: 0.63.0
+  - Improvement: record the installed version of each known sibling project in the
+    release log, one line, per release — `plant 0.38.0, moving-in 0.25.0` — so adoption
+    is a visible series rather than something noticed 25 releases late. `harness-drift`
+    already reads the stamp; pointing it at the siblings and printing a table is a small
+    script, and it makes "did the fix land" answerable the same way `stats` makes
+    "was the run worth it" answerable.
+
+
+### Ids opened and closed in 0.63.0
+
+- Gap: **the drift audit could not say whether a refresh would LOSE anything**, so a
+  project that had patched the harness had no path back and stayed 25 releases behind
+  after the patch it was protecting shipped upstream. Source: plant-tower-defense's own
+  refresh audit (2026-08-20), read back against its installed 0.38.0.
+  - [H-080] status: fixed | fixed-in: 0.63.0 | verified-by: check_templates.py
+    check_harness_drift() - lossless on a pristine install (exit 0), exit 1 QUOTING a
+    planted local line, exit 2 (not 0) with no plugin root to compare against - plus
+    tools/test_devtools_client.py::RefreshSafetyCase (8 cases, including the pair that
+    MEASURES the three-way improvement: the same input reads as a local edit two-way and
+    as ordinary staleness three-way) | seen: 1 | harness: 0.62.0
+
+- Gap: **the release skill's real-corpus rule omitted `lint_project.gd`, never said
+  copy-never-in-place, and §4 predated the `verified-by:` field `--check` was already
+  enforcing.** Source: this repo, filed upstream as gh#67 after 0.62.0 wrote a stray
+  file into a sibling checkout.
+  - [H-082] status: fixed | fixed-in: 0.63.0 | upstream: gh#67 | verified-by: prose only - the skill is
+    instructions, not code, and nothing executes it (see [H-077]'s ratio) | seen: 1 | harness: 0.62.0
+
+**Validation run this turn:** `record_version.py --record` then `--check` OK at 0.63.0
+(14 files, 60 verbs + **65 CLI**, `3 gap closure(s) in 0.63.0 evidenced (2 by a
+re-runnable check, 1 by prose)` — the H-077 ratio reporting on its own release).
+`unittest discover -s tools` — **116 OK** (14 new: 8 for refresh safety, 1 for the prose
+ratio, plus the 5 updated for the new return shape). `check_templates.py --full` — OK,
+0 FAIL, `stage 6 contract: 104/104`, and the new line:
+
+```
+stage 2.5 drift: harness-drift reports LOSSLESS on a pristine install (exit 0), flips to
+exit 1 QUOTING a planted local line, and exits 2 - not 0 - when there is no plugin root
+to compare against
+```
+
+**Measured against the real project it was built for** (plant, installed 0.38.0, newest
+0.62.0 at the time of the run):
+
+```
+Base for comparison: 0.38.0 templates from the plugin cache
+14 shipped file(s) compared: 0 identical, 12 stale but LOSSLESS to refresh,
+  2 carry local line(s) not in 0.62.0.
+AT RISK  addons/godot_selftest/dev_tools.gd - would remove 8 line(s) ...
+  NOTE: 0.62.0 also references #58. The behaviour these lines add may already be
+  upstream in different code
+AT RISK  tools/verify_ledger.py - would remove 213 line(s) ...
+```
+
+The two-way version of the same run reported **6 files at risk and 70 lines in
+`dev_tools.gd`**; the three-way reports **2 and 8**, and the 8 are the hand-patch
+itself. That difference is the feature.
+
+**Gates that do NOT apply this turn, stated rather than skipped silently:**
+`check_real_suite.py` — `run_tests.gd` changed by its two version-stamp lines and
+nothing else (`git diff` checked). A real-corpus static-analysis run — `lint_project.gd`
+likewise changed by stamps only, and no static-analysis template was touched. The one
+new CLI command is covered by the stage above plus 8 unit tests.
+
+One correction made while writing this entry, worth recording because it is the same
+class of defect the release is about: the closure line for gh#67 was first written as
+`- [gh#67] status: fixed | ...`, and `gh#N` is **not** an id in either documented
+namespace (`H-NNN`, `<project>:G-NNN`). `--check` silently did not count it — a status
+line that nothing will ever read. Re-filed as `[H-082] ... | upstream: gh#67`, at which
+point the closure count went 2 → 3 and the prose count 0 → 1.

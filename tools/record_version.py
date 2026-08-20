@@ -241,7 +241,7 @@ def check_closures_are_evidenced(version, log_path=None):
     for m in _GAP_STATUS_RE.finditer(text):
         latest[m.group(1)] = (m.group(2).lower().rstrip("|").strip(), m.group(3),
                               text.count("\n", 0, m.start()) + 1)
-    closed_here, unevidenced = [], []
+    closed_here, unevidenced, prose = [], [], []
     for gid, (status, rest, line_no) in sorted(latest.items()):
         if not status.startswith("fixed"):
             continue
@@ -250,6 +250,12 @@ def check_closures_are_evidenced(version, log_path=None):
         closed_here.append(gid)
         if "verified-by:" not in rest:
             unevidenced.append("%s (log-devtools.md:%d)" % (gid, line_no))
+        elif "prose only" in rest.lower():
+            # H-077: "no mechanical check exists" is a legal value for a documentation
+            # fix and is unfalsifiable, so if it becomes the habitual one the whole
+            # check degrades into a spelling exercise. No single entry can show that -
+            # only the ratio can - so the ratio is what gets printed.
+            prose.append(gid)
     if unevidenced:
         return ([
             "log-devtools.md: %d gap(s) closed in %s carry no `verified-by:` naming what "
@@ -257,8 +263,8 @@ def check_closures_are_evidenced(version, log_path=None):
             "a test name, a lint rule>` to each status line, or leave the gap open. An "
             "unevidenced close reads exactly like an evidenced one, which is the whole "
             "defect (H-020)." % (len(unevidenced), version, ", ".join(unevidenced))
-        ], len(closed_here))
-    return [], len(closed_here)
+        ], (len(closed_here), len(prose)))
+    return [], (len(closed_here), len(prose))
 
 
 def check():
@@ -304,7 +310,7 @@ def check():
     problems.extend(fanout_problems)
     link_problems, n_links = check_doc_links()
     problems.extend(link_problems)
-    closure_problems, n_closed = check_closures_are_evidenced(version)
+    closure_problems, (n_closed, n_prose) = check_closures_are_evidenced(version)
     problems.extend(closure_problems)
 
     if problems:
@@ -314,8 +320,9 @@ def check():
         return 1
     print("version check OK: %s stamped in %d shipped file(s), history recorded, "
           "%d bus verb(s) + %d CLI command(s) documented, %d relative doc link(s) resolve, "
-          "%d gap closure(s) in %s evidenced."
-          % (version, len(SHIPPED), n_bus, n_cli, n_links, n_closed, version))
+          "%d gap closure(s) in %s evidenced (%d by a re-runnable check, %d by prose)."
+          % (version, len(SHIPPED), n_bus, n_cli, n_links, n_closed, version,
+             n_closed - n_prose, n_prose))
     warning = git_release_state(version)
     if warning:
         print(warning)

@@ -89,6 +89,13 @@ on a path that will not open, so assert the length **before** matching, or a
 is true on a single dangling reference, so that comparison could never fail. Capture
 what you meant to compare (a name, an id, a count) before the thing is freed.
 
+**Before refreshing the harness, ask what it would cost:** `python tools/devtools.py
+harness-drift`. Exit 0 means a refresh removes nothing this install carries — just run
+`/scaffold-godot-harness`. Exit 1 quotes the lines it would remove, having already
+subtracted ordinary staleness. Re-run it after every release: a local patch that is at
+risk today becomes safe the moment the same fix ships upstream, and nothing else
+recomputes that.
+
 **The harness is inert in an exported build.** `OS.has_feature("template")` makes the
 autoload return from `_ready()` doing nothing — no bus, no log, and crucially no
 `entry_hook`, which otherwise skips your title screen for every player. To keep the

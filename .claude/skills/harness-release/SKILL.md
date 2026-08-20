@@ -156,9 +156,25 @@ the third was a real bug.
 `python3` on Windows is the Microsoft Store alias stub: it satisfies `command -v` and then
 refuses to run. Use `python`.
 
-If the change touched a **static analysis** template (`name_check.py`,
-`coverage_check.py`, the lint passes),
-also run it against a real scaffolded project and report the finding count. The scratch
+**Run gates from the repo root, and check the log file exists before reading a result
+off it.** A `cd <scratch> && python patch.py && python tools/check_templates.py --full
+> log` chain resolves `tools/...` against the scratch dir, so the `&&` stops early and
+the gate never starts — while a trailing `echo` makes the whole command report exit 0.
+That silently skipped a five-minute run in 0.62.0, and the only reason it was caught was
+that the log file was missing.
+
+If the change touched a **static analysis** template — `name_check.py`,
+`coverage_check.py`, `lint_project.gd`, or any lint pass —
+also run it against a real scaffolded project and report the finding count.
+**Copy the project first; never run in place.** A sibling is another session's live
+tree: skip `.git` and `.beads` (the latter is an embedded Dolt DB whose paths exceed
+Windows MAX_PATH — [H-073]), install the working tree's template into the copy, run it
+there, delete the copy, and `git -C <sibling> status` afterwards to prove you did not
+touch it. 0.62.0 wrote a stray file into `../plant-tower-defense/tools/` out of habit
+before catching it; `check_real_suite.py` already copies for exactly this reason.
+**Plant the defect in the copy too** — a real-corpus run that reports zero findings
+looks identical whether the checker is clean or switched off, so the pair
+(`0 of 55` clean, `1 of 55` planted) is the measurement, not the first number alone. The scratch
 project is small and synthetic and cannot measure a false-positive rate — `name_check.py`
 once passed every stage while emitting 466 bogus warnings on a real project, and
 `coverage_check.py` shipped in 0.19.0 only because this step caught it reporting
@@ -229,6 +245,21 @@ grep -oE '\[H-[0-9]+\]' log-devtools.md | sort -u | tail -1
 
 An honest "no gaps this turn" line counts — it is what distinguishes an absent gap from a
 forgotten log.
+
+**Closing a gap in THIS version requires evidence, and `record_version.py --check` fails
+without it** ([H-020], since 0.62.0):
+
+```
+- [H-NNN] status: fixed | fixed-in: X.Y.Z | verified-by: <a contract row, a
+  check_templates stage, a test name, a lint rule> | seen: 1 | harness: X.Y.Z
+```
+
+`verified-by: prose only - no mechanical check exists` is a legal value for a
+documentation fix and is deliberately conspicuous: `--check` counts it separately and
+prints the ratio (`N by a re-runnable check, K by prose`), because the value is
+unfalsifiable and only the ratio can show the field decaying into a spelling exercise
+([H-077]). Older closures are never retro-fitted — the scope is the current version, and
+inventing evidence for history would be worse than having none.
 
 ## 5. Reconcile beads
 

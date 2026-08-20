@@ -89,11 +89,11 @@ from pathlib import Path
 from typing import Optional  # noqa: F401
 
 
-# harness-version: 0.62.0
+# harness-version: 0.63.0
 # Version of the godot-selftest-harness this client was copied from. Compared against
 # the running game's own stamp by the `harness-version` verb, so a half-refreshed
 # install (new client, old autoload) is visible instead of mysterious.
-HARNESS_VERSION = "0.62.0"
+HARNESS_VERSION = "0.63.0"
 
 COMMANDS_FILE = "devtools_commands.json"
 RESULTS_FILE = "devtools_results.json"
@@ -2778,6 +2778,273 @@ def _warn_shared_user_dir(user_dir: Path, project_path: Path) -> None:
           f"copy's project.godot (the name alone is ignored).", file=sys.stderr)
 
 
+# The files /scaffold-godot-harness owns and will overwrite on a refresh. Kept here
+# rather than imported so the client stays standalone in a scaffolded project.
+DRIFT_FILES = [
+    "addons/godot_selftest/dev_tools.gd",
+    "addons/godot_selftest/scene_validator.gd",
+    "tools/devtools.py", "tools/lint_project.gd", "tools/run_tests.gd",
+    "tools/run_tests.py", "tools/eval.gd", "tools/capture.gd",
+    "tools/import_check.py", "tools/name_check.py", "tools/check_devtools_log.py",
+    "tools/upstream_gaps.py", "tools/verify_ledger.py", "tools/coverage_check.py",
+]
+
+
+def _norm_lines(path: Path):
+    """LF-normalized, stripped of trailing whitespace. A CRLF checkout otherwise reads
+    as every line differing, which is the failure the /verify drift block already
+    works around with `tr -d '\r'`."""
+    try:
+        raw = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    return [ln.rstrip() for ln in raw.replace("\r\n", "\n").split("\n")]
+
+
+def _base_templates_root(version: str):
+    """Where this machine keeps `version`'s templates, or None.
+
+    Two sources, cheapest first: the plugin cache keeps every version ever installed
+    (`~/.claude/plugins/cache/godot-selftest-harness/godot-selftest-harness/<v>/`), and
+    a plugin root that happens to be a git checkout has every release as a commit whose
+    subject starts `release <v>`.
+    """
+    home = Path(os.environ.get("USERPROFILE") or os.environ.get("HOME") or Path.home())
+    cached = (home / ".claude" / "plugins" / "cache" / "godot-selftest-harness"
+              / "godot-selftest-harness" / version)
+    if (cached / "templates").is_dir():
+        return cached, "plugin cache"
+    return None, None
+
+
+def _base_lines_from_git(root: Path, version: str, rel: str):
+    """`git show <release commit>:templates/<rel>` from a plugin root that is a git
+    checkout. Releases are not tagged here, so the commit is found by subject."""
+    import subprocess
+    try:
+        find = subprocess.run(
+            ["git", "log", "--format=%H", "--grep", "^release %s" % re.escape(version), "--all"],
+            cwd=str(root), capture_output=True, text=True, timeout=20)
+        sha = (find.stdout or "").split("\n")[0].strip()
+        if find.returncode != 0 or not sha:
+            return None
+        show = subprocess.run(["git", "show", "%s:templates/%s" % (sha, rel)],
+                              cwd=str(root), capture_output=True, text=True, timeout=20)
+        if show.returncode != 0:
+            return None
+        return [ln.rstrip() for ln in show.stdout.replace("\r\n", "\n").split("\n")]
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def analyze_refresh_safety(project_path: Path, newest_root: Path, base_version=None):
+    """What a `/scaffold-godot-harness` refresh would REMOVE from this install.
+
+    The question the drift audit could not answer, and the reason a real project sat
+    25 releases behind. Its bearing line said `hash in NO released version -> project
+    has local edits`, which is true and stops exactly where the decision is: a session
+    reading it cannot tell whether refreshing reverts something it needs. That project
+    had hand-patched an exported-build guard into `dev_tools.gd`, declined to refresh
+    on those grounds - correctly - and then went on declining after the same guard
+    shipped upstream, because nothing recomputes the answer.
+
+    So this compares CONTENT, not hashes. For each shipped file: the lines the install
+    has that the newest templates do not. If that set is empty the refresh is lossless
+    however different the two files are. If every one of those lines appears somewhere
+    in the newest file, the local edit has been SUBSUMED upstream - which is the case
+    that unsticks a project, and no hash comparison can ever see it.
+
+    Line-level and order-insensitive on purpose: a local edit that upstream reworded
+    will still show as at-risk, which is the safe direction to be wrong in. Returns a
+    list of per-file dicts; `verdict` is one of identical / stale_lossless /
+    subsumed / would_lose / missing.
+    """
+    out = []
+    base_lines = None
+    base_root, base_where = (None, None)
+    if base_version:
+        base_root, base_where = _base_templates_root(base_version)
+        base_lines = {}
+        for rel in DRIFT_FILES:
+            got = None
+            if base_root is not None:
+                got = _norm_lines(base_root / "templates" / rel)
+            if got is None:
+                got = _base_lines_from_git(newest_root, base_version, rel)
+            if got is not None:
+                base_lines[rel] = got
+                if base_where is None:
+                    base_where = "git history"
+        if not base_lines:
+            base_lines = None
+    for rel in DRIFT_FILES:
+        installed = project_path / rel
+        template = newest_root / "templates" / rel
+        if not installed.is_file() or not template.is_file():
+            continue
+        a, b = _norm_lines(installed), _norm_lines(template)
+        if a is None or b is None:
+            out.append({"file": rel, "verdict": "missing", "at_risk": []})
+            continue
+        if a == b:
+            out.append({"file": rel, "verdict": "identical", "at_risk": []})
+            continue
+        newest_set = set(b)
+        # Blank lines and bare `#` carry no information; counting them as "at risk"
+        # would bury the real finding under whitespace.
+        only_here = [ln for ln in a if ln not in newest_set and ln.strip() not in ("", "#")]
+        if not only_here:
+            out.append({"file": rel, "verdict": "stale_lossless", "at_risk": []})
+            continue
+        # THREE-WAY. Without the base, "in the install and not upstream" catches every
+        # line upstream merely REWROTE, which on a 25-release gap is almost all of them:
+        # the first version of this reported 70 at-risk lines in one file, of which
+        # about five were actually typed by the project. A line is a local edit only if
+        # the version this install was scaffolded FROM did not have it either.
+        base = None
+        if base_lines is not None:
+            base = base_lines.get(rel)
+        if base is not None:
+            base_set = set(base)
+            only_here = [ln for ln in only_here if ln not in base_set]
+            if not only_here:
+                out.append({"file": rel, "verdict": "stale_lossless", "at_risk": [],
+                            "base_used": True})
+                continue
+        # The version stamp differs on every stale file by construction and is
+        # rewritten by the refresh on purpose - it is not a local edit.
+        real = [ln for ln in only_here
+                if not ln.lstrip("#").strip().startswith("harness-version:")
+                and "HARNESS_VERSION" not in ln]
+        if not real:
+            out.append({"file": rel, "verdict": "stale_lossless", "at_risk": []})
+            continue
+        out.append({"file": rel, "verdict": "would_lose", "at_risk": real,
+                    "base_used": base is not None})
+    return out, (base_where if base_lines else None)
+
+
+def cmd_harness_drift(args, project_path: Path):
+    """Would a refresh lose anything? (no bus, no game, no engine)
+
+    Prints one line per shipped file plus the denominator, then the actual lines at
+    risk. Exit 0 when a refresh is lossless, 1 when it would remove something - so a
+    script can gate on it.
+    """
+    roots = _plugin_roots_on_this_machine()
+    if not roots:
+        print("harness-drift: no harness plugin root found on this machine, so there is "
+              "nothing to compare against. This is 'could not tell', not 'no drift'.",
+              file=sys.stderr)
+        sys.exit(2)
+    version, newest_root = max(roots.values(), key=lambda vr: _version_tuple(vr[0]))
+    installed_version = _installed_harness_version(project_path)
+    rows, base_where = analyze_refresh_safety(project_path, newest_root, installed_version)
+    if not rows:
+        print("harness-drift: none of the %d shipped file(s) are installed here - is this "
+              "a scaffolded project?" % len(DRIFT_FILES), file=sys.stderr)
+        sys.exit(2)
+
+    print(f"Installed: {installed_version or 'unreadable'}   Newest on this machine: {version}")
+    if base_where:
+        print(f"Base for comparison: {installed_version} templates from the {base_where} - "
+              "so a line upstream merely REWROTE is not counted as a local edit.")
+    else:
+        # The ambiguity, stated rather than glossed. Without the base, every line the
+        # newer templates reworded reads as something the project typed, and on a
+        # 25-release gap that is almost all of them.
+        print(f"Base for comparison: NONE - {installed_version or 'this version'}'s "
+              "templates are not on this machine (not in the plugin cache, not in the "
+              "plugin root's git history). The at-risk lines below therefore include "
+              "ordinary staleness - every line a newer release reworded - and CANNOT be "
+              "separated from real local edits. Treat the count as an upper bound.")
+    buckets = {}
+    for r in rows:
+        buckets.setdefault(r["verdict"], []).append(r)
+    at_risk = buckets.get("would_lose", [])
+    # The denominator, always: "checked, found none" and "never looked" must not print
+    # the same line.
+    print("%d shipped file(s) compared: %d identical, %d stale but LOSSLESS to refresh, "
+          "%d carry local line(s) not in %s."
+          % (len(rows), len(buckets.get("identical", [])),
+             len(buckets.get("stale_lossless", [])), len(at_risk), version))
+
+    for r in buckets.get("stale_lossless", []):
+        print(f"  SAFE     {r['file']} - differs, but every line it has is in {version}. "
+              "Any local edit here is already upstream.")
+    for r in at_risk:
+        lines = r["at_risk"]
+        print(f"  AT RISK  {r['file']} - a refresh would remove {len(lines)} line(s) that "
+              f"are not in {version}:")
+        for ln in lines[:args.max_lines]:
+            print(f"             {ln.strip()[:140]}")
+        if len(lines) > args.max_lines:
+            print(f"             ... and {len(lines) - args.max_lines} more "
+                  f"(--max-lines to see them)")
+        # The bridge from "would remove" to "already handled". A local patch usually
+        # cites the issue it fixes; if the newest templates cite the SAME id, the
+        # behaviour is very likely upstream in different code - which a line-level
+        # comparison structurally cannot see, and which is exactly the case that keeps
+        # a project from refreshing. Stated as a lead to check, never as a verdict:
+        # a shared id proves the subject matches, not that the fix does.
+        for ref in _issue_refs(lines):
+            if ref in _newest_text(newest_root, r["file"]):
+                print(f"             NOTE: {version} also references {ref}. The behaviour "
+                      "these lines add may already be upstream in different code, which "
+                      "no line comparison can tell. Read the newest file before porting.")
+    if not at_risk:
+        print("A refresh is LOSSLESS: nothing this install carries would be removed. "
+              "Run /scaffold-godot-harness.")
+        sys.exit(0)
+    print("Port the lines above into res://devtools_ext/commands.gd if they are project "
+          "logic, or file them upstream if they are a harness fix - then refresh. "
+          "Re-run this after every release: an edit that is at risk today is subsumed "
+          "the moment the same fix ships, and nothing else recomputes that.",
+          file=sys.stderr)
+    sys.exit(1)
+
+
+_ISSUE_REF_RE = re.compile(r"(?:upstream\s+)?(?:gh)?#(\d+)|\b([A-Za-z][A-Za-z0-9_-]*:G-\d+[a-z]?)\b|\b(H-\d+)\b")
+
+
+def _issue_refs(lines):
+    """Issue ids mentioned in a block of source lines: `#58`, `gh#58`, `H-043`,
+    `plant-tower-defense:G-070`. Deduped, order preserved."""
+    seen, out = set(), []
+    for ln in lines:
+        for m in _ISSUE_REF_RE.finditer(ln):
+            ref = ("#" + m.group(1)) if m.group(1) else (m.group(2) or m.group(3))
+            if ref and ref not in seen:
+                seen.add(ref)
+                out.append(ref)
+    return out
+
+
+_NEWEST_TEXT_CACHE = {}
+
+
+def _newest_text(newest_root: Path, rel: str) -> str:
+    key = (str(newest_root), rel)
+    if key not in _NEWEST_TEXT_CACHE:
+        try:
+            _NEWEST_TEXT_CACHE[key] = (newest_root / "templates" / rel).read_text(
+                encoding="utf-8", errors="replace")
+        except OSError:
+            _NEWEST_TEXT_CACHE[key] = ""
+    return _NEWEST_TEXT_CACHE[key]
+
+
+def _installed_harness_version(project_path: Path):
+    """The addon's own stamp, read from disk. No bus, no game."""
+    try:
+        text = (project_path / "addons" / "godot_selftest" / "dev_tools.gd").read_text(
+            encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    m = re.search(r'HARNESS_VERSION\s*:\s*String\s*=\s*"([^"]+)"', text)
+    return m.group(1) if m else None
+
+
 def _harness_version_offline(project_path: Path, as_json: bool, why: str) -> int:
     """Print what disk alone can prove, and say plainly what is unknown.
 
@@ -5222,6 +5489,18 @@ def main():
                    help="Never open the bus: report this client's and the installed addon's "
                         "versions from disk (what a log entry's `harness:` field wants)")
     p.set_defaults(func=cmd_harness_version)
+
+    # harness-drift - would a refresh lose anything? No bus, no game, no engine.
+    p = subparsers.add_parser(
+        "harness-drift",
+        help="Would /scaffold-godot-harness REMOVE anything this install carries? "
+             "Compares content, not hashes, so a local edit that has since shipped "
+             "upstream reads as safe. Exit 0 lossless, 1 would lose something, 2 "
+             "could not tell")
+    p.add_argument("--max-lines", type=int, default=25,
+                   help="At-risk lines to print per file (default 25); the count "
+                        "dropped is always named")
+    p.set_defaults(func=cmd_harness_drift)
 
     # input - nested subcommands
     input_parser = subparsers.add_parser("input", help="Simulate input actions")
