@@ -27,6 +27,16 @@ git update-index --refresh >/dev/null; git status --short
 modified-file count under a long session — gh#17 saw 6 become 8 across one worktree
 add/remove. Re-run it rather than remember it.)
 
+Pool the project logs **before** choosing what the release contains, not after:
+
+```bash
+python tools/upstream_gaps.py ../<game>/log-devtools.md   # deduped, safe to re-run
+```
+
+A 0.61.0 run pooled 43 gaps *after* the work list was fixed, and three of them were
+cheap fixes that belonged in it. The pool is evidence about what to build; reading it
+last makes it an appendix.
+
 Compare the top sha against whatever your context claims. If they differ, **re-read every
 file you were about to change** and re-derive line numbers; do not edit by remembered
 offsets. Then check whether the work you are about to do is already in the log:
@@ -109,10 +119,26 @@ python tools/check_templates.py --full    # required if a generic bus verb was a
 python -m unittest discover -s tools      # scaffold/install unit tests
 ```
 
+**BEFORE and AFTER must be measured against the same copy.** The sibling is another
+session's live tree and it moves: one 0.61.0 run saw `Total` go 1016 → 1017 between two
+copies, which surfaced as a phantom `passed 1016 -> 1015` that was the project's own
+in-progress work, not a regression. `--baseline-total/--baseline-passed` saves two
+minutes and buys exactly that hazard. Before believing any `passed N -> N-1`, check that
+`Total` matches on both sides; when it does not, re-run without the baseline flags.
+
 `check_templates.py` needs a real Godot binary. On this machine it resolves
 `C:\Users\gotmi\Documents\Godot_v4.7.1-stable_win64.exe` by default. If it prints
 `WARNING: no Godot binary found ... This is not a pass`, it returned **2** and you have
 verified nothing — do not proceed.
+
+**A new verb needs a stage, and `--full` will not tell you it is missing.** Stage 6's
+denominator is the number of contract ROWS, so a verb with no row cannot move it in
+either direction: `what_drew` shipped in 0.61.0 while `--full` printed the same `98/98`
+it printed before the verb existed. Since 0.62.0 `check_contract_covers_every_verb()`
+enforces `contract_rows()`' own documented invariant ("every generic verb appears once")
+and fails on any registered verb with neither a row nor a `CONTRACT_EXEMPT` reason — but
+a contract row proves the envelope and the data keys, **not the behavior**. Add a
+`check_*` stage that plants something the verb must find and something it must not.
 
 **Run `--full` at least once per release, not only when a new verb needs it (H-062).**
 It is opt-in and nothing routine exercises it, which is exactly how three genuine
@@ -243,8 +269,13 @@ was not used** if it wasn't, how it was validated, and what was considered and r
 Recording a rejected option is worth as much as recording a shipped one — it is cheaper to
 re-read than to re-refute.
 
+**`git add -A` is not safe here.** `experiments/` and `.devtools/` are untracked *by
+design* (see §6b), and `-A` stages them: one release commit landed **371 files / 32,429
+insertions**, of which 345 were `experiments/`. Check first, then exclude:
+
 ```bash
-git add -A && git commit -F - <<'EOF'
+git status --short | grep '??'          # nothing listed here belongs in the commit
+git add -A -- . ':!experiments' ':!.devtools' && git commit -F - <<'EOF'
 release X.Y.Z: <the one-line claim>
 
 ...

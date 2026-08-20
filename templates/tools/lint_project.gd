@@ -107,10 +107,10 @@ extends SceneTree
 # console. Redirect to a file and read it back. Every line this script emits goes
 # to stdout via print(), so one redirect captures the whole report.
 
-# harness-version: 0.61.0
+# harness-version: 0.62.0
 ## Harness revision these files were copied from. Printed in the header of every run so
 ## a lint result, and any gap logged from it, can name the version it was produced on.
-const HARNESS_VERSION: String = "0.61.0"
+const HARNESS_VERSION: String = "0.62.0"
 
 const CONFIG_PATH: String = "res://addons/godot_selftest/devtools_config.json"
 const DEFAULT_SCAN_ROOT: String = "res://"
@@ -280,6 +280,7 @@ func _initialize() -> void:
 		if not no_shaders:
 			_check_shaders(scan_root, uid_ignore, results)
 		_check_string_refs(scan_root, gd_files, uid_ignore, results)
+		_check_headless_feature(gd_files, uid_ignore, results)
 
 	# Scene configuration warnings for selected scenes, unless uids-only
 	if not uids_only:
@@ -431,6 +432,14 @@ func _initialize() -> void:
 			var sr: Dictionary = results.get("string_refs", {})
 			for u in sr.get("unresolved", []):
 				print("ADVISORY: %s: %s" % [u["file"], u["message"]])
+			# Denominator, every run: "checked, found none" and "never looked" must not
+			# print the same line - the rule this file applies everywhere else.
+			var hf: Dictionary = results.get("headless_feature", {})
+			if not hf.is_empty():
+				for h in hf.get("hits", []):
+					print("WARN: %s: %s" % [h["file"], h["message"]])
+				print("Headless guards: %d of %d script(s) use the always-false OS.has_feature(\"headless\")" % [
+					int(hf.get("hits", []).size()), int(hf.get("checked", 0))])
 		if not uids_only:
 			for r in results["warnings"]["by_scene"]:
 				if "error" in r:
@@ -951,6 +960,44 @@ func _read_class_cache() -> Dictionary:
 # prefixes, because a harness or third-party runner probing for an optional hook
 # by name is not this project's debt, and `*.example.gd`, which is reference
 # material that names verbs the reading project is expected not to have yet.
+## Rule `headless_feature_check`: `OS.has_feature("headless")` is FALSE under
+## `--headless`. Godot never sets a `headless` feature tag - the display server is
+## what changes - so the obvious guard never fires, and a guard that never fires is
+## indistinguishable from one that passes. `DisplayServer.get_name() == "headless"`
+## is the answer, and it is what this harness's own code uses throughout.
+##
+## A project established this with a four-line probe after writing the obvious
+## version and watching a headless run take the windowed branch. That is the whole
+## reason this rule exists: the failure is silent by construction, so nothing except
+## a static scan will ever tell you.
+##
+## WARNING rather than advisory: unlike `string_ref_unresolved`, there is no runtime
+## construction that could make this right - the literal is in the source or it is
+## not. Warning rather than error so a project with a deliberate custom feature tag
+## of that name can baseline it instead of being blocked.
+func _check_headless_feature(gd_files: Array[String], ignore: Array, results: Dictionary) -> void:
+	var re := RegEx.new()
+	re.compile("OS[ \\t]*\\.[ \\t]*has_feature[ \\t]*\\([ \\t]*\"headless\"")
+	var checked := 0
+	var hits: Array[Dictionary] = []
+	for p in gd_files:
+		if _is_uid_ignored(p, ignore) or p.get_file().ends_with(".example.gd"):
+			continue
+		var text := _strip_comments(FileAccess.get_file_as_string(p))
+		if text == "":
+			continue
+		checked += 1
+		if re.search(text) == null:
+			continue
+		var msg := ("OS.has_feature(\"headless\") is always false - Godot sets no such "
+			+ "feature tag, so this guard never fires and reads exactly like one that "
+			+ "passes. Use DisplayServer.get_name() == \"headless\".")
+		hits.append({"file": p, "message": msg})
+		_add_finding(p, "headless_feature_check", "OS.has_feature(\"headless\")",
+			"warning", msg, false)
+	results["headless_feature"] = {"checked": checked, "hits": hits}
+
+
 func _check_string_refs(scan_root: String, gd_files: Array[String], ignore: Array, results: Dictionary) -> void:
 	# call_deferred before call so the longer verb wins the alternation; the
 	# lookbehind keeps `my_call(` and `is_connected(` out; the required CLOSING

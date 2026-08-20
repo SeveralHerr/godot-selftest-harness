@@ -268,8 +268,19 @@ bus — use it for a log entry's `harness:` field), `cmd <verb>`.
   settings change; a single frame's rate is not a measurement. Its `Total nodes …
   growth +N` is the leak signal the orphan count cannot see (in-tree accumulation);
   `--by-type` names which classes grew.
-- **A headless gate never touches the bus.** `lint_project.gd` / `run_tests.gd` bring
-  the autoload up passive: safe to run while another session drives this game.
+- **A headless gate never touches the bus — but it does share `user://`.**
+  `lint_project.gd` / `run_tests.gd` bring the autoload up passive, so they will not
+  claim, clear or poll a bus another session is driving. That is the only thing "safe"
+  covers here. **`user://` is not isolated and cannot be** (`launch --isolated` isolates
+  the bus only), so a suite whose code writes a save file writes the *developer's real
+  save* — a headless run did exactly that, on a game that loads its save from an
+  autoload at process start. `run_tests.gd` names every `user://` write per test so you
+  can see it; the fix is to point that one path elsewhere from the project's own code,
+  because no flag here can do it for you.
+- **`OS.has_feature("headless")` is FALSE under `--headless`.** The obvious guard never
+  fires, and a guard that never fires looks exactly like one that passes. Use
+  `DisplayServer.get_name() == "headless"`, which is what the harness's own code uses;
+  `lint_project.gd` flags the `OS.has_feature` spelling as `headless_feature_check`.
 - **A worktree sibling shares your bus.** Same project name → same `user://`. `ping`
   prints the answering game's `project` path and the client refuses to send to a game
   from another checkout — if you see `DIFFERENT checkout`, quit it or `launch --isolated`.

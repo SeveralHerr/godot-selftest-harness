@@ -777,6 +777,22 @@ Notable behaviors:
   `devtools_config.json` need not be in the `.pck` at all, so a tag is the one signal
   guaranteed to be both present and deliberate. `DevTools.is_shipped_build()` is
   exposed for a project that wants to branch on it.
+- **A wedged handler answers inside the caller's own timeout** (0.62.0, H-043 /
+  gh#1.2). A GDScript runtime error inside an awaiting handler does not raise — the
+  coroutine simply never resumes — so the dispatch guard is force-released by a
+  watchdog that names the verb and writes a real failure reply. The watchdog constant
+  is 300s and the client default is 30s, so that explanation used to land **4.5 minutes
+  after the caller had already given up** and printed a timeout that could not say why.
+  Neither side can fix this alone: the game cannot know the caller's deadline, and the
+  caller cannot know when a handler wedges. So every request now carries
+  `client_timeout_s` and the game arms the watchdog at **2s under it**, capped by the
+  300s constant and floored at 1s. A request without the key (an older client, a
+  hand-written command file) gets the old 300s behavior, which is what "no information"
+  should get. The reply's `data` carries `wedged_action`, `held_seconds` and
+  `deadline_seconds` — the last so a *premature* release is diagnosable rather than
+  mysterious. This can never pre-empt a legitimately long handler: the deadline is
+  derived from a timeout the caller was going to give up at anyway, so the choice is
+  only between a useful answer and a bare timeout.
 - **`entry_hook` / `entry_points` actually fire, and say so** (0.30.0, gh#29). Before
   this, `entry_hook` accepted a value, validated fine, and was read by nothing — a
   config key that *looks* configured is the harness's own worst failure mode applied
@@ -1784,6 +1800,19 @@ anywhere in the project and `ClassDB` knows no such engine member. It is the
 is always on, because the entire failure mode is that nobody knew to look. It is
 **advisory** and always will be; see the sharp edge below for what it structurally
 cannot see.
+
+The **headless-guard** check (`headless_feature_check`, 0.62.0) flags
+`OS.has_feature("headless")`. Godot sets no such feature tag — what changes under
+`--headless` is the *display server* — so the obvious guard is always false, never
+fires, and is indistinguishable from one that passes. `DisplayServer.get_name() ==
+"headless"` is the answer, and it is what this harness's own code uses throughout. A
+project established that with a four-line probe after writing the obvious version and
+watching a headless run take the windowed branch; the failure is silent by
+construction, so a static scan is the only thing that will ever report it. **Warning**,
+not advisory: unlike `string_ref_unresolved` there is no runtime construction that
+could make the literal right. Warning rather than error so a project with a deliberate
+custom feature tag of that name can baseline it. The `Headless guards: N of M
+script(s)` denominator prints every run.
 
 The **shader compile** pass (`shader_compile_failed`, `shader_embedded_compile_failed`)
 compiles every `.gdshader` under `scan_root` plus every `Shader` embedded in a `.tres`.

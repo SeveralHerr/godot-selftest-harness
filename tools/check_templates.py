@@ -1463,6 +1463,7 @@ def stage_runners(godot, scratch):
         ok = check_assert_eq_and_file_text(godot, scratch) and ok
         ok = check_run_tests_py(godot, scratch) and ok
         ok = stage_shader_control(godot, scratch) and ok
+        ok = stage_headless_guard_control(godot, scratch) and ok
         ok = stage_capture(godot, scratch) and ok
     return ok
 
@@ -1551,6 +1552,56 @@ def check_orphan_denominator(out):
         return fail("orphan scan did not name never_called_anywhere() in a WARN line\n%s" % out)
     print("stage 4 lint: orphans %d of %d public function(s) across %d script(s) "
           "(advisory, exit still 0; never_called_anywhere() named)" % (found, checked, scripts))
+    return True
+
+
+def stage_headless_guard_control(godot, scratch):
+    """H-075 positive control: plant `OS.has_feature("headless")` and require the rule.
+
+    This one needs a plant more than most, because the failure it reports is silent by
+    construction: the guard compiles, runs, and takes the wrong branch forever. A clean
+    scratch project lints clean whether the rule works or not, so "0 findings" proves
+    nothing at all on its own.
+
+    Also asserts the DENOMINATOR moves. `Headless guards: 0 of N` and a rule that is not
+    running print the same zero, and the line is the only thing standing between them.
+    """
+    planted = scratch / "harness_headless_control.gd"
+    planted.write_text(
+        "extends RefCounted\n"
+        "\n"
+        "func probe() -> bool:\n"
+        "\treturn OS.has_feature(\"headless\")\n",
+        encoding="utf-8")
+    try:
+        proc = run_godot(godot, scratch, ["--script", "res://tools/lint_project.gd"])
+        out = proc.stdout
+        if "harness_headless_control.gd" not in out:
+            return fail("planted OS.has_feature(\"headless\") was not reported by "
+                        "headless_feature_check\n%s" % out[-2000:])
+        if "1 of " not in out.split("Headless guards:")[-1].splitlines()[0]:
+            return fail("the Headless guards denominator must count the plant; got %r"
+                        % (out.split("Headless guards:")[-1].splitlines()[0]
+                           if "Headless guards:" in out else "no line at all"))
+        if "DisplayServer.get_name()" not in out:
+            return fail("the finding must name the replacement, not just the problem")
+    finally:
+        planted.unlink(missing_ok=True)
+    # The negative control: with the plant gone the line must still print, and read 0.
+    # A rule that only speaks when it fires cannot be told from one that is switched off.
+    clean = run_godot(godot, scratch, ["--script", "res://tools/lint_project.gd"])
+    line = ""
+    for ln in clean.stdout.splitlines():
+        if ln.startswith("Headless guards:"):
+            line = ln
+    if not line:
+        return fail("Headless guards denominator must print on a CLEAN run too - "
+                    "'checked, found none' and 'never looked' must not look the same")
+    if not line.startswith("Headless guards: 0 of "):
+        return fail("clean run must report 0 findings, got %r" % line)
+    print("stage 4 lint: headless guard control fired (planted OS.has_feature(\"headless\") "
+          "named with its replacement, denominator 1 of N) and the clean run still prints "
+          "'%s'" % line)
     return True
 
 
@@ -2526,7 +2577,76 @@ def contract_rows():
         ("ui_snapshot_diff", {}, True, "baseline saved by the previous row"),
         ("screenshot", {"filename": "check_templates.png"}, False,
          "headless capture is display-dependent; envelope only"),
+        # gh#66.1: these six had no row at all. The docstring above has always said
+        # "every generic verb appears once" and nothing enforced it, which is how
+        # `what_drew` shipped in 0.61.0 while `--full` printed the same 98/98 it
+        # printed before the verb existed. A denominator that cannot move is not a
+        # denominator. check_contract_covers_every_verb() now enforces the sentence.
+        ("what_drew", {"at": [0, 0]}, True,
+         "gh#62: node-bounds inverted; check_what_drew() tests the semantics",
+         ["painters", "containers", "at", "in_viewport", "painters_truncated"]),
+        ("findings", {}, False,
+         "an ASSERTION, not a query: success=false means it found something, and the "
+         "scratch project carries planted UI defects on purpose. Envelope + data keys.",
+         ["findings", "counts"]),
+        ("first_frame", {}, True, "", ["tree_paused"]),
+        ("mouse_move", {"relative": [0, 0]}, True,
+         "check_mouse_move() tests delivery and the absolute form",
+         ["relative", "steps", "position", "mouse_mode"]),
+        ("mouse_move", {}, False,
+         "plant-tower-defense:G-141: neither relative nor position is refused, and "
+         "the refusal names both",
+         [], {"message_contains": "position"}),
+        ("reload", {"path": "res://no/such/file.tres"}, False,
+         "moving-in:G-033: a path that cannot be re-read is refused by name",
+         [], {"message_contains": "res://no/such/file.tres"}),
     ]
+
+
+# Verbs that legitimately cannot be a mid-run contract row, each with the reason.
+# An exemption is a claim like any other and has to say why; the point of the check
+# below is that "no row" and "no row, deliberately" stop looking the same.
+CONTRACT_EXEMPT = {
+    "quit": "kills the game; it is the teardown step of stage 5 and cannot run "
+            "mid-table without ending every row after it",
+}
+
+
+def check_contract_covers_every_verb():
+    """gh#66.1: enforce contract_rows()' own documented invariant.
+
+    `contract_rows()` says "Every generic verb appears once". It was six verbs short,
+    and the way that became visible was a human noticing that `stage 6 contract:
+    98/98` had not changed after a verb was added - because the denominator is the
+    number of ROWS, so a verb with no row cannot move it in either direction. That is
+    the exact shape this project rejects everywhere else: a number that reads as
+    coverage and is really just a count of what someone remembered to write.
+
+    Static, so it runs in every mode including --static-only, and costs nothing.
+    """
+    gd = (TEMPLATES / "addons" / "godot_selftest" / "dev_tools.gd").read_text(
+        encoding="utf-8", errors="replace")
+    verbs = set(re.findall(r'register_command\("(\w+)"', gd))
+    if not verbs:
+        return fail("contract coverage: found no register_command() calls - "
+                    "regex broken, and a silent zero here would read as full coverage")
+    rows = set(r[0] for r in contract_rows())
+    stray = sorted(rows - verbs)
+    if stray:
+        return fail("contract coverage: %d row(s) name a verb that is not registered "
+                    "(renamed or removed?): %s" % (len(stray), ", ".join(stray)))
+    missing = sorted(verbs - rows - set(CONTRACT_EXEMPT))
+    if missing:
+        return fail(
+            "contract coverage: %d registered verb(s) have NO contract row, so stage 6's "
+            "denominator does not include them and cannot report their absence: %s. Add a "
+            "row to contract_rows(), or add the verb to CONTRACT_EXEMPT with the reason it "
+            "cannot have one." % (len(missing), ", ".join(missing)))
+    exempt = sorted(set(CONTRACT_EXEMPT) & verbs)
+    print("contract coverage: %d registered verb(s) -> %d with a contract row, "
+          "%d exempt (%s)" % (len(verbs), len(verbs) - len(exempt), len(exempt),
+                              ", ".join(exempt) or "none"))
+    return True
 
 
 def check_envelope(action, reply):
@@ -4247,6 +4367,59 @@ def check_batch(client, scratch):
     return True
 
 
+def check_watchdog_beats_the_client(client, scratch):
+    """H-043 / gh#1.2: the dispatch watchdog fires INSIDE the caller's own window.
+
+    The watchdog constant is 300s and the client default is 30s, so a wedged handler's
+    explanation used to arrive 4.5 minutes after the caller had already given up and
+    printed a timeout that could not say why. The game cannot know the caller's
+    deadline and the caller cannot know when a handler wedges, so the request now
+    carries `client_timeout_s` and the game arms at 2s under it.
+
+    Driven with a real long verb rather than a planted wedge: `step_time` holds the
+    dispatch guard for its whole duration (that is what check_dispatch_reentrancy
+    measures), so a 6s step_time under a 4s client timeout puts the deadline at 2s and
+    the force-release must land BEFORE the client would have given up. That is the
+    whole claim, and it is measured as wall-clock here rather than read off a message.
+
+    The negative control matters as much: the same verb inside a generous timeout must
+    NOT be force-released, or the fix would have traded a late answer for a wrong one.
+    """
+    started = time.time()
+    reply = client.send_command(scratch, "step_time", {"seconds": 6.0}, timeout=4.0)
+    elapsed = time.time() - started
+    data = reply.get("data") or {}
+    if reply.get("success"):
+        return fail("a 6s step_time under a 4s client timeout must be force-released, "
+                    "not answered normally: %r" % reply.get("message"))
+    if "deadline_seconds" not in data:
+        return fail("the force-release reply must carry deadline_seconds so a premature "
+                    "release is diagnosable; got keys %s" % sorted(data))
+    if data.get("wedged_action") != "step_time":
+        return fail("the reply must name the verb that held the guard, got %r"
+                    % data.get("wedged_action"))
+    if abs(float(data["deadline_seconds"]) - 2.0) > 0.01:
+        return fail("deadline must be the caller's timeout minus 2s (4.0 -> 2.0), got %r"
+                    % data.get("deadline_seconds"))
+    if elapsed >= 4.0:
+        return fail("the answer must arrive INSIDE the caller's 4s window - that is the "
+                    "entire point; it took %.1fs" % elapsed)
+
+    # Negative control: a generous timeout must let the same verb finish normally.
+    # Without this the check passes against a watchdog that force-releases everything.
+    ok_reply = client.send_command(scratch, "step_time", {"seconds": 1.0}, timeout=30.0)
+    if not ok_reply.get("success"):
+        return fail("a 1s step_time under a 30s timeout must NOT be force-released "
+                    "(deadline 28s): %r" % ok_reply.get("message"))
+    if "wedged_action" in (ok_reply.get("data") or {}):
+        return fail("the generous-timeout run must be a normal reply, not a release")
+    print("stage 5 bridge: a 6s step_time under a 4s client timeout was force-released "
+          "at its 2.0s deadline and answered in %.1fs - inside the caller's window, "
+          "naming step_time; a 1s step_time under 30s finished normally (not released)"
+          % elapsed)
+    return True
+
+
 def check_dispatch_reentrancy(client, scratch):
     """A command arriving mid-await must be DEFERRED, not run on top (H-038).
 
@@ -4559,6 +4732,7 @@ def stage_bridge(godot, scratch, full):
         ok = check_launch_ping_timeout_surfaces_error(scratch) and ok
         ok = check_entry_hook_and_entry_points(godot, scratch) and ok
         ok = check_dispatch_reentrancy(client, scratch) and ok
+        ok = check_watchdog_beats_the_client(client, scratch) and ok
         ok = check_batch(client, scratch) and ok
 
         if full:
@@ -4576,13 +4750,25 @@ def stage_bridge(godot, scratch, full):
                 problems = check_envelope(action, reply)
                 if must_succeed and not reply.get("success"):
                     problems.append("success=false: %s" % reply.get("message"))
-                if must_succeed and required:
+                if required:
+                    # Not gated on must_succeed (0.62.0). It used to be, which made the
+                    # key list on every must_succeed=False row decorative: validate_ui
+                    # has named five keys since 0.30.0 and not one was ever read. A row
+                    # that lists what the client reads by name and then does not check
+                    # it is the same shape as a check that reports success without
+                    # running - so it is checked whenever there is data to check, and
+                    # named as unverifiable when there is not.
                     data = reply.get("data") or {}
-                    absent = [k for k in required if k not in data]
-                    if absent:
+                    if data:
+                        absent = [k for k in required if k not in data]
+                        if absent:
+                            problems.append(
+                                "data is missing key(s) the client reads by name: %s "
+                                "(present: %s)" % (", ".join(absent), ", ".join(sorted(data))))
+                    elif must_succeed:
                         problems.append(
-                            "data is missing key(s) the client reads by name: %s "
-                            "(present: %s)" % (", ".join(absent), ", ".join(sorted(data))))
+                            "data is empty, so the %d key(s) the client reads by name "
+                            "could not be checked" % len(required))
                 if expect:
                     data = reply.get("data") or {}
                     for key, want in expect.items():
@@ -4660,6 +4846,12 @@ def main():
         if not stage_reach():
             return 1
         if not stage_coverage():
+            return 1
+        # gh#66.1: static, and deliberately in the block that runs under
+        # --static-only. A verb with no contract row is a verb stage 6 cannot
+        # report on, and the cheapest possible moment to hear that is before
+        # anything has been imported or launched.
+        if not check_contract_covers_every_verb():
             return 1
     if args.static_only or only == "1":
         return 0

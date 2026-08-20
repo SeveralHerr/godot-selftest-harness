@@ -89,11 +89,11 @@ from pathlib import Path
 from typing import Optional  # noqa: F401
 
 
-# harness-version: 0.61.0
+# harness-version: 0.62.0
 # Version of the godot-selftest-harness this client was copied from. Compared against
 # the running game's own stamp by the `harness-version` verb, so a half-refreshed
 # install (new client, old autoload) is visible instead of mysterious.
-HARNESS_VERSION = "0.61.0"
+HARNESS_VERSION = "0.62.0"
 
 COMMANDS_FILE = "devtools_commands.json"
 RESULTS_FILE = "devtools_results.json"
@@ -977,7 +977,15 @@ def send_command(project_path: Path, action: str, args: dict = None, timeout: fl
 
     # Write command
     request_id = uuid.uuid4().hex[:12]
-    command = {"id": request_id, "action": action, "args": normalize_command_args(args)}
+    # H-043 / gh#1.2: the caller's own deadline, sent with the request. The game's
+    # dispatch watchdog is 300s against a 30s default here, so a wedged handler's
+    # explanation used to land 4.5 minutes after this process had already given up and
+    # printed a timeout that could not say why. The game cannot know this number and
+    # this side cannot know when a handler wedges; sending it is what lets the watchdog
+    # fire INSIDE the window where the answer is still worth something. Data key:
+    # `client_timeout_s` (float, seconds).
+    command = {"id": request_id, "action": action, "args": normalize_command_args(args),
+               "client_timeout_s": float(timeout)}
     commands_path.write_text(json.dumps(command), encoding="utf-8")
 
     # Liveness precheck: does not consume any of the response timeout, so a slow
@@ -4930,6 +4938,45 @@ def cmd_sample_pixels(args, project_path: Path):
 
 
 
+# Global flags argparse only accepts BEFORE the subcommand. Putting one after it is
+# `error: unrecognized arguments: .`, which names the value and not the mistake.
+_GLOBAL_ONLY_FLAGS = {
+    "--project": "-p", "-p": "--project",
+    "--userdata": "-u", "-u": "--userdata",
+    "--session": "-S", "-S": "--session",
+    "--json": None, "--no-precheck": None,
+}
+
+
+def _explain_misplaced_global_flag(argv, subcommands) -> None:
+    """Say WHICH flag is in the wrong place, before argparse says which value is.
+
+    `devtools.py harness-version --client -p .` exits with
+    `unrecognized arguments: .` - it names the dot. A reader has to know that `-p` is
+    global and that global means positional-before-subcommand to get from there to the
+    fix, and a real session spent a retry on exactly that. argparse cannot say it
+    itself: by the time the subparser rejects the token, the top-level parser is done.
+
+    Advisory and non-fatal on purpose - it prints and returns, letting argparse produce
+    its own error and exit code. Guessing wrong here must not cost a working command.
+    """
+    seen_subcommand = None
+    for i, tok in enumerate(argv):
+        if seen_subcommand is None:
+            if tok in subcommands:
+                seen_subcommand = tok
+            continue
+        if tok in _GLOBAL_ONLY_FLAGS or tok.split("=", 1)[0] in _GLOBAL_ONLY_FLAGS:
+            flag = tok.split("=", 1)[0]
+            alias = _GLOBAL_ONLY_FLAGS.get(flag)
+            both = f"{flag}/{alias}" if alias else flag
+            rest = " ".join(argv[:i]) or "<subcommand>"
+            print(f"note: {both} is a GLOBAL flag - it goes BEFORE the subcommand, not "
+                  f"after it. argparse is about to reject the value rather than the "
+                  f"flag, so: devtools.py {flag} <value> {rest}", file=sys.stderr)
+            return
+
+
 def _utf8_console() -> None:
     """gh#34: the client inherits the Windows console's cp1252 stdout, so any verb
     echoing game text with a glyph outside it (a Back button reading "\u2190 Back",
@@ -5585,6 +5632,7 @@ def main():
     p.add_argument("name", help="Key under entry_points in devtools_config.json")
     p.set_defaults(func=cmd_fire_entry_point)
 
+    _explain_misplaced_global_flag(sys.argv[1:], subparsers.choices)
     args = parser.parse_args(_glue_leading_dash_values(sys.argv[1:]))
 
     global _USERDATA_OVERRIDE, _PRECHECK_ENABLED, _SESSION, _RAW_JSON

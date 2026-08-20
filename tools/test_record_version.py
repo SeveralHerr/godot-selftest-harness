@@ -13,6 +13,7 @@ Usage:
 
 import json
 import subprocess
+import tempfile
 import sys
 import unittest
 from pathlib import Path
@@ -37,6 +38,63 @@ def _fake_git(head_version, dirty_lines):
             return _Result(0, json.dumps({"version": head_version}))
         raise AssertionError("unexpected git call %r" % (cmd,))
     return run
+
+
+class ClosuresAreEvidenced(unittest.TestCase):
+    """H-020: a gap closed in THIS version must name what proves it."""
+
+    def _write(self, body):
+        d = tempfile.mkdtemp()
+        p = Path(d) / "log-devtools.md"
+        p.write_text(body, encoding="utf-8")
+        return p
+
+    def test_unevidenced_close_in_this_version_is_a_problem(self):
+        log = self._write(
+            "  - [H-999] status: fixed | fixed-in: 0.62.0 | seen: 1\n")
+        problems, n = record_version.check_closures_are_evidenced("0.62.0", log)
+        self.assertEqual(n, 1)
+        self.assertEqual(len(problems), 1)
+        self.assertIn("H-999", problems[0])
+        self.assertIn("verified-by", problems[0])
+
+    def test_evidenced_close_passes_and_is_counted(self):
+        log = self._write(
+            "  - [H-998] status: fixed | fixed-in: 0.62.0 | verified-by: stage 6 row "
+            "what_drew | seen: 1\n")
+        problems, n = record_version.check_closures_are_evidenced("0.62.0", log)
+        self.assertEqual((problems, n), ([], 1))
+
+    def test_older_closures_are_not_retrofitted(self):
+        """The history is what it is; demanding evidence for it would invent it."""
+        log = self._write("  - [H-997] status: fixed | fixed-in: 0.55.0 | seen: 1\n")
+        problems, n = record_version.check_closures_are_evidenced("0.62.0", log)
+        self.assertEqual((problems, n), ([], 0))
+
+    def test_status_resolves_from_the_last_line_not_every_line(self):
+        """The log is append-only: `open` -> `open` -> `fixed` on separate lines. A
+        per-line scan reads every fixed gap as open forever - the gh#63 defect."""
+        log = self._write(
+            "  - [H-996] status: open | seen: 1\n"
+            "  - [H-996] status: open | seen: 2\n"
+            "  - [H-996] status: fixed | fixed-in: 0.62.0 | seen: 2\n")
+        problems, n = record_version.check_closures_are_evidenced("0.62.0", log)
+        self.assertEqual(n, 1)
+        self.assertIn("H-996", problems[0])
+
+    def test_a_reopened_gap_is_not_counted_as_closed(self):
+        """The inverse: last line wins in BOTH directions."""
+        log = self._write(
+            "  - [H-995] status: fixed | fixed-in: 0.62.0 | seen: 1\n"
+            "  - [H-995] status: open | seen: 2 | note: reopened, the fix was partial\n")
+        problems, n = record_version.check_closures_are_evidenced("0.62.0", log)
+        self.assertEqual((problems, n), ([], 0))
+
+    def test_a_missing_log_is_a_problem_not_a_silent_zero(self):
+        problems, n = record_version.check_closures_are_evidenced(
+            "0.62.0", Path(tempfile.mkdtemp()) / "nope.md")
+        self.assertEqual(len(problems), 1)
+        self.assertIn("missing", problems[0])
 
 
 class GitReleaseState(unittest.TestCase):

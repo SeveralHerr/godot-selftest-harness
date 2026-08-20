@@ -582,6 +582,43 @@ class PostCommitAndUnknownKeysCase(unittest.TestCase):
             self.assertIn(k, proc.stdout)
 
 
+class MisplacedGlobalFlagCase(unittest.TestCase):
+    """A global flag placed after the subcommand: argparse names the VALUE, not the
+    flag (`unrecognized arguments: .`), and a real session spent a retry on it."""
+
+    SUBS = {"harness-version": None, "ping": None, "screenshot": None}
+
+    def _note(self, argv):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            devtools._explain_misplaced_global_flag(argv, self.SUBS)
+        return err.getvalue()
+
+    def test_flag_after_the_subcommand_names_the_flag_and_the_fix(self):
+        out = self._note(["harness-version", "--client", "-p", "."])
+        self.assertIn("-p/--project", out)
+        self.assertIn("BEFORE the subcommand", out)
+        # The corrected command, not just a complaint.
+        self.assertIn("devtools.py -p <value> harness-version --client", out)
+
+    def test_the_correct_order_says_nothing(self):
+        """The control that matters: a helper that fires on a working command is worse
+        than one that never fires."""
+        self.assertEqual(self._note(["--project", ".", "harness-version", "--client"]), "")
+        self.assertEqual(self._note(["-p", ".", "ping"]), "")
+
+    def test_a_subcommands_own_flag_is_not_mistaken_for_a_global(self):
+        self.assertEqual(self._note(["screenshot", "--region", "0,0,4,4"]), "")
+
+    def test_equals_form_is_recognised(self):
+        self.assertIn("--project", self._note(["ping", "--project=."]))
+
+    def test_a_value_that_looks_like_a_subcommand_does_not_retrigger(self):
+        """`--json` before the subcommand is global and legal; only tokens AFTER the
+        first subcommand are candidates."""
+        self.assertEqual(self._note(["--json", "ping"]), "")
+
+
 class ResolveGapStatusCase(unittest.TestCase):
     """gh#63: an append-only log records a gap's history as `open` -> `open` -> `fixed`
     on separate lines, so a per-line scan for `status: open` reports every FIXED gap as

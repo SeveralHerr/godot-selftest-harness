@@ -14,14 +14,14 @@ extends Node
 ## extension loads AFTER the generic handlers, a project may override a generic
 ## verb by registering the same action string (last-writer-wins).
 
-# harness-version: 0.61.0
+# harness-version: 0.62.0
 # --- Constants ---
 
 ## Version of the godot-selftest-harness these files were copied from. Reported by the
 ## `harness_version` verb and stamped into every copied tool script, so a gap logged
 ## against a project can name the version it was seen on, and a refresh can tell a
 ## stale file from a customized one. Bump with .claude-plugin/plugin.json.
-const HARNESS_VERSION: String = "0.61.0"
+const HARNESS_VERSION: String = "0.62.0"
 
 ## Default bus filenames. With a session id (see _resolve_session) the id is spliced in
 ## before the extension, so two instances can each own a bus in the same user:// dir.
@@ -225,6 +225,11 @@ var _current_request_id: String = ""
 ## since pickup deletes the file.
 var _dispatch_busy: bool = false
 var _dispatch_busy_since_msec: int = 0
+# H-043: this request's watchdog deadline in msec, derived from the caller's own
+# `client_timeout_s`. Falls back to DISPATCH_WATCHDOG_MSEC for a caller that sends
+# none (an older client, or a hand-written command file), so the previous behavior
+# is exactly what "no information" still gets.
+var _dispatch_deadline_msec: int = DISPATCH_WATCHDOG_MSEC
 var _dispatch_busy_action: String = ""
 # Live reference to the instantiated registry extension. MUST be held so the
 # Callables it bound (via register_command) are not freed out from under us.
@@ -737,6 +742,15 @@ func _check_for_commands() -> void:
 	var request_id: String = str(raw_id) if raw_id != null else ""
 	_current_request_id = request_id
 
+	# H-043: the caller's deadline, if it sent one. The watchdog fires at 2s under it,
+	# so the client hears the real reason instead of its own timeout. Never LONGER than
+	# DISPATCH_WATCHDOG_MSEC, and never shorter than 1s.
+	var raw_timeout: Variant = command.get("client_timeout_s")
+	_dispatch_deadline_msec = DISPATCH_WATCHDOG_MSEC
+	if raw_timeout != null and (raw_timeout is float or raw_timeout is int):
+		var want: int = int(float(raw_timeout) * 1000.0) - 2000
+		_dispatch_deadline_msec = clampi(want, 1000, DISPATCH_WATCHDOG_MSEC)
+
 	if action.is_empty():
 		_write_result("unknown", {"success": false, "message": "No action specified"})
 		return
@@ -805,13 +819,13 @@ func _nearest_handler(action: String) -> String:
 ## LOUD -- it names the verb, which the client also has from the breadcrumb file.
 func _check_dispatch_watchdog() -> void:
 	var held_msec: int = Time.get_ticks_msec() - _dispatch_busy_since_msec
-	if held_msec < DISPATCH_WATCHDOG_MSEC:
+	if held_msec < _dispatch_deadline_msec:
 		return
 	var stuck_action: String = _dispatch_busy_action
 	_dispatch_busy = false
 	_dispatch_busy_action = ""
-	var detail: String = "Dispatch guard force-released after %.1fs in '%s'; that handler never returned (a runtime error inside an await never resumes). Accepting commands again -- if '%s' does resume, its reply may cross another." % [
-		held_msec / 1000.0, stuck_action, stuck_action,
+	var detail: String = "Dispatch guard force-released after %.1fs in '%s' (deadline %.1fs, from the caller's own timeout); that handler never returned (a runtime error inside an await never resumes -- look for [SCRIPT ERROR] on the game's stderr). Accepting commands again -- if '%s' does resume, its reply may cross another." % [
+		held_msec / 1000.0, stuck_action, _dispatch_deadline_msec / 1000.0, stuck_action,
 	]
 	_write_log("error", detail)
 	# ANSWER the caller, do not just log at it (gh#1). _current_request_id still
@@ -822,7 +836,8 @@ func _check_dispatch_watchdog() -> void:
 	_write_result(stuck_action, {
 		"success": false,
 		"message": detail,
-		"data": {"wedged_action": stuck_action, "held_seconds": held_msec / 1000.0},
+		"data": {"wedged_action": stuck_action, "held_seconds": held_msec / 1000.0,
+			"deadline_seconds": _dispatch_deadline_msec / 1000.0},
 	})
 
 
