@@ -91,10 +91,10 @@ extends SceneTree
 ## (res://addons/godot_selftest/devtools_config.json key "test_dir", default
 ## "res://test/unit") for files named test_*.gd.
 
-# harness-version: 0.60.0
+# harness-version: 0.61.0
 ## Harness revision these files were copied from. See lint_project.gd / the
 ## `harness_version` bus verb; bump with .claude-plugin/plugin.json.
-const HARNESS_VERSION: String = "0.60.0"
+const HARNESS_VERSION: String = "0.61.0"
 
 const CONFIG_PATH: String = "res://addons/godot_selftest/devtools_config.json"
 const DEFAULT_TEST_DIR: String = "res://test/unit"
@@ -843,6 +843,24 @@ func _print_results() -> void:
 
 static func assert_eq(actual: Variant, expected: Variant, context: String = "") -> String:
 	_assertions_run += 1
+	# gh#59: both sides the SAME object, and that object already freed. `==` is true
+	# because they are one dangling reference, so this comparison cannot fail for any
+	# reason the test intended - the same class of false pass as [VACUOUS], except the
+	# assertion did run, it just asked nothing. A real suite carried
+	# `test_corn_shoots_the_pest_closest_to_escaping` asserting `target == far` where
+	# both had become the same freed Pest, and it passed for many cycles.
+	#
+	# Narrowed to FREED on purpose: two references to the same LIVE object is a
+	# legitimate identity assertion ("the getter handed back the node I gave it"), so
+	# the obvious "both sides are the same object" rule would fail real tests.
+	# `is_same()` rather than `get_instance_id()` because it does not dereference,
+	# which is what makes it safe on a freed operand.
+	if typeof(actual) == TYPE_OBJECT and typeof(expected) == TYPE_OBJECT \
+			and is_same(actual, expected) and not is_instance_valid(actual):
+		var same: String = ("[SAME-OBJECT] both sides of assert_eq are one freed object,"
+			+ " so this comparison cannot fail -- capture what you meant to compare"
+			+ " (a name, an id, a count) BEFORE the thing is freed")
+		return same if context == "" else "%s: %s" % [context, same]
 	if actual == expected:
 		return ""
 	var msg: String = "Expected %s but got %s" % [str(expected), str(actual)]
@@ -1194,3 +1212,28 @@ static func text_width(label: Label) -> float:
 	for line: String in label.text.split("\n"):
 		widest = maxf(widest, font.get_string_size(line, HORIZONTAL_ALIGNMENT_LEFT, -1, font_size).x)
 	return widest
+
+
+## A script's own source as text, for the checks whose seam is a GUARD rather than
+## a value (gh#65). `if pest.is_winged: continue` inside a private method has no
+## predicate to call and nothing to read off an instance, and driving a live grab
+## asserts the grab rather than the exemption - so the only honest seam left is the
+## source. Eight hand-rolled `FileAccess.open` call sites in one project's
+## `test/unit/` is what this replaces, each one re-deciding what a null handle means.
+##
+## Returns "" on a path that will not open, deliberately, and for the same reason
+## `text_width` returns 0.0 on a null font: an unreadable source is precisely the
+## case where a `source.contains(...)` check passes for the wrong reason. Assert on
+## the length before matching:
+##
+## [codeblock]
+## var src: String = _T.file_text("res://game/chomp_flower.gd")
+## var e: String = _T.assert_true(src.length() > 0, "chomp_flower.gd is readable")
+## if e != "": return e
+## return _T.assert_true(src.contains("is_winged"), "winged pests are exempted")
+## [/codeblock]
+static func file_text(path: String) -> String:
+	var file: FileAccess = FileAccess.open(path, FileAccess.READ)
+	if file == null:
+		return ""
+	return file.get_as_text()

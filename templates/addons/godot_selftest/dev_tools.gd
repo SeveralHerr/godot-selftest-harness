@@ -14,14 +14,14 @@ extends Node
 ## extension loads AFTER the generic handlers, a project may override a generic
 ## verb by registering the same action string (last-writer-wins).
 
-# harness-version: 0.60.0
+# harness-version: 0.61.0
 # --- Constants ---
 
 ## Version of the godot-selftest-harness these files were copied from. Reported by the
 ## `harness_version` verb and stamped into every copied tool script, so a gap logged
 ## against a project can name the version it was seen on, and a refresh can tell a
 ## stale file from a customized one. Bump with .claude-plugin/plugin.json.
-const HARNESS_VERSION: String = "0.60.0"
+const HARNESS_VERSION: String = "0.61.0"
 
 ## Default bus filenames. With a session id (see _resolve_session) the id is spliced in
 ## before the extension, so two instances can each own a bus in the same user:// dir.
@@ -240,6 +240,10 @@ var _extension: RefCounted = null
 # (moving-in:G-018, G-025). Nothing in a --script run answers commands, so the
 # claim was pure cost.
 var _passive: bool = false
+# gh#58: true when this instance is inside an exported build that was not opted
+# in. Strictly stronger than _passive - a --script run still loads its config and
+# registers its handlers; a shipped build does neither and returns from _ready().
+var _shipped: bool = false
 var _auto_name_re: RegEx = RegEx.new()
 var _auto_name_re_compiled: bool = false
 # In-tree node count baseline, sampled with the orphan baseline (moving-in:G-030).
@@ -252,6 +256,24 @@ const MIN_GAME_SPEED: float = 0.01
 # --- Lifecycle ---
 
 func _ready() -> void:
+	# gh#58: this autoload ships inside the .pck. An exported build is a PLAYER's
+	# copy of the game, and every behavior below is a developer behavior. A project
+	# exported to the web with an `entry_hook` had that hook fire on every page
+	# load, calling TitleScreen.skip_to_game() so players never saw the menu - and
+	# the bus polled `user://` in the browser's storage for the life of the session.
+	# Nothing errored, the export was green, and it took running the live build in a
+	# browser to notice the title screen was gone.
+	#
+	# So the default is inert: no config, no handlers, no extension, no owner file,
+	# no log, no entry hook, not even _process. Opt back in with a custom feature
+	# tag named `devtools` on the export preset - a deliberate act, unlike shipping
+	# whatever the developer happened to have installed.
+	if _is_shipped_build():
+		_passive = true
+		_shipped = true
+		set_process(false)
+		return
+
 	# Keep polling while the tree is paused (findmyballs:G-003). The bus poll runs
 	# from a pausable process callback, so without this ANY paused state is
 	# unreachable over the bridge - which is exactly the UI most worth verifying:
@@ -326,10 +348,56 @@ func _is_script_run() -> bool:
 	return false
 
 
+## gh#58: true in an exported build (`OS.has_feature("template")`) that was not
+## explicitly opted in. The editor, `godot --path . scene.tscn` and every headless
+## runner all report `template` false, so a developer's loop is untouched by this.
+##
+## TWO opt-ins, because neither one covers the other's case:
+##
+##   - a custom feature tag named `devtools` on the export preset, decided at EXPORT
+##     time. The only mechanism that works for a web export, which is where gh#58 was
+##     found and where there is no command line at all. Not a config key:
+##     `devtools_config.json` need not be in the .pck, so a tag is the one signal
+##     guaranteed to be both present and deliberate.
+##   - `--devtools-force` on the command line, decided at LAUNCH time. The only
+##     mechanism that works on a desktop binary you ALREADY have - debugging the
+##     build a player is running should not require re-exporting it.
+##
+## The flag is the shape the project that reported gh#58 had already hand-patched in
+## and guarded with a test of its own (`test_the_devtools_bridge_stays_out_of_a_
+## players_build`, which greps this condition with comments stripped, so the literal
+## has to be here in code). Its report is what the first half is built from; this is
+## the half it had already worked out, and dropping it would have broken a real
+## project's guard on the next refresh.
+##
+## Both engine args and user args after `--` are read: a shipped game is launched
+## directly (`game.exe --devtools-force`), while a `godot --path . -- --devtools-force`
+## puts it in the user array.
+func _is_shipped_build() -> bool:
+	if not OS.has_feature("template"):
+		return false
+	if OS.has_feature("devtools"):
+		return false
+	for arg: String in OS.get_cmdline_args():
+		if arg == "--devtools-force":
+			return false
+	for arg: String in OS.get_cmdline_user_args():
+		if arg == "--devtools-force":
+			return false
+	return true
+
+
 ## True when this instance owns and polls a bus. Exposed so an extension or a test
 ## can tell a live bridge from a passive --script instance.
 func is_bus_active() -> bool:
 	return not _passive
+
+
+## gh#58: true when this instance is inert because it is inside a shipped export.
+## A project that wants to keep some debug affordance in a release build can
+## branch on this rather than duplicating the feature-tag check.
+func is_shipped_build() -> bool:
+	return _shipped
 
 
 func _process(_delta: float) -> void:
@@ -583,6 +651,7 @@ func _register_generic_handlers() -> void:
 	register_command("validate_ui", _cmd_validate_ui)
 	register_command("get_ui_snapshot", _cmd_get_ui_snapshot)
 	register_command("get_node_bounds", _cmd_get_node_bounds)
+	register_command("what_drew", _cmd_what_drew)
 	register_command("contained_in", _cmd_contained_in)
 	register_command("canvas_scale", _cmd_canvas_scale)
 	register_command("aabb", _cmd_aabb)
@@ -1089,10 +1158,20 @@ func _cmd_screenshot(args: Dictionary) -> Dictionary:
 	if err != OK:
 		return {"success": false, "message": "Failed to save PNG: error %d" % err}
 
+	# gh#60: a paused tree freezes every Tween where it stood, so a capture taken
+	# after `pause` can show a 64px sprite as a 20px speck (its entrance tween stuck
+	# at scale 0.4) with nothing in the reply to suggest the picture is mid-flight.
+	# `ping`, `performance` and `first_frame` already say this; these two - the two
+	# whose output a human reads rather than asserts on - did not.
+	var paused: bool = get_tree().paused
+	var shot_msg: String = "Screenshot saved"
+	if paused:
+		shot_msg += " -- TREE IS PAUSED (tweens and entrances are frozen where they were)"
 	return {
 		"success": true,
-		"message": "Screenshot saved",
+		"message": shot_msg,
 		"data": {
+			"tree_paused": paused,
 			"path": abs_path,
 			"width": image.get_width(),
 			"height": image.get_height(),
@@ -2534,12 +2613,26 @@ func _cmd_input_key(args: Dictionary) -> Dictionary:
 ##         report; defaults to the current one), "buttons": int (button mask) }
 ## data keys: relative {x,y}, steps, position {x,y}, mouse_mode.
 func _cmd_mouse_move(args: Dictionary) -> Dictionary:
-	var rel: Variant = _parse_vector2_or_null(args.get("relative"))
-	if rel == null:
-		return {"success": false, "message": "mouse_move needs relative as [dx, dy]"}
 	var steps: int = clampi(int(args.get("steps", 1)), 1, 600)
 	var pos_raw: Variant = _parse_vector2_or_null(args.get("position"))
-	var pos: Vector2 = pos_raw if pos_raw != null else get_viewport().get_mouse_position()
+	var start: Vector2 = get_viewport().get_mouse_position()
+	var rel: Variant = _parse_vector2_or_null(args.get("relative"))
+	# plant-tower-defense:G-141: `relative` used to be REQUIRED, so an absolute move was
+	# undrivable - and Godot's relative motion never sets `position`, so a handler doing
+	# `_update_cursor(motion.position)` saw (0, 0). That is not a niche shape: hover cues,
+	# tooltips, drag previews, placement previews and cursor-following art are all
+	# `position` readers. Given `position` alone, the delta from where the cursor is now
+	# IS the honest relative, so it is computed rather than demanded.
+	if rel == null:
+		if pos_raw == null:
+			return {"success": false, "message": "mouse_move needs relative as [dx, dy], "
+				+ "position as [x, y], or both"}
+		rel = (pos_raw as Vector2) - start
+	var pos: Vector2 = start
+	if pos_raw != null:
+		# Walk TO the given point: start one full delta behind it so the last event lands
+		# exactly there. Reported `position` is where the cursor ends up either way.
+		pos = (pos_raw as Vector2) - (rel as Vector2)
 	var buttons: int = int(args.get("buttons", 0))
 	var per_step: Vector2 = (rel as Vector2) / float(steps)
 	for i: int in range(steps):
@@ -4337,6 +4430,235 @@ func _cmd_get_node_bounds(args: Dictionary) -> Dictionary:
 	}
 
 
+## gh#62: `node-bounds` inverted. Every other spatial verb is keyed on the NODE --
+## `find-nodes` needs the class, `node-bounds` needs the path, `sample-pixels`
+## returns a colour and says nothing about the painter -- so "what drew this mark"
+## had only one method available: hide a candidate layer, re-capture, compare one
+## pixel. That is O(candidate layers) round trips and only works if you can guess
+## the candidates; identifying one 32x5 mark on a road cell took five of them, after
+## two confident wrong theories.
+##
+## Same geometry as `node-bounds` (`get_global_transform_with_canvas()`, ancestor
+## CanvasLayer transforms applied) applied over the tree with a containment test,
+## deliberately reusing that function rather than growing a second copy that can
+## drift from it.
+##
+## PAINTERS AND CONTAINERS ARE SEPARATED, which is the whole difference between a
+## usable answer and a list. A Node2D at (0,0) whose children carry the ink contains
+## every point on screen; reporting it beside the thing that actually drew is the
+## noise that makes a hit-test worthless. `painters` is what has ink of its own,
+## topmost first; `containers` is the ancestry, for when the painter is not the node
+## you wanted to name.
+##
+## args: { "x": float, "y": float,  # or "at": [x, y] -- VIEWPORT coordinates,
+##         "include_hidden": bool,  # default false
+##         "limit": int }           # painters reported, default 12
+func _cmd_what_drew(args: Dictionary) -> Dictionary:
+	var at: Vector2 = Vector2(float(args.get("x", 0.0)), float(args.get("y", 0.0)))
+	var raw_at: Variant = args.get("at")
+	if raw_at is Array and (raw_at as Array).size() == 2:
+		var a: Array = raw_at
+		at = Vector2(float(a[0]), float(a[1]))
+	var include_hidden: bool = bool(args.get("include_hidden", false))
+	var limit: int = maxi(1, int(args.get("limit", 12)))
+
+	var vp: Vector2 = _screen_reference_rect().size
+	var in_viewport: bool = at.x >= 0.0 and at.y >= 0.0 and at.x <= vp.x and at.y <= vp.y
+
+	var hits: Array[Dictionary] = []
+	_collect_hits_at(get_tree().root, at, include_hidden, hits)
+
+	# Topmost first. Draw order is parents-then-children with siblings in order, so
+	# the LAST thing collected is the last thing painted -- but a higher z_index wins
+	# regardless of tree position, which is the one case raw tree order gets wrong.
+	#
+	# Sorted on the PAIR rather than sorted-by-z over a reversed array: Godot's
+	# `sort_custom` is an introsort and is NOT stable, so "reverse, then sort by z"
+	# would leave equal-z nodes in whatever order the sort happened to land them --
+	# which is most of them, since z_index is 0 almost everywhere. `_order` is the
+	# collection index, so the comparison is total and the result is deterministic.
+	hits.sort_custom(func(p: Dictionary, q: Dictionary) -> bool:
+		if int(p["z_index"]) != int(q["z_index"]):
+			return int(p["z_index"]) > int(q["z_index"])
+		return int(p["_order"]) > int(q["_order"]))
+
+	var painters: Array[Dictionary] = []
+	var containers: Array[Dictionary] = []
+	for h: Dictionary in hits:
+		h.erase("_order")
+		if str(h["paints"]).is_empty():
+			containers.append(h)
+		else:
+			painters.append(h)
+	var truncated: int = maxi(0, painters.size() - limit)
+	if truncated > 0:
+		painters = painters.slice(0, limit)
+
+	var msg: String = ""
+	if painters.is_empty():
+		# The honest answer, and the one a hit-test most needs to be able to give.
+		# Nothing with ink of its own covers the point: the mark may be painted by a
+		# _draw() this scan cannot measure the extent of, by a shader, or by a class
+		# that reports no extent -- all of which are named rather than glossed.
+		msg = "nothing with ink of its own covers (%.0f, %.0f)" % [at.x, at.y]
+		if not containers.is_empty():
+			msg += "; %d container(s) do: %s" % [containers.size(),
+				", ".join(_hit_names(containers, 4))]
+		msg += (". A node whose class reports no extent (see size_source) is invisible to"
+			+ " this scan -- so is anything painted by a shader. `sample-pixels --points"
+			+ " %d,%d` says whether there is ink there at all") % [int(at.x), int(at.y)]
+	else:
+		var top: Dictionary = painters[0]
+		msg = "%s (%s) at %s -- %s" % [top["name"], top["type"], top["path"], top["paints"]]
+		if painters.size() > 1:
+			msg += "; %d more painter(s) under it: %s" % [painters.size() - 1,
+				", ".join(_hit_names(painters.slice(1), 4))]
+	if not in_viewport:
+		msg += " -- POINT IS OUTSIDE THE %dx%d VIEWPORT" % [int(vp.x), int(vp.y)]
+	if get_tree().paused:
+		msg += " -- TREE IS PAUSED (tweens and entrances are frozen where they were)"
+
+	return {
+		"success": true,
+		"message": msg,
+		"data": {
+			"at": {"x": at.x, "y": at.y},
+			"in_viewport": in_viewport,
+			"viewport": {"w": vp.x, "h": vp.y},
+			"painters": painters,
+			"containers": containers,
+			"painters_truncated": truncated,
+			"tree_paused": get_tree().paused,
+			"include_hidden": include_hidden,
+			"geometry_trustworthy": _geometry_caveat().is_empty(),
+			"geometry_caveat": _geometry_caveat(),
+		},
+	}
+
+
+func _hit_names(hits: Array, count: int) -> PackedStringArray:
+	var out: PackedStringArray = PackedStringArray()
+	for i: int in mini(count, hits.size()):
+		out.append("%s (%s)" % [hits[i]["name"], hits[i]["type"]])
+	if hits.size() > count:
+		out.append("+%d more" % (hits.size() - count))
+	return out
+
+
+## Depth-first in DRAW order (self, then children in order), appending every
+## CanvasItem whose screen rect contains `at`.
+func _collect_hits_at(node: Node, at: Vector2, include_hidden: bool,
+		out: Array[Dictionary]) -> void:
+	if node is CanvasItem:
+		var item: CanvasItem = node as CanvasItem
+		var visible_now: bool = _is_effectively_visible(item)
+		if visible_now or include_hidden:
+			var rect: Rect2
+			var size_source: String
+			if item is Control:
+				rect = _screen_rect_of(item as Control)
+				size_source = "get_global_transform_with_canvas() x Control.size (screen space)"
+			else:
+				rect = item.get_global_transform_with_canvas() * _local_draw_rect(item)
+				size_source = _local_draw_rect_source(item)
+			# A zero-size rect contains no point, so a class that reports no extent
+			# drops out here rather than being reported at its origin. That is why the
+			# empty-painters message names the possibility instead of implying none.
+			if rect.size.x > 0.0 and rect.size.y > 0.0 and rect.has_point(at):
+				out.append({
+					# Draw-order index, used only to make the sort total; stripped
+					# before the reply so it is not mistaken for a public field.
+					"_order": out.size(),
+					"name": str(item.name),
+					"path": str(item.get_path()),
+					"type": item.get_class(),
+					"script": _script_path_of(item),
+					"scene_file": str(item.scene_file_path),
+					"z_index": _effective_z_index(item),
+					"visible": visible_now,
+					"modulate_a": _get_effective_alpha(item),
+					"paints": _paints_how(item),
+					"rect": {"x": rect.position.x, "y": rect.position.y,
+						"w": rect.size.x, "h": rect.size.y},
+					"size_source": size_source,
+				})
+	for child: Node in node.get_children():
+		_collect_hits_at(child, at, include_hidden, out)
+
+
+## How this node puts ink on the screen, or "" when it carries none of its own.
+## The distinction between a painter and a container IS the readable answer here.
+func _paints_how(item: CanvasItem) -> String:
+	if _script_declares_method(item, "_draw"):
+		return "_draw() override in %s" % _script_path_of(item)
+	if item is Line2D:
+		var line: Line2D = item as Line2D
+		return "Line2D: %d point(s), width %.1f" % [line.points.size(), line.width]
+	if item is Sprite2D:
+		var sprite: Sprite2D = item as Sprite2D
+		if sprite.texture != null:
+			return "Sprite2D texture %s" % sprite.texture.resource_path
+		return ""
+	if item is AnimatedSprite2D:
+		var anim: AnimatedSprite2D = item as AnimatedSprite2D
+		return "AnimatedSprite2D animation '%s' frame %d" % [anim.animation, anim.frame]
+	if item is Polygon2D:
+		return "Polygon2D: %d point(s)" % (item as Polygon2D).polygon.size()
+	if item is TileMapLayer:
+		return "TileMapLayer tiles"
+	if item is TextureRect:
+		var tr: TextureRect = item as TextureRect
+		return "TextureRect texture %s" % tr.texture.resource_path if tr.texture != null else ""
+	if item is NinePatchRect:
+		return "NinePatchRect texture"
+	if item is ColorRect:
+		return "ColorRect fill #%s" % (item as ColorRect).color.to_html(false)
+	if item is Label or item is RichTextLabel or item is Button or item is LineEdit:
+		var text: String = _get_control_text(item as Control)
+		return "%s text %s" % [item.get_class(), JSON.stringify(text)]
+	if item is Panel or item is PanelContainer:
+		return "%s stylebox" % item.get_class()
+	if item is ProgressBar or item is TextureProgressBar:
+		return "%s value %s" % [item.get_class(), str((item as Range).value)]
+	return ""
+
+
+## True only when the node's own SCRIPT declares the method. `has_method()` is
+## useless for this: `_draw` is a CanvasItem virtual, so it answers true for every
+## CanvasItem in the tree and would mark the whole scene a painter.
+func _script_declares_method(node: Object, method: String) -> bool:
+	var script: Script = node.get_script() as Script
+	while script != null:
+		for m: Dictionary in script.get_script_method_list():
+			if str(m.get("name", "")) == method:
+				return true
+		script = script.get_base_script()
+	return false
+
+
+func _script_path_of(node: Object) -> String:
+	var script: Script = node.get_script() as Script
+	return str(script.resource_path) if script != null else ""
+
+
+## z_index accumulated through z_as_relative ancestors, which is the order the
+## renderer actually uses -- a child with z_index 0 under a parent at 10 draws above
+## a sibling branch at 5, and reporting the raw property would order it wrong.
+func _effective_z_index(item: CanvasItem) -> int:
+	var z: int = 0
+	var cur: CanvasItem = item
+	while cur != null:
+		if cur is Node2D:
+			var n2: Node2D = cur as Node2D
+			z += n2.z_index
+			if not n2.z_as_relative:
+				break
+		elif cur is Control:
+			break
+		cur = cur.get_parent() as CanvasItem
+	return z
+
+
 ## Best-effort local-space extent of a non-Control CanvasItem. Rect2() (a zero
 ## size at the origin) when nothing can be claimed -- see _cmd_get_node_bounds.
 func _local_draw_rect(item: CanvasItem) -> Rect2:
@@ -4349,6 +4671,31 @@ func _local_draw_rect(item: CanvasItem) -> Rect2:
 			size *= Vector2(1.0 / maxf(1.0, float(sprite.hframes)), 1.0 / maxf(1.0, float(sprite.vframes)))
 			var origin: Vector2 = -size * 0.5 if sprite.centered else Vector2.ZERO
 			return Rect2(origin + sprite.offset, size)
+	elif item is Line2D:
+		# gh#62: the motivating case. A pooled Line2D's `position` is usually (0,0)
+		# and all of its ink is in `points`, so a scan that reads position/size sends
+		# the reader nowhere near the mark.
+		var line: Line2D = item as Line2D
+		if line.points.size() > 0:
+			var lr: Rect2 = Rect2(line.points[0], Vector2.ZERO)
+			for p: Vector2 in line.points:
+				lr = lr.expand(p)
+			return lr.grow(maxf(0.5, line.width * 0.5))
+	elif item is Polygon2D:
+		var poly: PackedVector2Array = (item as Polygon2D).polygon
+		if poly.size() > 0:
+			var pr: Rect2 = Rect2(poly[0], Vector2.ZERO)
+			for p: Vector2 in poly:
+				pr = pr.expand(p)
+			return pr
+	elif item is AnimatedSprite2D:
+		var anim: AnimatedSprite2D = item as AnimatedSprite2D
+		if anim.sprite_frames != null and anim.sprite_frames.has_animation(anim.animation):
+			var tex: Texture2D = anim.sprite_frames.get_frame_texture(anim.animation, anim.frame)
+			if tex != null:
+				var asz: Vector2 = tex.get_size()
+				var aorigin: Vector2 = -asz * 0.5 if anim.centered else Vector2.ZERO
+				return Rect2(aorigin + anim.offset, asz)
 	elif item is CollisionShape2D:
 		var shape: Shape2D = (item as CollisionShape2D).shape
 		if shape != null:
@@ -4364,6 +4711,12 @@ func _local_draw_rect(item: CanvasItem) -> Rect2:
 func _local_draw_rect_source(item: CanvasItem) -> String:
 	if item is Sprite2D:
 		return "Sprite2D texture rect"
+	if item is Line2D:
+		return "Line2D points bounding box (grown by half the width)"
+	if item is Polygon2D:
+		return "Polygon2D polygon bounding box"
+	if item is AnimatedSprite2D:
+		return "AnimatedSprite2D current frame rect"
 	if item is CollisionShape2D:
 		return "CollisionShape2D shape rect"
 	if item is TileMapLayer:
@@ -5958,10 +6311,19 @@ func _cmd_sample_pixels(args: Dictionary) -> Dictionary:
 		msg += "; expected #%s (tol %d): %d px (%.1f%%)%s" % [
 			eo["color"], tolerance, eo["count"], 100.0 * float(eo["fraction"]),
 			" <- ABSENT" if eo["absent"] else ""]
+	# gh#60: a paused tree freezes every Tween where it stood, so a capture taken
+	# after `pause` can show a 64px sprite as a 20px speck (its entrance tween stuck
+	# at scale 0.4) with nothing in the reply to suggest the picture is mid-flight.
+	# `ping`, `performance` and `first_frame` already say this; these two - the two
+	# whose output a human reads rather than asserts on - did not.
+	var sp_paused: bool = get_tree().paused
+	if sp_paused:
+		msg += " -- TREE IS PAUSED (tweens and entrances are frozen where they were)"
 	return {
 		"success": true,
 		"message": msg,
 		"data": {
+			"tree_paused": sp_paused,
 			"rect": {"x": rect.position.x, "y": rect.position.y,
 				"w": rect.size.x, "h": rect.size.y},
 			"pixels": count,

@@ -89,11 +89,11 @@ from pathlib import Path
 from typing import Optional  # noqa: F401
 
 
-# harness-version: 0.60.0
+# harness-version: 0.61.0
 # Version of the godot-selftest-harness this client was copied from. Compared against
 # the running game's own stamp by the `harness-version` verb, so a half-refreshed
 # install (new client, old autoload) is visible instead of mysterious.
-HARNESS_VERSION = "0.60.0"
+HARNESS_VERSION = "0.61.0"
 
 COMMANDS_FILE = "devtools_commands.json"
 RESULTS_FILE = "devtools_results.json"
@@ -1140,6 +1140,14 @@ def cmd_screenshot(args, project_path: Path):
     data = result["data"]
     print(f"Screenshot saved: {data['path']}")
     print(f"Size: {data['width']}x{data['height']}")
+    # gh#60: this print path never echoes `message`, so the game-side pause marker
+    # would be invisible here of all places - a capture of a frozen mid-entrance
+    # tween is a valid PNG of a sprite at 40% scale, and nothing said so. Keyed on
+    # the data key rather than the message text; a game older than 0.61.0 sends
+    # neither and stays silent, as it does today.
+    if data.get("tree_paused"):
+        print("TREE IS PAUSED: tweens and entrances are frozen where they were - "
+              "unpause, `wait-frames`, re-pause and re-capture if the subject animates in")
     scale = data.get("scale") or {}
     sx, sy = float(scale.get("x", 1.0) or 1.0), float(scale.get("y", 1.0) or 1.0)
     vp = data.get("viewport") or {}
@@ -2580,7 +2588,29 @@ def _plugin_roots_on_this_machine() -> dict:
     return out
 
 
-_LOG_OPEN_GAP_RE = re.compile(r"^\s*-\s*\[(G-\d+[a-z]?)\]\s*status:\s*open\b", re.M)
+# gh#63: RESOLVED per id, from the LAST status line, with the line number it came
+# from. The predecessor matched `status: open` per LINE, and the log format is
+# append-only by design - a gap's history is `open` -> `open` -> `fixed` on separate
+# lines - so every fixed gap read as open forever. On a real project that printed
+# eleven already-`fixed` ids under the heading "the log's status line is what is
+# stale", which invites flipping eleven correct lines.
+_LOG_GAP_STATUS_RE = re.compile(
+    r"^\s*-\s*\[((?:[A-Za-z0-9._-]+:)?G-\d+[a-z]?)\]\s*status:\s*([A-Za-z-]+)", re.M)
+
+
+def _resolve_gap_status(text: str):
+    """id -> (status, 1-based line number of the line that decided it).
+
+    The LAST status line for an id wins, the way the log is meant to be read and the
+    way a project's own gap_ledger resolves it. Ids may be bare (`G-014`) in a
+    project's log or qualified (`plant-tower-defense:G-014`) once pooled upstream;
+    both are keyed on the bare id so the two logs can be compared.
+    """
+    out = {}
+    for m in _LOG_GAP_STATUS_RE.finditer(text):
+        gid = m.group(1).split(":")[-1]
+        out[gid] = (m.group(2).lower(), text.count("\n", 0, m.start()) + 1)
+    return out
 
 
 def _project_gap_names(project_path: Path):
@@ -2611,15 +2641,20 @@ def fixed_upstream_for_project(project_path: Path, newest_root: Path):
     names = _project_gap_names(project_path)
     log = project_path / "log-devtools.md"
     try:
-        open_ids = set(_LOG_OPEN_GAP_RE.findall(log.read_text(encoding="utf-8", errors="replace")))
+        resolved = _resolve_gap_status(log.read_text(encoding="utf-8", errors="replace"))
     except OSError:
-        return [], [], names
+        return [], [], names, {}, {}
+    open_ids = {g for g, (st, _ln) in resolved.items() if st == "open"}
     if not open_ids:
-        return [], [], names
+        return [], [], names, {}, {}
     pats = [re.compile(r"\b%s:(G-\d+[a-z]?)\b" % re.escape(n)) for n in names]
 
-    def credits_under(*dirs):
-        found = set()
+    def cites_under(*dirs):
+        """id -> the first file that MENTIONS it. A mention is a citation, not a
+        credit (gh#63): `import_check.py` names plant:G-044 in a comment that
+        describes a retry-until-progress loop around an importer segfault, which is
+        evidence the gap is KNOWN, not that it is closed."""
+        found = {}
         for d in dirs:
             if not d.is_dir():
                 continue
@@ -2629,16 +2664,26 @@ def fixed_upstream_for_project(project_path: Path, newest_root: Path):
                 except OSError:
                     continue
                 for pat in pats:
-                    found.update(pat.findall(text))
+                    for gid in pat.findall(text):
+                        found.setdefault(gid, f.name)
         return found
 
-    newest = credits_under(newest_root / "templates")
-    # The templates the project already RUNS: a credit there is a fix it has, so its
-    # log's status line is stale, not its install.
-    installed = credits_under(project_path / "addons" / "godot_selftest", project_path / "tools")
+    newest_cites = cites_under(newest_root / "templates")
+    installed_cites = cites_under(project_path / "addons" / "godot_selftest",
+                                  project_path / "tools")
+    # The only thing that is a CREDIT: a `status: fixed` line for this id in the
+    # upstream gaps log, which is where a release records what it closed.
+    try:
+        up = _resolve_gap_status(
+            (newest_root / "log-devtools.md").read_text(encoding="utf-8", errors="replace"))
+    except OSError:
+        up = {}
+    credited = {g: ln for g, (st, ln) in up.items() if st == "fixed"}
     order = lambda g: (len(g), g)
-    return (sorted(open_ids & (newest - installed), key=order),
-            sorted(open_ids & installed, key=order), names)
+    fixed = sorted(open_ids & set(credited) - set(installed_cites), key=order)
+    cited_here = sorted(open_ids & set(installed_cites), key=order)
+    lines = {g: resolved[g][1] for g in set(fixed) | set(cited_here)}
+    return fixed, cited_here, names, installed_cites, lines
 
 
 def _releases_behind(project_version: str, newest_root: Path):
@@ -2684,16 +2729,27 @@ def _print_plugin_staleness(project_version: str, project_path: "Path | None" = 
               f"runs ({project_version}){gap}. /scaffold-godot-harness refreshes it; gaps you log "
               f"against {project_version} may be fixed there already.", file=sys.stderr)
         if newest_root is not None:
-            fixed, stale, names = fixed_upstream_for_project(
+            fixed, cited, names, where, lines = fixed_upstream_for_project(
                 project_path or Path(".").resolve(), newest_root)
+            def _with_line(g):
+                return "%s (log-devtools.md:%d)" % (g, lines[g]) if g in lines else g
             if fixed:
-                print(f"  {len(fixed)} gap(s) this project filed ({', '.join(fixed)}) are credited "
-                      f"as fixed in releases it does not have (searched {newest}'s templates for "
-                      f"{', '.join(names)}:G-*). Run /scaffold-godot-harness.", file=sys.stderr)
-            if stale:
-                print(f"  {len(stale)} open gap(s) in this project's log ({', '.join(stale)}) are "
-                      f"already credited in the templates it RUNS - the fix is installed; the "
-                      f"log's status line is what is stale.", file=sys.stderr)
+                print(f"  {len(fixed)} gap(s) this project filed ({', '.join(_with_line(g) for g in fixed)}) "
+                      f"carry a `status: fixed` record in {newest}'s own gaps log, and this project "
+                      f"does not have that release. Run /scaffold-godot-harness.", file=sys.stderr)
+            if cited:
+                # gh#63: NOT "the fix is installed". A mention in the templates the
+                # project runs means the id is REFERENCED there; whether that reference
+                # is a fix or a workaround is not something a grep can tell, and the
+                # previous wording ("the log's status line is what is stale") read as an
+                # instruction to close them. One of the twelve it named that way was a
+                # live importer-crash gap whose "credit" was a retry loop.
+                print(f"  {len(cited)} open gap(s) in this project's log are REFERENCED by name in "
+                      f"the templates it runs: "
+                      + "; ".join(f"{_with_line(g)} in {where.get(g, '?')}" for g in cited)
+                      + ". A reference may be a fix OR a workaround around a live bug - read it "
+                        "before closing the gap. Only a `status: fixed` line upstream is a credit.",
+                      file=sys.stderr)
 
 
 def _warn_shared_user_dir(user_dir: Path, project_path: Path) -> None:
@@ -2936,7 +2992,17 @@ def cmd_mouse_move(args, project_path: Path):
 
     Data keys read: relative, steps, position, mouse_mode.
     """
-    cmd_args = {"relative": [float(args.relative[0]), float(args.relative[1])]}
+    # plant-tower-defense:G-141: either alone is enough now. `--position` on its own is
+    # the absolute move that was previously impossible; the game derives the relative
+    # from where the cursor actually is.
+    cmd_args = {}
+    if args.relative is not None:
+        cmd_args["relative"] = [float(args.relative[0]), float(args.relative[1])]
+    if args.relative is None and args.position is None:
+        print("mouse-move: give --relative dx dy, --position x y, or both. --position "
+              "alone moves the cursor there and reports the delta it travelled; "
+              "--relative alone moves by that delta from wherever it is.", file=sys.stderr)
+        sys.exit(2)
     if args.steps is not None:
         cmd_args["steps"] = args.steps
     if args.position is not None:
@@ -3781,6 +3847,71 @@ def cmd_contained_in(args, project_path: Path):
         sys.exit(1)
 
 
+def cmd_what_drew(args, project_path: Path):
+    """Which node drew the pixel at (x, y) -- `node-bounds` inverted (bus verb:
+    what_drew, gh#62).
+
+    Data keys read: painters[], containers[], painters_truncated, at, in_viewport,
+    viewport, tree_paused. Every one of them is printed or accounted for; a reply
+    missing `painters` is an older game-side harness and says so rather than
+    printing an empty answer, which here would read as "nothing drew it".
+    """
+    at = args.at
+    cmd_args = {"at": [at[0], at[1]], "include_hidden": bool(args.include_hidden),
+                "limit": int(args.limit)}
+    result = send_command(project_path, "what_drew", cmd_args)
+    if not result["success"]:
+        print(f"Failed: {result['message']}", file=sys.stderr)
+        sys.exit(1)
+    data = result.get("data") or {}
+    if "painters" not in data:
+        print("what-drew: the reply carried no 'painters' key - this game's harness "
+              "predates 0.61.0 and nothing was inspected. Refresh with "
+              "/scaffold-godot-harness.", file=sys.stderr)
+        sys.exit(2)
+    print(result.get("message", ""))
+    painters = data.get("painters") or []
+    if painters:
+        print(f"Painters at ({at[0]}, {at[1]}), topmost first:")
+        for p in painters:
+            r = p.get("rect") or {}
+            print(f"  {p.get('path')}  [{p.get('type')}] z={p.get('z_index')}")
+            print(f"      paints: {p.get('paints')}")
+            print(f"      rect: {r.get('x'):.0f},{r.get('y'):.0f} "
+                  f"{r.get('w'):.0f}x{r.get('h'):.0f}  ({p.get('size_source')})")
+            extra = []
+            if p.get("script"):
+                extra.append(f"script {p['script']}")
+            if p.get("scene_file"):
+                extra.append(f"scene {p['scene_file']}")
+            if not p.get("visible"):
+                extra.append("HIDDEN")
+            if float(p.get("modulate_a") or 1.0) < 1.0:
+                extra.append(f"alpha {float(p['modulate_a']):.2f}")
+            if extra:
+                print("      " + "; ".join(extra))
+    dropped = int(data.get("painters_truncated") or 0)
+    if dropped:
+        # Never a silent cap: a truncated list reads exactly like a complete one.
+        print(f"  ... {dropped} further painter(s) not shown (--limit)")
+    containers = data.get("containers") or []
+    if containers:
+        # Second, and only as ancestry. These are what made the naive version of this
+        # verb unreadable - a Node2D at (0,0) contains every point on screen.
+        print(f"Containers covering the point ({len(containers)}, no ink of their own): "
+              + ", ".join(c.get("path", "?") for c in containers[:8])
+              + (f", +{len(containers) - 8} more" if len(containers) > 8 else ""))
+    if not data.get("in_viewport"):
+        vp = data.get("viewport") or {}
+        print(f"NOTE: ({at[0]}, {at[1]}) is outside the "
+              f"{int(vp.get('w', 0))}x{int(vp.get('h', 0))} viewport - what-drew takes "
+              "VIEWPORT coordinates (what node-bounds reports), not capture pixels; "
+              "screenshot --region reports the scale when they differ",
+              file=sys.stderr)
+    if not painters:
+        sys.exit(1)
+
+
 def cmd_node_bounds(args, project_path: Path):
     """Get bounds for a specific node."""
     args.node_path = normalize_node_path(args.node_path)  # G-025
@@ -4421,6 +4552,10 @@ def uid_to_text(uid_id: int) -> str:
     return "uid://" + "".join(reversed(out))
 
 
+# Suffixes Godot actually mints a `uid://` for. plant-tower-defense:G-143.
+UID_SUFFIXES = frozenset({".gd", ".tscn", ".tres", ".res", ".gdshader", ".gdshaderinc"})
+
+
 def cmd_new_uid(args, project_path: Path):
     """Emit a fresh, correctly-encoded, collision-checked uid:// string.
 
@@ -4457,6 +4592,18 @@ def cmd_new_uid(args, project_path: Path):
         target = Path(args.write)
         if not target.is_absolute():
             target = project_path / target
+        # plant-tower-defense:G-143: a UID is a Godot *resource* identity. Run out of
+        # habit after adding a new Python tool, this wrote `tools/gate_aim_check.py.uid`
+        # and printed a success line - a file that means nothing, that lint's UID pass
+        # (which walks `.gd`) will never mention, and that sits in the tree unexplained.
+        # The verb has the extension in hand, so refusing costs one `if`.
+        if target.suffix.lower() not in UID_SUFFIXES:
+            print(f"Error: Godot mints uid:// sidecars for resources, and "
+                  f"'{target.suffix or '(no suffix)'}' is not one ("
+                  + ", ".join(sorted(UID_SUFFIXES)) + f"). Refusing to write {target.name}"
+                  ".uid - it would be inert, untracked by lint's UID pass, and "
+                  "unexplained in the tree.", file=sys.stderr)
+            sys.exit(1)
         if target.suffix != ".uid":
             target = target.with_suffix(target.suffix + ".uid")
         if target.exists():
@@ -5082,13 +5229,20 @@ def main():
     p.set_defaults(func=cmd_key)
 
     # mouse-move
-    p = subparsers.add_parser("mouse-move", help="Dispatch a real InputEventMouseMotion with a "
-                                                 "chosen relative delta (mouse-look)")
-    p.add_argument("--relative", required=True, type=coord_pair, metavar="DX,DY",
-                   help="Motion delta in pixels, e.g. 40,0 to look right")
+    p = subparsers.add_parser("mouse-move", help="Dispatch a real InputEventMouseMotion by a "
+                                                 "relative delta (mouse-look), to an "
+                                                 "absolute position (hover cues), or both")
+    p.add_argument("--relative", type=coord_pair, metavar="DX,DY",
+                   help="Motion delta in pixels, e.g. 40,0 to look right. Optional when "
+                        "--position is given: the delta is then computed from where the "
+                        "cursor actually is")
     p.add_argument("--steps", type=int, help="Split the delta into N events, one per frame (default 1)")
     p.add_argument("--position", type=coord_pair, metavar="X,Y",
-                   help="Absolute cursor position to report (default: current)")
+                   help="Absolute cursor position. Alone, this moves the cursor THERE - "
+                        "Godot's relative motion never sets `position`, so a handler "
+                        "reading motion.position (hover cues, tooltips, drag and "
+                        "placement previews) sees nothing from --relative alone "
+                        "(plant-tower-defense:G-141)")
     p.add_argument("--buttons", type=int, help="Button mask held during the motion (default 0)")
     p.set_defaults(func=cmd_mouse_move)
 
@@ -5388,6 +5542,20 @@ def main():
     p = subparsers.add_parser("node-bounds", help="Get bounds for a specific node")
     p.add_argument("node_path", help="Node path (e.g., /root/Main/HUD/TopBar/CurrencyLabel)")
     p.set_defaults(func=cmd_node_bounds)
+
+    # what-drew - node-bounds inverted (gh#62)
+    p = subparsers.add_parser(
+        "what-drew",
+        help="Which node drew the pixel at (x, y): every CanvasItem whose screen rect "
+             "contains the point, painters first (topmost first), containers second. "
+             "Exit 1 when nothing with ink of its own covers it")
+    p.add_argument("--at", nargs=2, type=float, required=True, metavar=("X", "Y"),
+                   help="Point in VIEWPORT coordinates - the space node-bounds reports")
+    p.add_argument("--include-hidden", action="store_true",
+                   help="Also report nodes that are not effectively visible")
+    p.add_argument("--limit", type=int, default=12,
+                   help="Painters to report (default 12); the count dropped is printed")
+    p.set_defaults(func=cmd_what_drew)
 
     # aabb - the 3D counterpart of node-bounds
     p = subparsers.add_parser("aabb",

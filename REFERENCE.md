@@ -756,6 +756,27 @@ Notable behaviors:
   over `sample-pixels`/`screenshot`/`node-bounds` without racing anything, `unpause`
   to resume. Idempotent either direction; the reply's `was_paused` says what state it
   found.
+- **Nothing runs in an exported build** (0.61.0, gh#58). The bridge is an autoload, so
+  it goes into the `.pck` whether anyone meant it to or not, and until 0.61.0 the only
+  thing separating a developer's launch from a player's copy was `--script` on the
+  command line — false in both. A project exported to the web therefore fired its
+  `entry_hook` on every page load, calling `TitleScreen.skip_to_game()` so players
+  never saw the menu, and polled `user://` in the browser's storage for the life of
+  every session. Nothing errored and the export was green. Now `OS.has_feature(
+  "template")` makes the autoload inert — `_ready()` returns immediately, `_process`
+  is disabled, and no config, handler, extension, owner file, log or hook exists. The
+  editor, `godot --path . scene.tscn` and every headless runner report `template`
+  false, so the developer loop is untouched. **Two ways to keep the bridge inside a
+  build**, because neither covers the other's case: a custom feature tag named
+  `devtools` on the export preset, decided at *export* time and the only one that
+  works for a web export (where there is no command line — and web is where this was
+  found); or `--devtools-force` on the command line, decided at *launch* time and the
+  only one that works on a desktop binary you already have, since debugging the build
+  a player is running should not require re-exporting it. Both engine args and user
+  args after `--` are read. A feature tag rather than a config key because
+  `devtools_config.json` need not be in the `.pck` at all, so a tag is the one signal
+  guaranteed to be both present and deliberate. `DevTools.is_shipped_build()` is
+  exposed for a project that wants to branch on it.
 - **`entry_hook` / `entry_points` actually fire, and say so** (0.30.0, gh#29). Before
   this, `entry_hook` accepted a value, validated fine, and was read by nothing — a
   config key that *looks* configured is the harness's own worst failure mode applied
@@ -1368,7 +1389,7 @@ run-method, curve, performance, quit, logs, harness-version, launch,
 input <press|release|tap|clear|list|sequence|state>, key,
 touch <press|release|drag|clear|list>, set-feature, step-time,
 set-game-speed, pause, unpause, wait-frames, clear-nodes, validate-ui, ui-snapshot,
-node-bounds, save-ui-baseline, ui-snapshot-diff, tilemap-cells,
+node-bounds, what-drew, save-ui-baseline, ui-snapshot-diff, tilemap-cells,
 tilemap-region, scripts-seen, canvas-scale, set-resolution,
 find-nodes, press, raycast, sample-pixels, reachable-ui, aabb, look-at, new-uid,
 mouse-move, reload, first-frame, fire-entry-point, project-settings, contained-in,
@@ -1384,6 +1405,25 @@ Notable flags:
   effective texture filter and which node (or project setting) supplied it. The
   answer to every "why is this sprite blurry / enormous" question in one read;
   `get-state` cannot see it because containers hide position/scale.
+- `what-drew --at X Y` — **`node-bounds` inverted**: which node drew the pixel at a
+  point, rather than where a node you can already name sits. Every other spatial verb
+  is keyed on the node (`find-nodes` needs the class — the thing being looked for;
+  `sample-pixels` returns the colour and says nothing about the painter), so the only
+  method available was bisection: hide a candidate layer, re-capture, compare one
+  pixel. Identifying one 32×5 mark took five of those rounds and two confident wrong
+  theories (gh#62). Same geometry as `node-bounds`, applied over the tree with a
+  containment test.
+  **Painters and containers are reported separately**, which is the whole difference
+  between an answer and a list: a `Node2D` at `(0,0)` whose children carry the ink
+  contains every point on screen. `painters` is what has ink of its own — a `_draw()`
+  override (detected from the *script's* method list, since `has_method("_draw")` is
+  true for every CanvasItem), a `Line2D`'s points, a texture, a stylebox, a fill,
+  a Control's text — topmost first, ordered by accumulated `z_index` and then by
+  draw order (sorted on the pair, because Godot's `sort_custom` is not stable and
+  `z_index` is 0 almost everywhere); the ancestry follows as `containers`. Exit `1` when nothing with ink covers the point,
+  and the message names why that can happen (a class that reports no extent, a
+  shader) rather than implying nothing is there. `--at` is in **viewport**
+  coordinates, the space `node-bounds` reports.
 - `set-resolution --size W,H` — resize the game window and read back what was
   actually applied; a headless or tiling environment that clamps the resize is
   reported as a failure, not "Resized".
@@ -1825,7 +1865,7 @@ python tools/name_check.py                  # every run after that, no engine
 | `missing_preload` | error | `preload("res://…")` pointing at a file that is not there. |
 | `missing_extends_path` | error | `extends "res://…"` pointing at a file that is not there. |
 | `missing_load` | warning | The same for `load()`, which can legitimately be conditional. |
-| `unknown_member` | warning | `Known.member` where `Known` resolves and has no such member, walking both the project `extends` chain and the engine's. |
+| `unknown_member` | warning | `Known.member` where `Known` is a **class, `class_name` or autoload** that resolves and has no such member, walking both the project `extends` chain and the engine's. **Not a call-site check**: the receiver has to be a type/autoload name, so `n.no_such_method()` on a typed local (`var n: Node`) is never flagged, whether the type is a project one or an engine one (gh#64). Resolving those needs a local type environment — declared types, reassignment, shadowing, duck typing — and the risk is the one H-030 already cost this repo: a checker that passed every synthetic stage and emitted 466 bogus warnings on a real project. Not attempted until it can be measured against a real corpus. |
 | `unknown_global_ref` | warning | A PascalCase identifier used as `Name.` / `Name(` that is declared nowhere. This is the `Identifier "Types" not declared` cascade, reported once per name per file instead of once per line. |
 | `class_cache_stale` | warning | A `class_name` present in the source but absent from `.godot/global_script_class_cache.cfg` — read-only, so it stays safe with other agents running. Says the engine will disagree with your files until you import. |
 | `string_ref_unresolved` | advisory | The name inside `has_method("x")` / `connect("x", …)` and friends, matching `lint_project.gd`'s rule of the same name. Advisory for the same structural reason. |
@@ -2329,6 +2369,27 @@ returns ~1px on any Label with `clip_text` or a non-default `text_overrun_behavi
 the obvious width assertion passes unconditionally on exactly the labels worth checking.
 Same measurement `dev_tools.gd`'s `ui_text_trimmed` finding already does internally,
 exposed here so a test can do it too.
+
+`_T.file_text(path: String) -> String` (gh#65) reads a script's own source, for the
+checks whose seam is a **guard** rather than a value. `if pest.is_winged: continue`
+inside a private method has no predicate to call and nothing to read off an instance,
+and driving a live grab asserts the grab rather than the exemption — so the source is
+the only honest seam. One project had eight hand-rolled `FileAccess.open` call sites in
+`test/unit/`, each re-deciding what a null handle means. Returns `""` on a path that
+will not open, deliberately and for the same reason `text_width` returns `0.0` on a null
+font: an unreadable source is exactly the case where a `source.contains(...)` check
+passes for the wrong reason, so assert on the length before matching.
+
+**`assert_eq` fails when both sides are one *freed* object** (`[SAME-OBJECT]`, gh#59).
+`==` is true there because they are a single dangling reference, so the comparison
+cannot fail for any reason the test intended — and `[VACUOUS]` structurally cannot catch
+it, because the assertion did run, it just asked nothing. A real suite carried
+`test_corn_shoots_the_pest_closest_to_escaping` asserting `target == far` where both had
+become the same freed `Pest`, and it passed for many cycles. Narrowed to *freed* on
+purpose: two references to the same **live** object is a legitimate identity assertion
+("the getter handed back the node I gave it") and still passes, so the obvious
+"both sides are the same object" rule would have failed real tests. Measured against a
+real corpus before shipping: 885 tests / 17,448 assertions, zero new findings.
 
 The test runner's flags (pass after `--`):
 

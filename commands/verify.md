@@ -155,8 +155,9 @@ Rules: when in doubt, full run. Tier (c) requires you to have *checked* the test
 ```
 
 `name_check.py` resolves every name the scripts mention — types, `class_name`s,
-autoloads, `preload("res://…")` targets, engine classes and their members, and the
-method/signal names inside string literals — against the project's own declarations plus
+autoloads, `preload("res://…")` targets, members reached through a *class or autoload*
+name (`Types.SOME_CONST`, `Audio.play`), and the method/signal names inside string
+literals — against the project's own declarations plus
 an engine API index cached per engine version under the user's cache dir. It opens no
 project, writes nothing to `.godot/`, and takes no lock, so it is the one gate that N
 agents can run at the same time on the same checkout. Exit codes are the usual contract:
@@ -166,8 +167,11 @@ It runs first because it is the cheapest gate and it names its causes directly. 
 import gate below tells you a cascade happened; this one tells you which identifier
 started it, and it does so on a working tree the import gate cannot even reach.
 
-**Clean here means the names resolve, not that the file compiles.** Type inference is the
-gap: `var kids := root.get_children()` on a `Node`-typed `root` is a hard parse error
+**Clean here means the names resolve, not that the file compiles.** Two gaps, and the
+tool prints both on every clean run. The first is **call sites**: `unknown_member` checks
+members reached through a class or autoload name, so `n.no_such_method()` where `n` is a
+typed local is not checked — on a project `class_name` or an engine class, index loaded or
+not (gh#64). The second is type inference: `var kids := root.get_children()` on a `Node`-typed `root` is a hard parse error
 (`Cannot infer the type of "kids" variable because the value doesn't have a set type`),
 and `name_check.py` prints `errors: 0 | warnings: 0` straight over it. Deciding it needs
 method resolution order and return types — i.e. opening the project, the one thing this
@@ -541,6 +545,7 @@ This prints all currently registered action strings. Any verb beyond the generic
 | `set-game-speed N` | Speed up (or slow down) time-dependent behavior (timers, tweens, physics). Refuses a scale below 0.01 — that is a freeze reported as a set, not a speed |
 | `performance --frames N [--by-type]` | FPS as a **mean over N frames** with min/max, marked `STILL SETTLING` when the window's halves disagree — read it after `wait-frames 60`+ past any settings change, never straight after. `Total nodes … growth +N` is in-tree accumulation the orphan count cannot see; `--by-type` names the classes that grew |
 | `wait-frames N` | Advance N physics frames deterministically |
+| `what-drew --at X Y` | Which node drew the pixel at a point — `node-bounds` inverted. Painters (nodes with ink of their own, topmost first) are listed before containers, because a `Node2D` at `(0,0)` contains every point on screen. Viewport coordinates. Exit `1` when nothing with ink covers the point. Reach for this instead of bisecting with `screenshot --hide` |
 | `node-bounds PATH` | Exact **screen-space** position/size of a node (ground truth for layout/movement). Ancestor `CanvasLayer` transforms are applied, so a HUD built on a scaled layer reports where it actually renders. Prints `GEOMETRY CAVEAT` when the game is headless — the window is 64×64 there, so a node the game centres from `get_window().size` sits off-viewport headless and centred for a player; **confirm any off-viewport verdict windowed before reporting it** (H-051) |
 | `aabb --node PATH` | Merged **world-space** AABB of a 3D node's geometry — `min`/`max`/`size`/`center`, `top_y`, `bottom_y`. The 3D answer to "is this actually on the table / sunk into the floor / overlapping that". Excludes `Light3D` (an `OmniLight3D`'s AABB is a cube of twice its range); fails rather than returning a zero box when a node has no geometry |
 | `scene-tree --depth N` | The live hierarchy as JSON. Every node carries `script` (its `res://` script path, `""` if none) and `scene_file` (set on instanced scene roots) — which is how Phase 5 computes reach, and also the fastest way to map a changed `.gd` to the node path that runs it |

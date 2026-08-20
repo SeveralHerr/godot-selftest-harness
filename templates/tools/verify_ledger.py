@@ -144,8 +144,8 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
-# harness-version: 0.60.0
-HARNESS_VERSION = "0.60.0"
+# harness-version: 0.61.0
+HARNESS_VERSION = "0.61.0"
 
 LEDGER_PATH = Path(".devtools") / "verify-runs.jsonl"
 
@@ -1164,6 +1164,15 @@ def cmd_record(args, root):
         defaults.append("value -> unrecorded")
     if run.get("checks") is None:
         defaults.append("checks -> []")
+    # gh#61.1: the two gate results, and the two whose absence most misrepresents a run -
+    # `null` in the row is indistinguishable from a run that genuinely had no lint pass,
+    # which is exactly the distinction the ledger exists to record. A real run with lint
+    # exit 0 and 959/959 tests wrote `lint=None tests=None` and said nothing about it;
+    # the ledger is append-only, so that row stands wrong permanently.
+    if "lint" not in run:
+        defaults.append("lint -> null (NO lint result recorded for this run)")
+    if "tests" not in run:
+        defaults.append("tests -> null (NO test result recorded for this run)")
     print("verify_ledger: run.json: read %d of %d supplied key(s) (%s)%s%s"
           % (len(read_keys), len(run), ", ".join(read_keys) or "none",
              ("; ignored: " + ", ".join(unknown)) if unknown else "",
@@ -1331,7 +1340,17 @@ def _reach_line(split):
         detail += ("; %d headless tool(s) excluded (run only under --headless --script, "
                    "so no node can carry them): %s" % (len(headless), ", ".join(headless)))
     if unreached:
-        detail += "; NOT reached: " + ", ".join(unreached)
+        # gh#61.2: every neighbouring exclusion on this line explains itself; this was
+        # the one that did not, and it is the one where the reader's natural inference
+        # ("the run never loaded it") can be wrong. A session that opened a key-bindings
+        # screen, drove ten verbs inside it and closed it before the capture read
+        # identically to one that never opened it - and adding a second capture taken
+        # while the screen was live moved the same session from 3/7 to 4/7.
+        detail += ("; NOT reached (loadable, and no supplied snapshot observed them - "
+                   "reach reads the capture(s) it was given, not a history of the "
+                   "session, so a screen opened and CLOSED before capture reads the "
+                   "same as one never opened; --scene-tree is repeatable, capture "
+                   "while each screen is still up): " + ", ".join(unreached))
     elif total > len(reached):
         # "reached 1/4" with three credited files reads as a bad run at a glance, and a
         # number that has to be read twice to be read right is a number people stop
@@ -1786,12 +1805,19 @@ def main():
                    help="Record reach as null ON PURPOSE (aborted runs: the game "
                         "never came up). Without this flag, record refuses to write "
                         "a row when no capture is readable.")
-    p.add_argument("--about", metavar="PATH", action="append",
+    # plant-tower-defense:G-140: `action="append"` alone accepts `--about A --about B`
+    # and REFUSES `--about A B` ("unrecognized arguments: B") - while commands/verify.md
+    # documents it as `--about <file> [<file> ...]`, plural and bracketed. The skill and
+    # the tool disagreed, and the population this flag exists for is fan-out lanes, where
+    # a two-file lane was being told to drop one. `extend` + `nargs="+"` accepts both
+    # spellings and flattens to one list, so no existing caller changes.
+    p.add_argument("--about", metavar="PATH", action="extend", nargs="+",
                    help="Restrict the reach denominator to these path(s), intersected "
                         "with what actually changed (gh#20.2). For a fan-out session: "
                         "name only the file(s) THIS run set out to verify, so a "
                         "sibling agent's still-uncommitted file is neither a false "
-                        "miss nor a silent free credit. Repeatable.")
+                        "miss nor a silent free credit. Repeatable, and accepts several "
+                        "paths per flag.")
     p.add_argument("--run", metavar="FILE",
                    help="JSON object of this run's results. Default: read stdin.")
     p.add_argument("--schema", action="store_true",
@@ -1803,9 +1829,10 @@ def main():
                    help="A `devtools.py scene-tree` capture. Repeatable.")
     p.add_argument("--scripts-seen", metavar="FILE", action="append",
                    help="A `devtools.py --json scripts-seen` capture. Repeatable.")
-    p.add_argument("--about", metavar="PATH", action="append",
+    p.add_argument("--about", metavar="PATH", action="extend", nargs="+",
                    help="Restrict the reach denominator to these path(s), intersected "
-                        "with what actually changed. Repeatable. See `record --about`.")
+                        "with what actually changed. Repeatable, and accepts several "
+                        "paths per flag. See `record --about`.")
     p.set_defaults(func=cmd_reach)
 
     p = sub.add_parser("stats", help="Aggregate the ledger")
