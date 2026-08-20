@@ -582,28 +582,84 @@ class PostCommitAndUnknownKeysCase(unittest.TestCase):
             self.assertIn(k, proc.stdout)
 
 
+class ResolveGapStatusCase(unittest.TestCase):
+    """gh#63: an append-only log records a gap's history as `open` -> `open` -> `fixed`
+    on separate lines, so a per-line scan for `status: open` reports every FIXED gap as
+    open forever. The predecessor did exactly that and printed eleven already-correct
+    ids under "the log's status line is what is stale"."""
+
+    def test_last_status_line_wins_and_the_line_number_is_reported(self):
+        log = ("- [G-014] status: open | seen: 1\n"
+               "some prose\n"
+               "- [G-014] status: open | seen: 2\n"
+               "- [G-014] status: fixed | fixed-in: 0.42.0\n"
+               "- [G-044] status: open | seen: 7\n")
+        got = devtools._resolve_gap_status(log)
+        # The defect this replaces: G-014 has two `open` lines above its `fixed` one.
+        self.assertEqual(got["G-014"], ("fixed", 4))
+        self.assertEqual(got["G-044"], ("open", 5))
+
+    def test_qualified_ids_key_on_the_bare_id(self):
+        """Pooled upstream a gap is `<project>:G-NNN`; the two logs must compare."""
+        got = devtools._resolve_gap_status(
+            "- [plant-tower-defense:G-070] status: fixed | fixed-in: 0.58.0\n")
+        self.assertEqual(got["G-070"], ("fixed", 1))
+
+
 class FixedUpstreamCase(unittest.TestCase):
-    """gh#45: the project's own open gap ids credited in newer templates are named."""
+    """gh#45: the project's own open gap ids credited in newer templates are named.
+    gh#63: CITED (named in a source comment) is not CREDITED (a `status: fixed` line
+    upstream) - one of the twelve the old wording invited closing was a live importer
+    crash whose "credit" was a retry-until-progress loop."""
+
+    def _fixture(self, td):
+        proj = Path(td) / "moving-in"
+        (proj / "addons" / "godot_selftest").mkdir(parents=True)
+        (proj / "tools").mkdir()
+        (proj / "project.godot").write_text('[application]\nconfig/name="Moving In"\n', encoding="utf-8")
+        (proj / "log-devtools.md").write_text(
+            "- [G-001] status: open | seen: 1\n- [G-002] status: fixed | fixed-in: 0.30.0\n"
+            "- [G-003] status: open | seen: 2\n- [G-004] status: open | seen: 1\n"
+            # The append-only shape: an earlier `open` line above the current `fixed`.
+            "- [G-005] status: open | seen: 1\n- [G-005] status: fixed | fixed-in: 0.31.0\n",
+            encoding="utf-8")
+        (proj / "tools" / "devtools.py").write_text("# moving-in:G-003: old fix, installed\n", encoding="utf-8")
+        newest = Path(td) / "cache" / "0.44.0"
+        (newest / "templates" / "tools").mkdir(parents=True)
+        (newest / "templates" / "tools" / "verify_ledger.py").write_text(
+            "# moving-in:G-001: fixed here\n# moving-in:G-002: also\n# Moving In:G-004: by config name\n"
+            "# moving-in:G-003: still credited\n# moving-in:G-005: and this one\n", encoding="utf-8")
+        (newest / "log-devtools.md").write_text(
+            "- [moving-in:G-001] status: fixed | fixed-in: 0.43.0\n"
+            "- [moving-in:G-002] status: fixed | fixed-in: 0.40.0\n"
+            # G-004 is CITED in the templates above but carries no upstream credit:
+            # a mention is not a fix, which is the whole point of gh#63.
+            "- [moving-in:G-004] status: open | seen: 1\n"
+            "- [moving-in:G-005] status: fixed | fixed-in: 0.44.0\n", encoding="utf-8")
+        return proj, newest
 
     def test_splits_not_have_from_already_installed(self):
         with tempfile.TemporaryDirectory() as td:
-            proj = Path(td) / "moving-in"
-            (proj / "addons" / "godot_selftest").mkdir(parents=True)
-            (proj / "tools").mkdir()
-            (proj / "project.godot").write_text('[application]\nconfig/name="Moving In"\n', encoding="utf-8")
-            (proj / "log-devtools.md").write_text(
-                "- [G-001] status: open | seen: 1\n- [G-002] status: fixed | fixed-in: 0.30.0\n"
-                "- [G-003] status: open | seen: 2\n- [G-004] status: open | seen: 1\n", encoding="utf-8")
-            (proj / "tools" / "devtools.py").write_text("# moving-in:G-003: old fix, installed\n", encoding="utf-8")
-            newest = Path(td) / "cache" / "0.44.0"
-            (newest / "templates" / "tools").mkdir(parents=True)
-            (newest / "templates" / "tools" / "verify_ledger.py").write_text(
-                "# moving-in:G-001: fixed here\n# moving-in:G-002: also\n# Moving In:G-004: by config name\n"
-                "# moving-in:G-003: still credited\n", encoding="utf-8")
-            fixed, stale, names = devtools.fixed_upstream_for_project(proj, newest)
+            proj, newest = self._fixture(td)
+            fixed, cited, names, where, lines = devtools.fixed_upstream_for_project(proj, newest)
         self.assertEqual(names, ["Moving In", "moving-in"])
-        self.assertEqual(fixed, ["G-001", "G-004"])   # open, credited only upstream
-        self.assertEqual(stale, ["G-003"])            # open, credited in what it runs
+        # Credited upstream, still open here, not already referenced in what it runs.
+        self.assertEqual(fixed, ["G-001"])
+        # Referenced in the templates it RUNS - reported, but never as "the fix is
+        # installed"; the file that mentions it is named so the reader can check.
+        self.assertEqual(cited, ["G-003"])
+        self.assertEqual(where["G-003"], "devtools.py")
+        # G-004 is cited only in the NEWER templates and has no upstream `fixed` line,
+        # so it is neither: a citation alone must not be reported as a fix.
+        self.assertNotIn("G-004", fixed)
+        self.assertNotIn("G-004", cited)
+        # G-005's last status line is `fixed`, so it is not open at all - the exact
+        # case the per-line scan got wrong.
+        self.assertNotIn("G-005", fixed)
+        self.assertNotIn("G-005", cited)
+        # Every reported id carries the line its verdict came from, so it is checkable.
+        self.assertEqual(lines["G-001"], 1)
+        self.assertEqual(lines["G-003"], 3)
 
 
 class SamplePixelsExpectCase(unittest.TestCase):

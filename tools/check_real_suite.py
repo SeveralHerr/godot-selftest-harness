@@ -65,9 +65,22 @@ def _resolve_godot(explicit):
     return None
 
 
+# Directories that are never part of the Godot project. `.beads` earned its place
+# the hard way (H-073, 0.61.0): a project that adopted the beads tracker carries an
+# embedded Dolt DB whose git-remote-cache pack files sit ~270 characters deep, past
+# Windows MAX_PATH, so `copytree` raised `[WinError 3] The system cannot find the
+# path specified` and the gate died before running anything. The required gate for a
+# `run_tests.gd` change was un-runnable on the one real project it is pointed at.
+#
+# `.godot/` is deliberately NOT here: this script never runs `--import`, so a copy
+# without the import cache makes the BEFORE run exit 2 - and exit 2 is never a
+# baseline, which is the rule this file already enforces one function down.
+SKIP_DIRS = (".git", ".devtools", ".beads", "__pycache__")
+
+
 def _copy_project(src: Path, dst: Path):
     def ignore(_dir, names):
-        return {n for n in names if n in (".git", ".devtools")}
+        return {n for n in names if n in SKIP_DIRS}
     shutil.copytree(src, dst, ignore=ignore, symlinks=False)
 
 

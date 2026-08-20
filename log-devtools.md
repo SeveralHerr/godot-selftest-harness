@@ -8840,3 +8840,707 @@ half's twin). Plant still pinned at 0.38.0.
 **Validation run this turn:** `record_version.py --record` then `--check` OK at 0.60.0
 (14 files, 59 verbs + 63 CLI). `unittest discover -s tools` — 94 OK. `check_templates.py`
 — OK, all stages; stage 5b `screenshot --region reports scale x1.00 and the viewport region it was given` — the scratch window is 1:1, so the ≠1 scaling branch is exercised only at identity here; the arithmetic is one multiply per axis and the reporter's 2.5× case is what it exists for (a scaled-window plant would need a stretch-mode fixture: not done).
+
+## 2026-08-20 - Upstreamed 43 open gap(s) from plant-tower-defense (harness (client version not queried; no bus opened, 0.18.0, 0.19.0, 0.21.0, 0.23.0, 0.24.0, 0.25.0, 0.32.0, 0.33.0, 0.36.0, 0.38.0, 0.60.0, 0.60.0 (client) / 0.38.0 (installed))
+
+Pooled by `tools/upstream_gaps.py` from `C:\Users\gotmi\Documents\GitHub\plant-tower-defense\log-devtools.md`. Gap text is the project's,
+verbatim; only the id line is rewritten (qualified with the project name so
+ids from two projects cannot collide, plus a `source:` back-pointer).
+
+- Gap: **`run_json_check.py` is only useful strictly BEFORE `verify_ledger record`, and running
+  both in one shell command is functionally "after".** I piped them together; the checker
+  correctly reported `FINDING: 'verdict' is absent -- record defaults it silently, so the row
+  will read as an unknown/blank run rather than as the clean one it was`, and the row had
+  already been appended by the time I read it. The ledger is append-only, so the row now says
+  `recorded unknown run, value=warranted` and re-recording would double-count a single run.
+  `verify_ledger` also warned `warranted with no Phase 4 checks recorded - the claim that
+  earned it is not in the row`, which is the same shape of loss: the defect above is in `found`
+  but the check that caught it is not a recorded phase-4 entry.
+  - [plant-tower-defense:G-074] status: open | seen: 1 | harness: 0.38.0 | source: plant-tower-defense 2026-08-17
+  - Improvement: `verify_ledger record` should run the same key check itself and refuse to
+    write a row that fails it, rather than defaulting the field and reporting the loss after
+    the append. A checker whose whole value is "run me first" is one an operator can only
+    fail once per row, permanently. Failing that, `record` could accept `--dry-run` so the
+    validate-then-write pair is a single safe operation.
+
+- Gap: **a parallel-safe checker in a SHARED checkout reports the other lanes' in-flight edits
+  as its own findings.** The Nettle lane reported `suite_reach_check exit=1` with 12 NEW
+  findings in `game/board.gd`, `game/garden_theme.gd` and `game/plant.gd` — none of which it
+  had touched; all three were siblings' uncommitted work. It correctly diagnosed this itself
+  ("which `git status` shows are other lanes' in-flight edits in this shared checkout"), but
+  only because it thought to check. A lane that trusted the exit code would have reported a
+  false failure, and a lane that saw exit 0 by luck of timing would have reported a pass it
+  had not earned.
+  - [plant-tower-defense:G-075] status: open | seen: 1 | harness: 0.38.0 | source: plant-tower-defense 2026-08-17
+  - Improvement: this is mine to fix in the workflow, not the harness's — either fan out into
+    git worktrees (`isolation: "worktree"`), or tell each lane that a finding in a file it does
+    not own is not its finding. The cheaper half is the instruction; the correct half is the
+    worktree. Filed as a bead.
+
+- Gap: **`name_check.py --require-compile` is unusable in a fan-out worktree, and fails LOUDLY rather than saying it could not run.** Two lanes hit it independently and neither was told anything true. Lane A: `python tools/name_check.py --require-compile game/weather_overlay.gd` -> exit 1, `does not compile: SCRIPT ERROR: Parse Error: Identifier "WaveDirector" not declared in the current scope ... at res://game/weather_overlay.gd:56` — a line unchanged from `main`. Lane B on its three files: `Could not find base class "Plant"`. Both are the documented "needs the project imported once already" case: a fresh worktree has no `.godot/global_script_class_cache.cfg`, so every cross-file `class_name` false-positives. Workaround: none — the lanes reported "names resolve, this is not a compile" and the parent ran `import_check.py` + `lint_project.gd` + `run_tests.py` once after merging. **The cost is that five lanes each shipped green having never parsed a line.**
+  - [plant-tower-defense:G-076] status: open | seen: 4 | harness: 0.38.0 | source: plant-tower-defense 2026-08-17
+  - Improvement: `name_check.py` ALREADY reads `.godot/global_script_class_cache.cfg` and returns `None` when it is absent (0.60.0, line ~782-790, `"""class names in .godot/global_script_class_cache.cfg, or None when absent."""`). `--require-compile` just does not consult it. So: when the cache is absent and `--require-compile` was asked for, exit **2 "could not run — this project has never been imported, so every cross-file class_name will report as undeclared"** instead of exit 1 with fabricated `compile_error` findings. That is the harness's own exit-code contract (`2` = nothing was verified) applied to the one case where it currently lies. Confirmed still open in 0.60.0, not just in the 0.38.0 this project pins.
+
+- Gap: **`reach` cannot see a static-utility script, and this is now costing a wrong verdict rather than a missing one.** `game/game_speed.gd` is `class_name GameSpeed extends RefCounted`; no node carries it, so `scripts-seen` cannot see it however much of it ran. I pressed the button, watched the label go 1x -> 2x -> ½x -> 1x and `Engine.time_scale` follow each time, and the ledger still recorded `NOT reached: game/game_speed.gd`. CLAUDE.md documents the fix (`DevTools.mark_script_reached`) and I applied it — but that is a per-file manual opt-in, so the ledger's honesty scales with how many static utilities somebody remembered to annotate.
+  - [plant-tower-defense:G-077] status: open | seen: 1 | harness: 0.38.0 | source: plant-tower-defense 2026-08-17
+  - Improvement: `reach` already knows a file is in the diff and already knows it is not in the tree. When a changed `.gd` declares `class_name` and `extends RefCounted`/`Object` (statically visible, no engine needed), report it as **`unreachable-by-construction`** rather than folding it into `NOT reached` — the same three-way split the harness uses everywhere else (`reached` / `not reached` / `could not be reached`). A file that CANNOT be seen and a file that WAS NOT loaded are opposite results, and today they print identically.
+
+- Gap: **a tree-walking checker sees N+1 copies of the repo during a worktree fan-out, and only the PARENT sees them.** `citation_check.py` resolves a bare filename by unique basename anywhere under the root; `rglob` does not read `.gitignore`; `.claude/worktrees/` is gitignored but very much on disk. Result: `FINDING: kanban.md:3713 cites plant.gd:187-190 -- that bare name matches .claude\worktrees\agent-a287093c5954505ba\game\plant.gd and ... and game\plant.gd.` for every bare citation in the file. A lane running the same checker inside its own worktree sees nothing wrong. Fixed in-project by excluding `worktrees` from the walk: `296 citation(s) across 1 file(s), 296 resolved, 0 finding(s)`.
+  - [plant-tower-defense:G-078] status: open | seen: 1 | harness: 0.38.0 | source: plant-tower-defense 2026-08-17
+  - Improvement: this is a project-owned checker so the fix landed here, but the shape is the harness's problem too — anything that walks the repo root during a fan-out inherits it. The harness should either ship a shared "repo files, excluding nested worktrees and `.godot/` and `.git/`" walker for its checkers to use, or `scaffold-godot-harness` should warn when it detects `.claude/worktrees/` inside `scan_root`. A findings count that changes depending on whether sibling agents happen to be running is worse than no count.
+
+- Gap: **`launch --isolated` prints no client-side follow-up that works** — subsequent verbs needed `--session <id> --userdata <bus_dir>` read out of `.devtools/launch.json`; `GODOT_DEVTOOLS_BUSDIR` is honoured by the game, not by the client, and `--session` alone still polls the default `user://`.
+  - [plant-tower-defense:G-121] status: open | seen: 1 | harness: 0.60.0 | source: plant-tower-defense 2026-08-17
+  - Improvement: `launch --isolated` should print the exact `python tools/devtools.py --session X --userdata <bus_dir> ping` line, and the client should read `GODOT_DEVTOOLS_BUSDIR` (or `.devtools/launch.json`) as its bus dir when `--session` is given.
+
+- Gap: **`launch --snapshot-userstate` did not restore the file it snapshotted.** Launched with it precisely because this cycle's feature writes `user://` (a one-shot hint calls `RunConfig._save()`), drove the hint, and after `quit` the developer's real `highscore.save` still read `m1:seen_upgrade_tip` where it had been `m0`. `quit` reported the pids and printed no restore line at all. I put it back by hand — the milestone line is length-prefixed (`m0` is the documented empty form, `run_config.gd:84-90`) and the scores either side of it, `3454` and `5008`, are the player's real ones, so a wrong restore here would have been silent data loss rather than a broken save.
+  - [plant-tower-defense:G-122] status: open | seen: 1 | harness: 0.38.0 | source: plant-tower-defense 2026-08-17
+  - Improvement: `quit` already prints `user://: no file changed during this run` when nothing moved — that line is the natural place for the other outcome, and it printed the *clean* wording on a run that had in fact changed a file, which is worse than silence. So: when `--snapshot-userstate` is in force, `quit` must say per file whether it was unchanged, restored, or **failed to restore**, and exit non-zero on the third. As it stands the flag's failure mode is indistinguishable from its success, and the whole reason to reach for it is that you already know the run will write.
+
+- Gap: **`citation_check.py` reads only `kanban.md`, so bead citations are ungated** — ran
+  `python tools/citation_check.py`, got `298 citation(s) across 1 file(s), 298 resolved,
+  0 finding(s)` immediately after writing ~20 fresh `file:line` citations into three beads,
+  three of which were wrong. The exit-clean is honest about its scope only in the tool's own
+  `NOT COVERED:` line, which does not mention which files it read. Workaround: hand-checked
+  every load-bearing citation with `sed -n 'Np' FILE`.
+  - [plant-tower-defense:G-123] status: open | seen: 1 | harness: (client version not queried; no bus opened | source: plant-tower-defense 2026-08-17
+    this turn — `harness-version --client` not run because no harness command was used)
+  - Improvement: have `citation_check.py` print the files it scanned (`scanned: kanban.md`)
+    so a clean exit cannot be mistaken for coverage it does not have, and add a `--beads`
+    mode reading `.beads/issues.jsonl` description/design/notes fields with the same
+    resolver. The scan is textual and the resolver already exists; this is a source-list
+    change, not new machinery.
+
+- Gap: **no NEW harness gap this turn, and that is worth writing rather than leaving blank.** All three defects were in this project's own code and its own checkers, not in the harness — and two of them were caught BY project checkers written to `house-static-checker` (`save_persist_check` printed a call chain last cycle; `check_all`'s classified denominator is what made "14 of 15 ran" legible this cycle). The one harness-shaped observation is that `check_all`'s **denominators** did all the work while its **exit code** stayed 0 through the entire `citation_check` defect: every run was clean before and after, and the only thing that moved was `19 world-space script(s)` → `38` and `298 resolved` → `260`. A gate whose number is the signal and whose verdict is not is exactly what `house-static-checker`'s denominator rule is about, and it held.
+  - [plant-tower-defense:G-123b] status: open | seen: 1 | harness: 0.38.0 | source: plant-tower-defense 2026-08-17
+  - Improvement: `check_all --compare-to FILE` — capture the classified denominators to a file, and diff a later run against it. Every check in this cycle's tree-walk audit was "run it twice under different filesystem conditions and see whether the numbers moved", done by hand with `diff` on two captured outputs. One flag would make that a standing check instead of a one-off, and it is the only thing that would have caught the absolute-path regression automatically.
+
+- Gap: **a fan-out lane cannot type-check the file it just wrote** — `name_check.py` is
+  the only parallel-safe gate, and it resolves names without compiling; a fresh worktree
+  has no `.godot/`, so `--require-compile` false-positives every cross-file `class_name`.
+  Five lanes reported green this cycle having parsed nothing. Lane D worked around it by
+  porting its GDScript scanner to Python and running that against the pre- and
+  post-change trees — real proof of the logic, no proof of the GDScript.
+  - [plant-tower-defense:G-124] status: open | seen: 1 | harness: 0.38.0 | source: plant-tower-defense 2026-08-18
+  - Improvement: a read-only shared-import mode — one `godot --check-only` per named
+    file against a `.godot/` the lane may read but not write, which is what
+    `--require-compile` already almost is. Needs the parent to have imported once and
+    the lane to be told it may read that cache.
+
+- Gap: **nothing gates a call-site's ARGUMENTS against the callee's default when a
+  shared helper gains a mode parameter.** The seam above is one function growing a
+  keyword argument whose default is not the behaviour its existing callers were written
+  against. Both sides were individually correct and every checker stayed green.
+  - [plant-tower-defense:G-125] status: open | seen: 1 | harness: 0.38.0 | source: plant-tower-defense 2026-08-18
+  - Improvement: probably not a harness feature but a fan-out rule — when a lane
+    collapses N copies of a function into one shared implementation, the merge owes a
+    per-caller check that the chosen default matches what each caller previously had.
+    Worth adding to `merge-the-fanout` as a named failure class; it is currently absent
+    and it is the one that bit hardest this cycle.
+
+- Gap: **the `/verify` skill shipped with the plugin describes a `run.json` the installed
+  ledger does not read.** The skill (from plugin 0.60.0) says the row carries
+  `"tier": "<full|headless-only|...>"` and that `stats` counts by it; this project runs
+  harness 0.38.0, whose `verify_ledger.record` reads eleven keys and `tier` is not one of
+  them. Caught by this project's own `tools/run_json_check.py`, not by the ledger:
+  `FINDING: unknown key 'tier' -- verify_ledger reads it nowhere, so it will be dropped
+  without a word and the row will not carry it.` Verified after the fact — the recorded
+  row has no `tier`. Removed the key; the row stands without it.
+  - [plant-tower-defense:G-126] status: open | seen: 1 | harness: 0.38.0 | source: plant-tower-defense 2026-08-18
+  - Improvement: the skill's Phase 5 should say which harness version introduced each
+    `run.json` key, or `record` should warn on an unread key the way `run_json_check`
+    does rather than dropping it silently. Note the shape of this one: the guidance was
+    newer than the tool, so following the instructions correctly produced a row that
+    quietly lost a field. `plant-tower-defense-ny3h` (refresh 0.38.0 -> current) is the
+    standing fix.
+
+- Gap: **`isolation: "worktree"` branched both lanes from the session's ORIGINAL HEAD,
+  not from current main.** `git worktree list` showed both agent worktrees at `bd9d332`
+  — the commit in this session's opening git status — while main was 17 commits ahead at
+  `d3e2c30`. Both lanes were therefore editing files that had moved underneath them, and
+  Lane B owns two files (`hud.gd`, `game.gd`) that round 10 had changed. Worked around by
+  messaging both lanes to `git merge main` mid-flight and telling each what specifically
+  had moved in its own files.
+  - [plant-tower-defense:G-124b] status: open | seen: 1 | harness: 0.38.0 | source: plant-tower-defense 2026-08-18
+  - Improvement: a spawn that creates a worktree should branch from the repo's CURRENT
+    HEAD, or say in the spawn result which commit it branched from. The failure is silent
+    and cheap to detect (`git worktree list`) but nothing prompts you to look — I only
+    checked because I wanted to see whether the lanes had committed yet. A lane that
+    reports "all gates clean" against a 17-commit-stale base is telling the truth about
+    the wrong tree, which is the same failure class as a clean `name_check` in a fresh
+    worktree that compiles nothing.
+
+- Gap: **`run.json`'s `tier` key is dropped by this project's installed ledger.**
+  `tools/run_json_check.py` caught it before `record` ran, which is exactly what that
+  checker is for: `unknown key 'tier' -- verify_ledger reads it nowhere, so it will be
+  dropped without a word`. The `/verify` workflow text this session followed documents
+  `tier` as required and says `stats` counts by it; this project runs 0.38.0 and the key
+  landed in 0.50.0. Not a defect in either half — it is version skew between the skill
+  and the install, and it is blocked behind the same thing everything else is.
+  - [plant-tower-defense:G-128] status: open | seen: 1 | harness: 0.38.0 | source: plant-tower-defense 2026-08-18
+  - Improvement: nothing to fix here — `-ny3h` (refresh 0.38.0 → 0.42.0+) is still
+    BLOCKED on upstream gh#43, the deterministic `0xC0000005` segfault at
+    `test_corn_shoots_the_pest_closest_to_escaping`. Recording it so the next reader of
+    that bead knows the skew has started producing concrete drops rather than only
+    missing features. `harness-version --client` reports the machine is now on **0.60.0**
+    against this project's 0.38.0 — twenty-two releases, up from four when `-ny3h` was
+    filed.
+
+- Gap: **the installed ledger drops `tier` without a word** — `/verify` Phase 0.5 (plugin
+  0.60.0) says "Record the tier on the row … `run.json` carries `"tier": …`", and this
+  project runs harness 0.38.0, whose `verify_ledger.py` reads no such key. The row was
+  written with `tier: "tooling"` and came back without it.
+  - Only this repo's own `tools/run_json_check.py` said so: `FINDING: unknown key 'tier' --
+    verify_ledger reads it nowhere, so it will be dropped without a word and the row will
+    not carry it.` A project without that checker records the field, sees a clean
+    `recorded pass run`, and believes its ledger is tier-tagged.
+  - [plant-tower-defense:G-130] status: open | seen: 2 | harness: 0.38.0 | source: plant-tower-defense 2026-08-18
+  - Improvement: this is the 0.38.0-vs-0.60.0 spread (`-ny3h`, blocked on upstream gh#43),
+    not a new upstream defect — the key landed in 0.50.0. Worth logging because it is the
+    first time the version spread produced a SILENT wrong record rather than a missing
+    feature: the skill text and the installed tool disagreed, and the skill won on the
+    write side while the tool won on the read side.
+
+- Gap: **the ledger's reach denominator measures the BRANCH, not the run** — this run
+  reported `reached 2/15 changed file(s)` while `git status --porcelain` shows five
+  modified files, two of them `.gd`.
+  - `tools/verify_ledger.py:297` derives changed files as
+    `git diff --name-only <base> HEAD`, where base is the first of
+    `origin/main, main, origin/master, master` that resolves — documented at `:274` as
+    "the branch's accumulated diff", which is exactly what it does. This checkout is
+    **56 commits ahead of origin/main**, because the project's push policy is deliberately
+    to batch (every push auto-deploys to itch.io), so the denominator is 56 cycles of work
+    and grows every cycle.
+  - The consequence is that `reach` trends toward zero on this project regardless of how
+    well any individual run is targeted, and `verify_ledger.py stats` aggregates it. The
+    numerator is still honest — `notebook_screen.gd` was reached and is absent from the
+    NOT-reached list — but the ratio is not a statement about the run.
+  - [plant-tower-defense:G-131] status: open | seen: 1 | harness: 0.38.0 | source: plant-tower-defense 2026-08-18
+  - Improvement: derive the denominator from the run's own working-tree diff plus the
+    commits since the LAST LEDGER ROW, not since the branch base — the ledger already
+    knows when it last recorded. Failing that, print both and label them, so a reader can
+    tell "this run touched little of a long branch" from "this run verified little of what
+    it changed". Filed as a bead so it is not only a log line.
+
+- Gap: **nothing on the bridge can select a placed plant**, so the `MESSAGE_DEADLINE`
+  producer — one of the two the bead named — went unmeasured and half its acceptance is
+  unmet.
+  - `run-method /root/Game _select ["<path>"]` cannot work: `_select` takes a `Plant` node
+    and the bridge passes a `String`. None of the 69 registered verbs selects. And the
+    documented workaround failed: `touch press`/`release` at the plant's `global_position`
+    (read as `224,296` off the node) left `selected_placed` empty through four attempts,
+    with `touch list` reporting `No active touches` after.
+  - `cycle-log.md` carries "a plant is selected by a real click, which `cmd touch_press`/
+    `touch_release` at its `global_position` will deliver" as durable knowledge. That did not
+    hold in this run. Whether the note is stale, whether it needs `set-feature --touchscreen`
+    before the scene loads, or whether the emulated-mouse guard in `_unhandled_input` changed
+    which events reach the handler is **unestablished** — and the note is deliberately not
+    edited until it is known which.
+  - [plant-tower-defense:G-132] status: open | seen: 1 | harness: 0.38.0 | source: plant-tower-defense 2026-08-18
+  - Improvement: a project verb beside the existing `place_plant` / `upgrade_plant` /
+    `collect_husk`, all of which already take `x,y` — `select_plant x,y`, plus a cancel, or
+    arming becomes a one-way trip that uproots on the second call (which is what happened
+    here). Filed as `-cfvb`, which says to settle the touch question FIRST, because if a
+    click can select then this is a documentation gap and a verb is only a convenience.
+
+- Gap: **`--snapshot`/`--against` cannot distinguish a restored citation from a correct
+  one**, and this is a gap in a tool this project owns rather than in the harness.
+  - Relocating eleven drifted citations by matching the snapshot's recorded text worked for
+    four and reported `AMBIGUOUS` for the rest — **114 candidate lines** for one of them,
+    because the recorded text was blank. Applying the uniform `+27` made `--against` report
+    `0 drifted` for all eleven, and reading the landings then found six pointing at a blank
+    line, an autowrap setting, a Label name, a shelf-greying comment and a sprite path.
+  - Not filed as a `[G-NNN]` harness gap: `citation_check.py` is this repo's own tool, so it
+    is `-oa6z` with an acceptance that starts with the COUNT — nobody knows how many of 931
+    citations land somewhere unverifiable, and the sample this cycle was six wrong out of six
+    read.
+  - [plant-tower-defense:G-133] status: open | seen: 1 | harness: 0.38.0 | source: plant-tower-defense 2026-08-18
+  - Improvement: the harness-side half is that `verify_ledger`'s `reach` and this project's
+    citation drift both answer "did the thing I claim to have checked actually get checked",
+    and neither can see a claim written in prose. A `--weak` pass that lists citations whose
+    landed text is uninformative is the cheapest version of that for any project keeping
+    file:line citations in markdown, which is why it is logged here as well as filed.
+
+- Gap: **a five-lane merge drifts ~100 citations, and relocating them is now a large
+  fraction of the cycle.**
+  - 72 relocated by matching the snapshot's recorded text; 25 by piecewise offset
+    interpolation; **8 refused** because the bracketing anchors disagreed. That refusal is
+    the feature — `hud.gd`'s real offsets this cycle span **0 to +127**, so the uniform
+    per-file offset that worked in cycle 131 would have laundered errors here exactly as it
+    did in cycle 130.
+  - Reading the 8 found **three describing problems that had since been solved**, not
+    citations that had moved. Those were marked superseded with the derived answer rather
+    than repointed.
+  - [plant-tower-defense:G-135] status: open | seen: 1 | harness: 0.38.0 | source: plant-tower-defense 2026-08-19
+  - Improvement: the interpolation logic is currently a scratch script. It belongs in
+    `tools/` beside `citation_check.py` as `--relocate --against SNAP`, printing the plan and
+    **refusing the ambiguous ones by name** rather than applying a blanket offset. The refusal
+    list is the valuable output: it is exactly the set a human must read, and it was 8 of 105
+    this cycle rather than all 105.
+  - Also worth noting and not filed: `citation_check --beads` does not walk
+    `.claude/skills/`, so every skill carrying `file:line` claims is outside the gate's
+    denominator. Lane 4's 24 citations were only checked because it invoked the checker on
+    its own file by hand.
+
+- Gap: **reach's evidence deadline is earlier than "before quit" — it is "while the
+  diff's node is still in the tree", and nothing says so.** I opened the Keys screen,
+  measured its nine `RowKey` labels with `node-bounds`, closed both overlays, THEN
+  captured `scene-tree` — and `verify_ledger reach` reported `game/key_binding_screen.gd`
+  as `NOT reached (loadable, and this run did not load them)`. That is correct and it
+  is indistinguishable from a screen I never opened. The loop already warns that a diff
+  confined to an unopened screen reaches nothing; the half it does not say is that
+  VISITING the screen is not enough, because reach is computed from a snapshot rather
+  than from a history. Workaround: capture `scene-tree` while each screen is open and
+  pass `--scene-tree` repeatedly — two captures moved the number from 3/7 to 4/7.
+  - [plant-tower-defense:G-136] status: fixed | fixed-in: 0.61.0 | seen: 1 | harness: 0.60.0 | source: plant-tower-defense 2026-08-19 | dup-of: gh#61
+  - Improvement: `scene-tree` could stamp each capture with the visible screen, and
+    `reach` could say "reached in capture 2 of 3" rather than merging silently — or,
+    smaller and enough, one sentence in `reach`'s own output naming the deadline.
+
+- Gap: **`run_json_check` is advisory by design, so chaining it before
+  `verify_ledger record` does not stop a row losing keys.** Ran
+  `python tools/run_json_check.py && python tools/verify_ledger.py record ...`. The
+  check printed `6 key(s) in run.json, 11 accepted` and two findings — `'lint' is
+  absent`, `'tests' is absent` — exited 0, and `record` proceeded. The row went in with
+  `lint: null` and `tests: null` on a run where lint was clean and the suite was
+  959/959. The ledger is append-only, so the row stands wrong; recorded here rather
+  than rewritten, same rule as a superseded status line.
+  - [plant-tower-defense:G-137] status: fixed | fixed-in: 0.61.0 | seen: 2 | harness: 0.60.0 | source: plant-tower-defense 2026-08-19 | dup-of: gh#61
+  - Improvement: `record` should refuse a `--run` object missing a key it accepts
+    (or warn loudly on stderr), since it is the only writer and the write cannot be
+    undone. The check being advisory is right for a check; it is wrong as the last
+    guard before an append-only write.
+
+- Gap: **a fresh worktree gives a lane no compile at all, and all four lanes said so
+  in the words the prompt asked for.** Not new — this is the known one — but four more
+  sightings, and the shape of the cost is now measured: every lane returned
+  `inconclusive` or `insufficient` as its own harness verdict, explicitly because
+  nothing compiled or executed a line. The parent pass found one real merge failure
+  (`suite_reach_baseline` after Lane 3's tests started naming `hide_banner` and
+  `show_weather`) and one verb-classification failure on my own parent item. Both were
+  facts about files the lane was correctly forbidden to open.
+  - [plant-tower-defense:G-129] status: open | seen: 3 | harness: 0.60.0 | source: plant-tower-defense 2026-08-19
+  - Improvement: unchanged — a `name_check --require-compile` able to bootstrap
+    `.godot/` read-only from the parent checkout would close it. Lane 1 proposed the
+    same independently.
+
+- Gap: **no verb answers "what drew the pixel at (x, y)"** — identifying a 32×5 mark took five hide-and-capture rounds plus a `scene-tree --depth 1` scan of every child's position, and the answer turned out to be a Line2D pool under a node the first scan did not descend into. `find-nodes --class` cannot help, because the question is not what the node IS.
+  - The workaround, which is the shape a verb should have: `screenshot --hide NODE --region X,Y,W,H` twice and compare one pixel. It works and it is O(number of candidate layers) round trips.
+  - [plant-tower-defense:G-138] status: fixed | fixed-in: 0.61.0 (what-drew; upstream gh#62) | seen: 1 | harness: 0.38.0 | source: plant-tower-defense 2026-08-19
+  - Improvement: a `what-drew --at X,Y` verb walking the CanvasItem tree back-to-front and reporting every node whose bounds contain that point, with its `script`, `z_index` and whether it is a `Line2D`/`Sprite2D`/`_draw()` painter. `node-bounds` already computes screen-space rects for one node; this is that, inverted, over the tree.
+
+- Gap: **`bead_prose_check.py` reads the JSONL export, and the export lags `bd create` by
+  a whole session** — so running it straight after filing checks almost nothing. Ran it
+  immediately after creating six beads; `grep -c s1o8 .beads/issues.jsonl` returned `1`.
+  The tool's NOT COVERED line names what it cannot judge in the prose it reads, but not
+  that the prose it reads may not include the beads you just wrote. Workaround: read one
+  bead back with `bd show` and eyeball it.
+  - [plant-tower-defense:G-139] status: open | seen: 1 | harness: 0.60.0 | source: plant-tower-defense 2026-08-19
+  - Improvement: have `bead_prose_check.py` compare its JSONL row count against
+    `bd stats` (or the DB directly) and print a second denominator — "N of M issues in
+    the export; the export is K issues behind" — so a clean run after a filing session
+    is legible as stale rather than as clean.
+
+- Gap: **`verify_ledger.py record --about` takes ONE file, and the help does not say so.**
+  This change spans `game/chomp_flower.gd` (the champ) and `game/plant.gd` (the hook), so
+  `--about game/chomp_flower.gd game/plant.gd` is the honest narrowing. It exits with
+  `error: unrecognized arguments: game/plant.gd`. `/verify`'s own Phase 5 text says
+  "`--about <file> [<file> ...]` naming only the file(s) this run set out to verify",
+  plural and bracketed, so the skill and the installed tool disagree. Recorded without
+  `--about`; reach came out `1/2 (+1 by alias)` and correct, so nothing was lost here —
+  but in a fan-out, where `--about` is the whole point, a two-file lane would be told to
+  drop one.
+  - [plant-tower-defense:G-140] status: fixed | fixed-in: 0.61.0 | seen: 1 | harness: 0.38.0 | source: plant-tower-defense 2026-08-20
+  - Improvement: `nargs="+"` on the argument, or one line in the help saying it takes a
+    single path. Same 0.38.0-vs-0.60.0 spread as G-130 — check whether 0.60.0 already
+    takes several before filing upstream.
+
+- Gap: **`cmd mouse_move` sends `relative` only, so absolute-position input is undrivable.**
+  `python tools/devtools.py cmd mouse_move --args '{"position":[224.0,104.0]}'` is refused
+  by name — `mouse_move needs relative as [dx, dy]` — and the relative form does not carry
+  a position, so a handler doing `_update_cursor(motion.position)` sees `(0, 0)`. Measured:
+  two attempts, `_hover_cell` stayed `(-1, -1)` both times; warping `-4000,-4000` then
+  `+224,+104` changed nothing, because Godot's relative motion never sets `position`.
+  This is not a niche verb — hover cues, tooltips, drag previews, placement previews and
+  cursor-following art are all `position` readers, and this project has four of them.
+  Workaround used: call the handler below the event layer
+  (`run-method --method _update_cursor --args "[[224.0,104.0]]"`), which verifies
+  everything except the delivery and has to be reported as such.
+  - [plant-tower-defense:G-141] status: fixed | fixed-in: 0.61.0 | seen: 1 | harness: 0.38.0 | source: plant-tower-defense 2026-08-20
+  - Improvement: accept a `position` arg on `mouse_move` and set it on the
+    `InputEventMouseMotion` (with `relative` defaulting to the delta from the previous
+    position, so existing callers are unaffected). Check 0.60.0 first — this project runs
+    0.38.0 and `harness-version --client` says a newer harness is on this machine.
+
+- Gap: **reach was `null` until the game was relaunched, and nothing said so at capture
+  - [plant-tower-defense:auto-0d6cac] status: open | seen: 1 | source: plant-tower-defense 2026-08-20
+  time.** `scene-tree` was taken after `quit`, so the first `reach` read
+  `NOT reached ... game/notebook_screen.gd` — true, and true only because the notebook had
+  been closed with the process. A second launch, `fire-entry-point notebook`, a second
+  capture, and `--scene-tree A --scene-tree B` gave `3/4, nothing left unreached`. The
+  repeatable flag is the fix and it works; what is missing is anything at CAPTURE time
+  saying a one-screen snapshot cannot speak for a multi-screen run.
+  - This is `plant-tower-defense-fs2b`, already filed as a bead, now on its second sighting.
+    Not opening a G id: the bead has the detail and a G would be a second record of one thing.
+  - Improvement: `scene-tree` could print the count of `res://` scripts it saw against the
+    count `scripts-seen` reports for the session — a one-line denominator that makes
+    "this is one screen of several" visible while the game is still running to fix it.
+
+- Gap: **`harness-version --client`'s gap reconciliation over-reports "already fixed here"
+  by resolving status per LINE, not per id.**
+  - [plant-tower-defense:G-142] status: fixed | fixed-in: 0.61.0 | seen: 1 | harness: 0.60.0 (client) / 0.38.0 (installed) | source: plant-tower-defense 2026-08-20 | dup-of: gh#63
+  - Improvement: resolve each id from its LAST status line, the way `gap_ledger.py` does,
+    and say which line the verdict came from. And separate CITED from CREDITED: a
+    `plant-tower-defense:G-044` in a comment describing a workaround is evidence the gap is
+    KNOWN, not that it is closed. The first number in the same output is careful about this
+    (it searched for credits in the release notes); the second is not.
+
+- Gap: **no new harness gaps beyond G-142 this turn** — this was a bookkeeping pass over
+  - [plant-tower-defense:auto-d9c5a6] status: open | seen: 1 | source: plant-tower-defense 2026-08-20
+  the ledger itself and it used one command.
+
+- Gap: **`new-uid --write` mints a `.uid` sidecar for any path, including a `.py`.**
+  Ran `python tools/devtools.py new-uid --write tools/gate_aim_check.py` out of habit
+  after adding a new tool file; it printed
+  `uid://bwfh52uu6dksi  -> ...\tools\gate_aim_check.py.uid` and wrote it. A UID is a Godot
+  resource identity; a sidecar beside a Python file is meaningless, is not tracked by
+  lint's UID pass (which walks `.gd`), and would sit in the tree unexplained. Deleted by
+  hand. The verb has the information to refuse — it knows the extension.
+  - [plant-tower-defense:G-143] status: fixed | fixed-in: 0.61.0 | seen: 1 | harness: 0.38.0 | source: plant-tower-defense 2026-08-20
+  - Improvement: refuse a path whose suffix is not one Godot mints UIDs for
+    (`.gd`, `.tscn`, `.tres`, `.gdshader`), naming the suffix it got. One `if`, and it
+    turns a silent wrong file into a one-line error.
+
+- Gap: **the unit suite takes >2 minutes while a launched game is up, and ~90 s when it is
+  - [plant-tower-defense:auto-629a74] status: open | seen: 1 | source: plant-tower-defense 2026-08-20
+  not.** `CLAUDE.md` says a headless gate "never touches the bus ... safe to run while
+  another session drives this game", which is true — it passed cleanly once the game was
+  quit, and nothing was corrupted. What is missing is the COST: the run exceeded a
+  two-minute budget and was killed, which reads as a hang rather than as contention.
+  - Not opening an id: this is a documentation sharpening rather than a defect, and the
+    claim it sharpens ("safe") is correct as written.
+  - Improvement: add "safe, but slower — expect roughly double while a game holds
+    `.godot/`" to that line, so a killed run is diagnosed rather than investigated.
+
+- Gap: **no new harness gaps this turn.** The two runs that mattered were `run_tests.py`
+  - [plant-tower-defense:auto-44ffb7] status: open | seen: 1 | source: plant-tower-defense 2026-08-20
+  and a temporary assertion; neither needed the bridge, and the one number in question
+  turned out to be readable headlessly all along. [G-143] was not re-hit.
+
+- Gap: **no new harness gaps this turn.** `set-state` on an autoload field followed by
+  - [plant-tower-defense:auto-1ae224] status: open | seen: 1 | source: plant-tower-defense 2026-08-20
+  `fire-entry-point` is exactly the shape the bridge documents, and it worked first try
+  including the `StringName` coercion (`difficulty = harsh  (coerced)`).
+
+- Gap: **no new harness gaps this turn, and none were expected** — this cycle used
+  - [plant-tower-defense:auto-e5e397] status: open | seen: 1 | source: plant-tower-defense 2026-08-20
+  `run_tests.py`, `lint_project.gd` and `check_all.py` and nothing else. Recording it
+  explicitly so an absent gap is distinguishable from a forgotten log.
+
+- Gap: **no new harness gaps this turn.**
+  - [plant-tower-defense:auto-601ecd] status: open | seen: 1 | source: plant-tower-defense 2026-08-20
+
+- Gap: **no new harness gaps.** [G-143] not re-hit; nothing needed that the bridge lacked
+  - [plant-tower-defense:auto-60c155] status: open | seen: 1 | source: plant-tower-defense 2026-08-20
+  for the four screens it can reach. The two it CANNOT reach are a project problem rather
+  than a harness one — the run summary needs a finished run, which no entry point can
+  produce because what is missing is a history rather than a scene. Filed as
+  `plant-tower-defense-dklv` against `devtools_ext/commands.gd`, not upstream.
+
+- Gap: **`name_check` does not resolve `x.method()` call sites, and `CLAUDE.md` says it
+  resolves "engine classes and their MEMBERS".** Three mutations, each restored and
+  verified: a bogus method on a project type, one on a `Node`-typed receiver with the
+  engine index live (1036 classes), and one inside `game/` to rule out a scan-root
+  question. `name_check` clean, `import_check` clean, `lint_project.gd` 0 errors 0
+  warnings. The line fails at runtime and nowhere else.
+  - [plant-tower-defense:G-144] status: open | seen: 2 | harness: 0.38.0 | source: plant-tower-defense 2026-08-20 | dup-of: gh#64 | note: 0.61.0 fixed the DOCUMENTED CLAIM half (commands/verify.md, REFERENCE.md and name_check's own NOT COVERED line now say call sites are not resolved). The capability is deliberately not attempted - see [H-072]. Closing this as fixed would be the same overclaim the gap reports.
+  - Improvement: two, and the first stands alone. **Correct the claim** — `name_check`'s
+    own `NOT COVERED` names type inference and says nothing about call sites, so a
+    careful reader is told the wrong thing twice; it should say a `x.method()` receiver
+    is not checked. **Then consider whether it can be**: Godot has a GDScript warning for
+    unsafe method access under `debug/gdscript/warnings/`, which `project.godot` sets none
+    of, and `lint_project.gd` is the one gate that actually compiles. Expect a large first
+    count — this codebase calls methods on `Variant`-typed Dictionary values everywhere —
+    so the work is finding the gating subset, not flipping a switch.
+
+- Gap: **no new harness gaps.** One tooling consequence of MY OWN earlier work surfaced
+  - [plant-tower-defense:auto-ab1f95] status: open | seen: 1 | source: plant-tower-defense 2026-08-20
+  instead, on the shelf page: "Nothing left on the ground" reads as earned, because cycle
+  159's first `cmd end_run` call unlocked it off a synthetic run before
+  `--snapshot-userstate` was in use. That is the verb behaving exactly as its own docstring
+  now warns, one cycle too late to help. **An attempt to clear the flag was refused by the
+  sandbox, and that is the right default** — it is the developer's save, the flag is
+  cosmetic, and a wrong clear is worse than a wrong set. Reported rather than fixed.
+
+- Gap: **no new harness gaps.** The opposite, in fact: `name_check.py`'s cached engine API
+  - [plant-tower-defense:auto-04ecd0] status: open | seen: 1 | source: plant-tower-defense 2026-08-20
+  index turned out to be reusable by a project checker with no work at all, which is a
+  harness asset nothing had drawn on before. Worth knowing that the cache is
+  `~/AppData/Local/godot-selftest-harness/api/engine_api_<version>.json.gz`, shaped
+  `{"classes": {Name: {"inherits": ..., "members": [...]}}}`, and that a project tool can
+  read it directly.
+  - One measured caveat, and it cost four false findings: **`Object.free` is not in the
+    index** (60 members for `Object`, no `free`), while `Node.queue_free` is. Engine
+    built-ins ClassDB does not expose as ordinary methods are absent, so a consumer needs
+    a named list. `[G-144]` is not re-hit by this; it is a separate property of the cache
+    and is recorded here rather than filed, since the workaround is four characters.
+
+- Gap: **no new harness gaps.** [G-143] and [G-144] not re-hit.
+  - [plant-tower-defense:auto-197f69] status: open | seen: 3 | source: plant-tower-defense 2026-08-20
+
+- Gap: **no new harness gaps.** Nothing was asked of the bridge.
+  - [plant-tower-defense:auto-d1f617] status: open | seen: 1 | source: plant-tower-defense 2026-08-20
+
+- Gap: **no new harness gaps, and nothing was asked of the bridge.** Recording it so the
+  - [plant-tower-defense:auto-101971] status: open | seen: 1 | source: plant-tower-defense 2026-08-20
+  absence is a choice rather than an omission — this is the third cycle running where the
+  right instrument was arithmetic, and saying so is what keeps `overkill` an honest
+  category rather than a thing that only appears when a run disappoints.
+
+- Gap: **[G-145] `_T` has no way to read a script's source.**
+  - [plant-tower-defense:G-145] status: fixed | fixed-in: 0.61.0 | seen: 1 | harness: 0.38.0 | source: plant-tower-defense 2026-08-20 | dup-of: gh#65
+    Filed against SeveralHerr/godot-selftest-harness as issue 65, re-checked against
+    the **0.60.0** templates rather than the 0.38.0 install — `run_tests.gd@0.60.0`
+    still ships no source-reading helper, so this is current and not a stale-install
+    false alarm. Symptom and mechanism verified; the fix is NOT — I have not run the
+    proposed static inside `run_tests.gd` itself, and whether `res://` resolves the
+    same for a static on `_T` as for one on the test script is the open question.
+  - The assertions this cycle needed most were about GUARDS, not values: "a winged pest
+    passes a Chomp Flower untouched" is `if pest.is_winged: continue` inside a private
+    method, with no predicate to call and nothing to read off an instance. Going through a
+    live grab would assert the grab, not the exemption. So the check has to read
+    `chomp_flower.gd` — and every test that has ever needed this opened a `FileAccess` by
+    hand. **There are eight such call sites across `test/unit/`** (5 in `test_selftest.gd`,
+    2 in `test_placement.gd`, 1 in `test_economy.gd`), each re-deciding what to do with a
+    null handle. I added a ninth as `_source_text`, local to one file, because that is
+    cheaper than the alternative and is exactly how the eighth got there.
+  - Improvement: `_T.file_text(path: String) -> String` on the test helper, returning `""`
+    for a path that will not open. Six lines. The null-handle policy is the part worth
+    centralising: an unreadable source is precisely the case where a `contains()` check
+    passes for the wrong reason, and a caller who has to remember that will eventually not.
+
+## 2026-08-20 — 0.61.0: loop tick twenty-nine — the harness in the player's copy
+
+Reviewed: 8 open beads, **8 open issues** (gh#58–#65 — the tracker went from 0 open to 8
+in three days, the largest batch this repo has had), `PURPOSE.md`, and both project logs;
+`upstream_gaps.py` pooled 43 gaps from plant, which is still pinned at 0.38.0. Ten items
+picked, plus three cheap ones from the pool.
+
+**The one that matters most is gh#58, and it is a different kind of bug from everything
+else in this log: it reached a player.** Every other entry here is about a developer being
+told something wrong. This one shipped into an exported build on itch.io and deleted a
+game's title screen for everyone who opened the page.
+
+- **[gh#58 — fixed] The harness is inert in an exported build.** The bridge is an
+  autoload, so it goes into the `.pck` whether anyone meant it to or not, and the only
+  gate was `_is_script_run()` — false for a player *and* false for a developer. So
+  `entry_hook` fired on every page load, calling `TitleScreen.skip_to_game()`, and the bus
+  polled `user://` in the browser's storage for the life of every session. Nothing
+  errored; the export was green. `OS.has_feature("template")` now returns `_ready()`
+  immediately and disables `_process`: no config, handlers, extension, owner file, log or
+  hook. **`PURPOSE.md` gained a design commitment for this** ("It must not ship with the
+  game"): the existing commitments are all about the developer's loop, and none of them
+  named its boundary — which is why nothing caught this.
+  **Two opt-ins, and the second one was found by the gate rather than by design.** The
+  first implementation had only a `devtools` feature tag on the export preset — chosen
+  over a config key because `devtools_config.json` need not be in the `.pck`, so a tag is
+  the one signal guaranteed both present and deliberate. `check_real_suite.py` then came
+  back `1016 → 1015`, and the failing test was plant's own
+  `test_the_devtools_bridge_stays_out_of_a_players_build`: the reporting project had
+  already hand-patched this gate into its installed copy **and guarded it with a test**,
+  precisely so a `/scaffold-godot-harness` refresh would say if the patch got overwritten.
+  Its first assertion (`OS.has_feature("template")`) passed against the new code; its
+  second demanded a `--devtools-force` escape hatch *in the condition, comments stripped*,
+  and that was gone. They are complements, not alternatives: a feature tag is decided at
+  export time and is the only mechanism a **web** build can use (no command line — and web
+  is where gh#58 was found), while `--devtools-force` is decided at launch time and is the
+  only one that works on a **desktop binary that already exists**, since debugging the
+  build a player is running should not require re-exporting it. Both ship.
+  `is_shipped_build()` exposed. This is the [H-033] rule paying out from the other
+  direction — the report's own working code was better evidence than the tidier design
+  derived from its prose — and it is the clearest case yet for why
+  `check_real_suite.py` is required rather than advisory: **no gate in this repo would
+  have caught it**, because the thing it broke was a real project's assertion about the
+  file this repo ships.
+- **[gh#59 / plant G-059-family — fixed] `assert_eq` fails as `[SAME-OBJECT]` when both
+  sides are one *freed* object.** `==` is true there because they are a single dangling
+  reference, so the assertion could not fail for any reason the test intended, and
+  `[VACUOUS]` structurally cannot catch it — the assertion *ran*, it just asked nothing. A
+  real suite's `test_corn_shoots_the_pest_closest_to_escaping` passed that way for many
+  cycles. Narrowed to *freed*: same **live** object is a legitimate identity assertion and
+  still passes, so the obvious "both sides are the same object" rule was rejected — it
+  would fail real tests. `is_same()` rather than `get_instance_id()` because it does not
+  dereference, which is what makes it safe on a freed operand. The reporter had already
+  measured the narrow rule against 885 tests / 17,448 assertions with zero new findings.
+- **[gh#63 / plant G-142 — fixed] `harness-version --client` resolves a gap's status per
+  ID, from its last status line, and separates CITED from CREDITED.** It scanned
+  `status: open` per **line**, and the log format is append-only by design — a gap's
+  history is `open` → `open` → `fixed` on separate lines — so every fixed gap read as open
+  forever. On plant it printed twelve ids under *"the fix is installed; the log's status
+  line is what is stale"*; eleven were already `fixed`, and the twelfth (G-044) was a live
+  importer segfault whose "credit" was a retry-until-progress loop. **Acting on that line
+  would have flipped eleven correct lines and closed a live gap.** A credit is now only a
+  `status: fixed` record in the upstream log; a name in a source comment is reported as a
+  *reference*, with the file that carries it, and the reader is told to check whether it is
+  a fix or a workaround. Every verdict prints the line number it came from. Verified
+  against the real plant log (100 ids resolved; the eleven read `fixed`, G-044 `open`) —
+  the scratch fixture could not have caught this, since the shape only exists in a log with
+  history.
+- **[gh#62 / plant G-138 — fixed] `what-drew --at X Y`**, `node-bounds` inverted. Every
+  spatial verb was keyed on the node, so "what drew this mark" had only bisection available
+  — hide a layer, re-capture, compare one pixel — which cost five rounds and two confident
+  wrong theories for one 32×5 mark. Same geometry as `node-bounds` applied over the tree
+  with a containment test. **Painters and containers are separate**, which is the whole
+  difference between an answer and a list; `Line2D`, `Polygon2D` and `AnimatedSprite2D`
+  gained real extents, because a pooled `Line2D` at `position (0,0)` with its ink in
+  `points` is precisely the case that motivated the verb and the case a `_draw()`-only
+  implementation misses. A `_draw()` override is detected from the **script's** method
+  list, not `has_method("_draw")` — that is a CanvasItem virtual and answers true for the
+  whole tree.
+- **[gh#60 — fixed] `screenshot` and `sample-pixels` say `TREE IS PAUSED`.** `ping`,
+  `performance` and `first_frame` already did; the two that were missed are the two whose
+  output a human *looks at*. A paused tree freezes every Tween where it stood, so a 64px
+  sprite captured mid-entrance reads as a 20px speck, and `sample-pixels` was worse because
+  its output is numeric and looked authoritative. The client's screenshot path never echoes
+  `message`, so it got the marker keyed on the new `tree_paused` data key.
+- **[gh#61.1 / plant G-136 — fixed] `verify_ledger record` names a defaulted `lint` or
+  `tests`.** Three other keys were already enrolled in that warning; these two are the gate
+  results, the two whose absence most misrepresents a run, and the ledger is append-only so
+  a wrong row stands permanently. A real run with lint exit 0 and 959/959 wrote
+  `lint=None tests=None` silently.
+- **[gh#61.2 / plant G-137 — fixed] `NOT reached` says it reads a snapshot.** Every
+  neighbouring exclusion on that line explains itself; this was the one that did not, and
+  the one where the reader's natural inference ("the run never loaded it") can be wrong. A
+  session that opened a screen, drove ten verbs inside it and closed it before the capture
+  read identically to one that never opened it — a second capture taken while it was live
+  moved the same session from 3/7 to 4/7.
+- **[gh#65 / plant G-145 — fixed] `_T.file_text(path)`.** For checks whose seam is a
+  **guard** rather than a value: `if pest.is_winged: continue` has no predicate to call,
+  and driving the behaviour asserts the behaviour rather than the exemption. Eight
+  hand-rolled `FileAccess.open` call sites in one project's `test/unit/`. Returns `""` on a
+  path that will not open, the same null policy `text_width` settled.
+- **[gh#64 / plant G-144 — CLAIM fixed, capability deliberately not attempted]**
+  `CLAUDE.md` said `name_check.py` resolves "engine classes and their members", which reads
+  as covering `x.method()`. It does not: `unknown_member` fires only on a PascalCase
+  **root** ref (`Class.member` / `Autoload.member`), so `n.no_such_method()` on a typed
+  local is never checked, project type or engine type. Confirmed by reading the
+  implementation. The claim is corrected in `commands/verify.md`, `REFERENCE.md`'s rule
+  table, and `name_check`'s own `NOT COVERED:` line — the mechanism this repo already has
+  for exactly this. **Implementing call-site resolution was considered and rejected for
+  now**: it needs a local type environment (declared types, reassignment, shadowing, duck
+  typing), and the risk is the one [H-030] already cost — a checker that passed every
+  synthetic stage while emitting 466 bogus warnings on a real project. Logged as [H-072]
+  with the measurement it must pass first. Closing G-144 as *fixed* would be the same
+  overclaim the gap is about, so it stays open with a note.
+
+Three more from the pool, all cheap and all real:
+
+- **[plant G-141 — fixed] `mouse-move` takes `--position` alone.** `relative` was
+  required, and Godot's relative motion never sets `position`, so a handler doing
+  `_update_cursor(motion.position)` saw `(0, 0)` — and hover cues, tooltips, drag previews,
+  placement previews and cursor-following art are all `position` readers. Given `position`
+  alone the delta from where the cursor actually is *is* the honest relative, so it is
+  computed rather than demanded.
+- **[plant G-140 — fixed] `--about A B` no longer errors.** `action="append"` accepted
+  `--about A --about B` and refused the space-separated form, while `commands/verify.md`
+  documented `--about <file> [<file> ...]` — the skill and the tool disagreed, and the
+  population this flag exists for is fan-out lanes, where a two-file lane was told to drop
+  one. `extend` + `nargs="+"` takes both spellings.
+- **[plant G-143 — fixed] `new-uid --write` refuses a non-resource suffix.** It minted
+  `tools/gate_aim_check.py.uid` and printed a success line — a file that means nothing, is
+  invisible to lint's UID pass, and sits in the tree unexplained.
+
+**New controls, because two of the above shipped with nothing exercising them.** The first
+`--full` run of this release passed 98/98 and every stage — while `what_drew` had no stage
+at all. A verb whose only proof is that it compiles is the "reports success, is not
+running" shape this project keeps finding elsewhere, so:
+
+- stage 5 plants a **pooled `Line2D` under a container `Control`** — the exact gh#62 shape
+  — and asserts `what_drew` names `RoadCue` (`Line2D: 2 point(s)`) as the painter with
+  `CueOverlay` separated as a container, names the `Swatch` fill at a second point, finds
+  **nothing** at an empty corner (a hit-test that always names something is not a
+  hit-test), and reports `in_viewport: false` off screen.
+- stage 4 plants the three-case `assert_eq` control and **mutates it to the defect shape**,
+  requiring exit 1 with `[SAME-OBJECT]`, plus `_T.file_text` reading a real source and
+  returning `""` for a missing path.
+- stage 5 now also drives `mouse-move --position` **alone** and asserts the event arrives
+  at exactly `(224, 104)` — read off `InputEventMouseMotion.position` in the fixture's
+  `_unhandled_input`, which had only ever recorded `relative`, so the field the whole gap
+  is about was unobserved. Neither argument is still refused.
+- stage 3 asserts the gh#58 gate is present **in code with comments stripped**, both
+  opt-ins included — the upstream twin of plant's guard test, so a refactor here cannot
+  quietly drop a half. It is honest about being static: no export is built, so the
+  `template`-true branch is still unexecuted, which is [H-071].
+
+- Gap: **`check_templates.py` cannot exercise the exported-build path at all.** gh#58 is
+  the most consequential fix in this release and the gate can only prove the *negative*
+  control: a normal launch still opens its bus. Nothing here runs `--export-release`, so
+  the branch that actually matters — `OS.has_feature("template")` true — is verified by
+  reading, not by running. That is the same standard this file rejects everywhere else.
+  - [H-071] status: open | seen: 1 | harness: 0.61.0
+  - Improvement: a stage that exports the scratch project headlessly with a Linux/Windows
+    preset (export templates permitting; SKIPPED with a named reason when absent), runs the
+    binary for two seconds, and asserts **no** `devtools_owner.json`, **no**
+    `devtools_log.jsonl` and **no** entry-hook side effect appear in its `user://` — then
+    repeats with a `devtools` feature tag on the preset and asserts all three DO. Without
+    it, a future refactor of `_ready()` can re-break a player's title screen and every
+    stage will stay green.
+
+- Gap: **`name_check.py` has no way to be measured for false positives as part of the
+  gate**, which is why gh#64's capability half is not attempted. The scratch project is
+  small and synthetic; the only honest test of a call-site resolver is a real corpus, and
+  running one is a manual step a release can silently skip.
+  - [H-072] status: open | seen: 1 | harness: 0.61.0
+  - Improvement: a `tools/check_name_check_corpus.py <project>...` that runs the working
+    tree's `name_check.py` over named real projects and **exits 1 on any increase in
+    findings** against a recorded baseline per project — the `check_real_suite.py` shape,
+    applied to static analysis. Then "resolve call sites" becomes a change that can be
+    proved rather than one that has to be declined.
+
+- Gap: **the gate that is *required* for a `run_tests.gd` change died by traceback on the
+  only real project it targets.** `check_real_suite.py` copies the sibling with
+  `copytree`, skipping `.git` and `.devtools` — and plant has since adopted the beads
+  tracker, whose embedded Dolt DB puts pack files ~270 characters deep, past Windows
+  MAX_PATH. The run ended in `shutil.Error: [WinError 3] The system cannot find the path
+  specified` before a single test executed. Two failures in one: a required gate silently
+  became un-runnable as a project grew, and it failed as a Python traceback rather than as
+  a named skip, so the honest verdict ("this gate did not run") is only available to
+  someone who reads a stack trace. **Fixed the same turn** — `.beads` and `__pycache__`
+  added to a named `SKIP_DIRS`; `.godot/` deliberately left in, since this script never
+  runs `--import` and a copy without the import cache makes the BEFORE run exit 2, which
+  is never a baseline.
+  - [H-073] status: fixed | fixed-in: 0.61.0 | seen: 1 | harness: 0.61.0
+  - Improvement (still open, and the general form): the copy should catch `shutil.Error`
+    and exit **2** naming the directory that could not be copied, the way every other
+    "could not run" path in this repo does. A gate whose failure mode is a traceback is
+    one a release will read as "something is broken with my change" and work around.
+
+**Validation run this turn:** `record_version.py --record` then `--check` OK at 0.61.0
+(14 files, **60 verbs + 64 CLI** — `what_drew` on both halves). `unittest discover -s
+tools` — 96 OK (2 new, both gh#63: last-status-line resolution with the line number, and
+CITED-vs-CREDITED with a citation that must NOT be reported as a fix). `check_templates.py
+--full` — OK, all stages, 0 FAIL, `stage 6 contract: 98/98`, and the four new lines quoted
+above: `stage 3 gh#58: the exported-build gate is in code with both opt-ins`, `stage 4
+tests: assert_eq flags two refs to one FREED object as [SAME-OBJECT] (exit 1) while the
+same LIVE object still passes`, `stage 5 bridge: --position alone (no relative) delivered
+an event at exactly (224, 104)`, `stage 5 bridge: what_drew named the pooled RoadCue
+(Line2D: 2 point(s)) ... NOTHING at empty (4,640)`.
+
+`check_real_suite.py ../plant-tower-defense` — **required this turn** (`run_tests.gd`
+changed) and it earned its runtime twice over. It first died by traceback on `.beads`
+(H-073, fixed); the run after that came back **`REGRESSION: passed 1016 -> 1015`**, which
+is what found the missing `--devtools-force` half of gh#58 against plant's own guard test.
+Final run, both sides on the same tree:
+
+```
+BEFORE (harness 0.38.0): Total 1017 | Passed 1017 | Failed 0 | exit 0 | 117s
+AFTER  (harness 0.61.0): Total 1017 | Passed 1017 | Failed 0 | exit 0 | 107s
+real suite OK: 0.38.0 -> 0.61.0, 1017/1017 passed both times
+```
+
+One caution recorded for the next reader: an intermediate AFTER-only run reported a second
+failure (`test_the_suite_reach_baseline_lists_only_symbols_no_test_names`) that was **not**
+a harness regression — plant's tree moved between the two copies (`Total` went 1016 → 1017
+mid-session, another session working in it), so BEFORE and AFTER were measured against
+different sources. `--baseline-total/--baseline-passed` saves ~2 minutes and buys exactly
+that hazard; a full BEFORE+AFTER on one copy is the comparison worth trusting.

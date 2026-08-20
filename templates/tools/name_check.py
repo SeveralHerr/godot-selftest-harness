@@ -86,8 +86,8 @@ from bisect import bisect_right
 from datetime import datetime, timezone
 from pathlib import Path
 
-# harness-version: 0.60.0
-HARNESS_VERSION = "0.60.0"
+# harness-version: 0.61.0
+HARNESS_VERSION = "0.61.0"
 
 EXIT_OK = 0
 EXIT_FINDINGS = 1
@@ -1200,7 +1200,11 @@ REFRESH_HINT = "run `python tools/name_check.py --refresh-api` (opens no project
 # "clean" claims, or the next reader upgrades it to "compiles" for free.
 NOT_COVERED = ("a clean name_check resolves names, it does not compile the file. "
                "Type-inference errors (`:=` on an untyped call) are invisible to it; "
-               "only lint / --import will catch them.")
+               "only lint / --import will catch them. Nor are CALL SITES resolved: "
+               "`unknown_member` checks `Class.member` / `Autoload.member`, so "
+               "`node.no_such_method()` on a typed local (`var n: Node`) is NOT "
+               "checked, on a project type or an engine one - only lint / --import "
+               "will catch that too.")
 
 # Members every type answers to but that no member list carries. `new` is ClassDB's
 # static constructor, not a bound method, so it appears in no class's method list; the

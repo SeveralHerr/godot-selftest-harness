@@ -78,6 +78,24 @@ clip stub, not the text, so the obvious width assertion passes unconditionally o
 exactly the labels that need it checked. Use `_T.text_width(label) -> float` instead;
 it measures through the label's own resolved theme font.
 
+**Checking a guard rather than a value?** When the behavior is an exemption — `if
+pest.is_winged: continue` inside a private method — there is no predicate to call and
+nothing to read off an instance, and driving the behavior asserts the behavior rather
+than the exemption. Read the source: `_T.file_text("res://game/x.gd")`. It returns `""`
+on a path that will not open, so assert the length **before** matching, or a
+`contains()` passes for the wrong reason.
+
+**`assert_eq` on two references to one *freed* object fails as `[SAME-OBJECT]`** — `==`
+is true on a single dangling reference, so that comparison could never fail. Capture
+what you meant to compare (a name, an id, a count) before the thing is freed.
+
+**The harness is inert in an exported build.** `OS.has_feature("template")` makes the
+autoload return from `_ready()` doing nothing — no bus, no log, and crucially no
+`entry_hook`, which otherwise skips your title screen for every player. To keep the
+bridge in a build on purpose: add a custom feature tag named `devtools` to that export
+preset (decided at export time; the only option for a web build), or launch the binary
+with `--devtools-force` (decided at launch time; works on a build you already have).
+
 ### DEVELOPMENT RULE (REQUIRED)
 After **any** gameplay, script, or scene change, run **`/verify`** before considering
 the work complete — don't wait for a commit request. Headless gates need no running
@@ -170,6 +188,7 @@ listed is silently ignored; `--offline` parses the scripts statically with no ga
 | `run-method --node PATH --method N --args "[...]"` | Call a method — preferred over `set-state` when a signal should fire. Reports `returned_null` + `declared_return`, so a `-> void` that ran is distinguishable from a call that aborted |
 | `set-state --node PATH --property N --value V` | Set raw property (bypasses setters/signals) and print the read-back. A JSON array is rebuilt as the property's typed Array (`Array[StringName]` works). Dotted paths write through — note that mutates the **Resource**, so a shared material changes for every node using it. Write `--value=-200,-296` with an `=` when it starts with `-` |
 | `node-bounds PATH` | Exact **screen-space** position/size — deterministic layout ground truth, ancestor `CanvasLayer` transforms applied. Prefer this over a screenshot |
+| `what-drew --at X Y` | `node-bounds` inverted: **which node drew this pixel**. Painters (ink of their own, topmost first) then containers. Viewport coordinates. Exit 1 if nothing with ink covers it. Use instead of bisecting with `screenshot --hide` |
 | `press --node PATH` | Emit `pressed` on the nearest `BaseButton` at or under PATH — a real press with no screen coordinates to guess. A disabled button is reported, not silently "pressed" |
 | `input press`/`release`/`tap` ACTION, `input state [ACTION ...]` | Simulate input actions; `state` polls what the game is actually seeing. `tap` releases on the NEXT frame and reports `pressed_during`/`pressed_after` |
 | `screenshot [--region X,Y,W,H] [--pixels] [--hide NODE]` | `--region` is in **viewport coordinates** (paste `node-bounds`' rect); a scaled window is handled and reported (`Scale: … x2.50`); `--pixels` for raw capture pixels. Visual check only (`sleep 0.5`–`1` after a state change). Crop and hiding happen game-side, so a capture is reproducible |

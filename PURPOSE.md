@@ -112,6 +112,26 @@ sessions have converged on one checkout and edited it at once (H-061), so a rele
 re-reads `git status` immediately before it commits, and a fan-out never runs a
 repo-wide git command — untracked work has no copy anywhere else (H-052).
 
+**It must not ship with the game.** Every other commitment here is about the developer's
+loop; this one is about the boundary of it. The bridge is an autoload, so it goes into the
+`.pck` whether or not anyone meant it to, and until 0.61.0 the only thing distinguishing a
+developer's launch from a player's copy was whether `--script` was on the command line —
+which is false in both. A project exported to the web therefore ran its `entry_hook` on
+every page load, calling `TitleScreen.skip_to_game()` so players never saw the menu, and
+polled `user://` in a browser's storage for the life of every session. Nothing errored,
+the export was green, and it took running the live build to notice (gh#58). That is this
+project's own recurring failure mode aimed at a stranger: a well-formed result that reads
+as fine. So a build with `OS.has_feature("template")` is inert — no config, no handlers,
+no extension, no bus, no log, no hook — and a developer who wants the bridge inside a
+build opts in deliberately, with a `devtools` feature tag on the export preset or
+`--devtools-force` at launch. Two opt-ins rather than one because a web export has no
+command line and a shipped desktop binary cannot be re-exported; the reporting project
+had already hand-patched the second and guarded it with a test, which is the kind of
+evidence that outranks a tidier design. The general rule: a
+harness that can affect what a player sees has stopped being a harness, and the default
+has to be off, because the person who would have to know to turn it off is exactly the
+person who does not know it is on.
+
 **When the tool cannot tell two states apart, it says so — it never prints the benign
 one.** The reporter of gh#44 named the shape better than this file had: "the harness
 knows a thing is ambiguous and reports the benign reading of it." A `reach 0/0` after a

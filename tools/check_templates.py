@@ -489,6 +489,11 @@ def stage_assemble(scratch, user_dir_name):
         "var tags: Array[StringName] = [&\"seed\"]",
         "## moving-in:G-029: the last InputEventMouseMotion.relative this node saw.",
         "var last_motion: Vector2 = Vector2.ZERO",
+        "# plant-tower-defense:G-141: the field that matters for an ABSOLUTE move.",
+        "# Godot's relative motion never sets `position`, so a handler reading",
+        "# motion.position (hover cues, tooltips, drag and placement previews) saw",
+        "# (0, 0) - and asserting only `relative` cannot tell that apart from working.",
+        "var last_motion_position: Vector2 = Vector2.ZERO",
         "var motion_events: int = 0",
         "## moving-in:G-033: resources held from startup, to prove `reload` reaches holders.",
         'var reload_settings: LabelSettings = preload("res://tools/harness_check_reload.tres")',
@@ -498,6 +503,7 @@ def stage_assemble(scratch, user_dir_name):
         "func _unhandled_input(event: InputEvent) -> void:",
         "\tif event is InputEventMouseMotion:",
         "\t\tlast_motion = (event as InputEventMouseMotion).relative",
+        "\t\tlast_motion_position = (event as InputEventMouseMotion).position",
         "\t\tmotion_events += 1",
         "",
         "",
@@ -538,6 +544,22 @@ def stage_assemble(scratch, user_dir_name):
         "\tswatch.size = Vector2(40, 40)",
         "\tswatch.mouse_filter = Control.MOUSE_FILTER_IGNORE",
         "\tadd_child(swatch)",
+        "\t# gh#62: the exact shape `what_drew` exists for - a pooled Line2D whose",
+        "\t# ink lives in `points`, under a container Control that carries none of",
+        "\t# its own. A scene-tree read of positions points nowhere near the mark,",
+        "\t# and the container covers the point without having drawn it: reporting",
+        "\t# the container as the answer is the noise that makes a hit-test useless.",
+        "\tvar cue_overlay := Control.new()",
+        '\tcue_overlay.name = "CueOverlay"',
+        "\tcue_overlay.position = Vector2(280, 280)",
+        "\tcue_overlay.size = Vector2(80, 40)",
+        "\tcue_overlay.mouse_filter = Control.MOUSE_FILTER_IGNORE",
+        "\tadd_child(cue_overlay)",
+        "\tvar cue := Line2D.new()",
+        '\tcue.name = "RoadCue"',
+        "\tcue.width = 5.0",
+        "\tcue.points = PackedVector2Array([Vector2(20, 20), Vector2(52, 20)])",
+        "\tcue_overlay.add_child(cue)",
         "\tvar sprite := Sprite2D.new()",
         '\tsprite.name = "Blip"',
         "\tvar sprite_image := Image.create_empty(8, 8, false, Image.FORMAT_RGBA8)",
@@ -1058,7 +1080,60 @@ def stage_parse(godot, scratch):
                                                   (proc.stderr or proc.stdout).strip()))
     print("stage 3 parse: %d scripts checked%s"
           % (len(scripts), "" if ok else " (WITH FAILURES)"))
+    ok = check_shipped_build_gate(scratch) and ok
     return ok
+
+
+def _code_only(src: str) -> str:
+    """Source with comments stripped, so a needle found in a comment does not count.
+
+    Deliberately the same trick the reporting project's own guard test uses: it is
+    the difference between "the gate is implemented" and "the gate is described".
+    Crude on purpose - a `#` inside a string literal costs a false strip, and the
+    needles below never appear in one.
+    """
+    out = []
+    for line in src.splitlines():
+        i = line.find("#")
+        out.append(line if i < 0 else line[:i])
+    return "\n".join(out)
+
+
+def check_shipped_build_gate(scratch):
+    """gh#58: the exported-build gate is present IN CODE, both opt-ins included.
+
+    This is a STATIC check and says so: nothing here exports the scratch project, so
+    the branch that matters (`OS.has_feature("template")` true) is never executed -
+    see [H-071], which is open for exactly that. What it does buy is the failure that
+    actually happened: the reporting project hand-patched this gate into its installed
+    copy, and a `/scaffold-godot-harness` refresh would have silently overwritten it.
+    They caught that with a guard test of their own; this is the upstream twin, so a
+    refactor here cannot quietly drop a half and ship a build that skips a player's
+    title screen.
+    """
+    src = _code_only((scratch / "addons" / "godot_selftest" / "dev_tools.gd")
+                     .read_text(encoding="utf-8", errors="replace"))
+    needles = [
+        ('OS.has_feature("template")',
+         "the passive gate; without it an exported build polls the bus and fires "
+         "entry_hook for PLAYERS"),
+        ('OS.has_feature("devtools")',
+         "the export-preset opt-in - the only one a web build can use, since it has "
+         "no command line"),
+        ("--devtools-force",
+         "the launch-time opt-in - the only one that works on a desktop binary that "
+         "is already built"),
+    ]
+    for needle, why in needles:
+        if needle not in src:
+            return fail("dev_tools.gd must contain %r in CODE (not only in a comment): %s"
+                        % (needle, why))
+    if "_is_shipped_build()" not in src:
+        return fail("dev_tools.gd must still call _is_shipped_build() from _ready()")
+    print("stage 3 gh#58: the exported-build gate is in code with both opt-ins "
+          "(template / devtools tag / --devtools-force); STATIC only - no export is "
+          "built here, so the template-true branch is unexecuted (H-071)")
+    return True
 
 
 # --------------------------------------------------------------------------
@@ -1385,6 +1460,7 @@ def stage_runners(godot, scratch):
     if ok:
         ok = stage_vacuous_control(godot, scratch) and ok
         ok = stage_runner_controls(godot, scratch) and ok
+        ok = check_assert_eq_and_file_text(godot, scratch) and ok
         ok = check_run_tests_py(godot, scratch) and ok
         ok = stage_shader_control(godot, scratch) and ok
         ok = stage_capture(godot, scratch) and ok
@@ -1692,6 +1768,86 @@ def stage_runner_controls(godot, scratch):
     finally:
         hidden.rename(cache)
     return ok
+
+
+def check_assert_eq_and_file_text(godot, scratch):
+    """gh#59 + gh#65, in one planted suite.
+
+    Three cases for assert_eq, because the narrow rule is the whole point: two refs
+    to one FREED object must fail (the defect - `==` is true on a single dangling
+    reference, so the comparison could never fail), two refs to the same LIVE object
+    must keep passing (a legitimate identity assertion the obvious rule would break),
+    and two different objects must still fail. Plus `_T.file_text` reading a real
+    source and returning "" - not crashing - on a path that will not open.
+    """
+    t = scratch / "test" / "unit" / "test_assert_eq_control.gd"
+    t.write_text(
+        "extends RefCounted\n"
+        "var _T\n"
+        "\n"
+        "func test_assert_eq_flags_one_freed_object_but_not_live_identity() -> String:\n"
+        "\tvar doomed: Node = Node.new()\n"
+        "\tvar a: Node = doomed\n"
+        "\tvar b: Node = doomed\n"
+        "\tdoomed.free()\n"
+        "\tvar err: String = _T.assert_eq(a, b, \"closest pest\")\n"
+        "\tif err == \"\" or not err.contains(\"[SAME-OBJECT]\"):\n"
+        "\t\treturn \"assert_eq must flag two refs to one FREED object, got: \" + err\n"
+        "\tvar live: Node = Node.new()\n"
+        "\tvar ok: String = _T.assert_eq(live, live, \"getter handed back the node\")\n"
+        "\tlive.free()\n"
+        "\tif ok != \"\":\n"
+        "\t\treturn \"assert_eq must still PASS on the same LIVE object, got: \" + ok\n"
+        "\tvar x: Node = Node.new()\n"
+        "\tvar y: Node = Node.new()\n"
+        "\tvar ne: String = _T.assert_eq(x, y)\n"
+        "\tx.free()\n"
+        "\ty.free()\n"
+        "\tif ne == \"\":\n"
+        "\t\treturn \"assert_eq must still fail on two DIFFERENT objects\"\n"
+        "\treturn \"\"\n"
+        "\n"
+        "func test_file_text_reads_a_source_and_is_empty_on_a_bad_path() -> String:\n"
+        "\tvar src: String = _T.file_text(\"res://tools/run_tests.gd\")\n"
+        "\tvar e: String = _T.assert_true(src.length() > 0, \"run_tests.gd is readable\")\n"
+        "\tif e != \"\":\n"
+        "\t\treturn e\n"
+        "\tif not src.contains(\"static func file_text\"):\n"
+        "\t\treturn \"file_text read something that is not run_tests.gd\"\n"
+        "\treturn _T.assert_eq(_T.file_text(\"res://nope/missing.gd\"), \"\",\n"
+        "\t\t\"an unopenable path reads empty rather than crashing\")\n",
+        encoding="utf-8")
+    try:
+        r = run_godot(godot, scratch,
+                      ["--script", "res://tools/run_tests.gd", "--", "--file", "test_assert_eq_control"])
+        if r.returncode != 0:
+            return fail("assert_eq/file_text control suite must pass (exit %d):\n%s"
+                        % (r.returncode, r.stdout[-2000:]))
+        # The positive control: prove the rule can FAIL, by asking it the defect
+        # question directly in a test that expects a pass. A rule that never fires
+        # reads exactly like one that is not there.
+        t.write_text(
+            "extends RefCounted\n"
+            "var _T\n"
+            "\n"
+            "func test_defect_shape_reaches_the_report() -> String:\n"
+            "\tvar doomed: Node = Node.new()\n"
+            "\tvar a: Node = doomed\n"
+            "\tvar b: Node = doomed\n"
+            "\tdoomed.free()\n"
+            "\treturn _T.assert_eq(a, b, \"closest pest\")\n",
+            encoding="utf-8")
+        m = run_godot(godot, scratch,
+                      ["--script", "res://tools/run_tests.gd", "--", "--file", "test_assert_eq_control"])
+        if m.returncode != 1 or "[SAME-OBJECT]" not in m.stdout:
+            return fail("the freed-same-object shape must FAIL the suite naming [SAME-OBJECT] "
+                        "(exit %d):\n%s" % (m.returncode, m.stdout[-2000:]))
+    finally:
+        t.unlink(missing_ok=True)
+    print("stage 4 tests: assert_eq flags two refs to one FREED object as [SAME-OBJECT] "
+          "(exit 1) while the same LIVE object still passes and two different objects "
+          "still fail; _T.file_text read run_tests.gd and returned \"\" for a missing path")
+    return True
 
 
 def check_run_tests_py(godot, scratch):
@@ -3302,6 +3458,71 @@ def check_raycast_3d(client, scratch):
     return True
 
 
+def check_what_drew(client, scratch):
+    """gh#62: `what_drew` names the node that put ink at a point, separates painters
+    from containers, and says so when nothing with ink covers it.
+
+    Three plants, because a hit-test that returns *something* looks correct:
+      - a pooled Line2D whose ink is in `points` under a Control that carries none
+        (the container must NOT be reported as the painter),
+      - the Swatch ColorRect, a different painter class at a known rect,
+      - an empty corner, where the honest answer is "nothing", not the nearest box.
+    """
+    def call(args):
+        return client.send_command(scratch, "what_drew", args, timeout=15.0)
+
+    # (316, 300) is the middle of the cue: overlay at (280,280) + points 20..52 at y=20.
+    r = call({"at": [316, 300]})
+    d = r.get("data") or {}
+    if not r.get("success") or "painters" not in d:
+        return fail("what_drew failed or lacks `painters`: %r %r" % (r.get("message"), d))
+    painters = d.get("painters") or []
+    containers = d.get("containers") or []
+    if not painters or not str(painters[0].get("path", "")).endswith("/CueOverlay/RoadCue"):
+        return fail("what_drew must name RoadCue as the topmost painter at (316,300), got %r"
+                    % ([p.get("path") for p in painters],))
+    if "Line2D: 2 point(s)" not in str(painters[0].get("paints")):
+        return fail("the painter entry must say HOW it paints (Line2D points), got %r"
+                    % painters[0].get("paints"))
+    # The planted defect: a naive walk reports the container as a hit. It must be
+    # separated out, not merged into the answer.
+    if any(str(p.get("path", "")).endswith("/CueOverlay") for p in painters):
+        return fail("CueOverlay carries no ink of its own and must be a container, not a painter")
+    if not any(str(c.get("path", "")).endswith("/CueOverlay") for c in containers):
+        return fail("CueOverlay covers the point and must be reported as a container, got %r"
+                    % ([c.get("path") for c in containers],))
+
+    # A different painter class, at a rect this file already asserts elsewhere.
+    r2 = call({"at": [920, 540]})
+    p2 = (r2.get("data") or {}).get("painters") or []
+    if not p2 or not str(p2[0].get("path", "")).endswith("/Swatch"):
+        return fail("what_drew must name Swatch at (920,540), got %r" % ([p.get("path") for p in p2],))
+    if "3fa7d6" not in str(p2[0].get("paints")).lower():
+        return fail("the Swatch entry must name the fill it paints, got %r" % p2[0].get("paints"))
+
+    # The negative control. A hit-test that always names something is not a hit-test.
+    r3 = call({"at": [4, 640]})
+    d3 = r3.get("data") or {}
+    if not r3.get("success"):
+        return fail("what_drew on empty space must succeed with an empty answer, got %r"
+                    % r3.get("message"))
+    if (d3.get("painters") or []):
+        return fail("what_drew must find no painter at empty (4,640), got %r"
+                    % ([p.get("path") for p in d3["painters"]],))
+    if "nothing with ink of its own" not in str(r3.get("message")):
+        return fail("the empty answer must say so in words, got %r" % r3.get("message"))
+
+    # Off-viewport is a distinct state, not an empty one.
+    r4 = call({"at": [5000, 5000]})
+    if (r4.get("data") or {}).get("in_viewport") is not False:
+        return fail("what_drew must report in_viewport False for a point off screen")
+
+    print("stage 5 bridge: what_drew named the pooled RoadCue (Line2D: 2 point(s)) at "
+          "(316,300) with CueOverlay separated as a container, the Swatch fill at "
+          "(920,540), NOTHING at empty (4,640), and in_viewport False off screen")
+    return True
+
+
 def check_mouse_move(client, scratch):
     """mouse_move dispatches a real InputEventMouseMotion the tree can read
     (moving-in:G-029) - asserted by the fixture's _unhandled_input, not by the reply."""
@@ -3323,8 +3544,27 @@ def check_mouse_move(client, scratch):
     lx, ly = _xy_of(last)
     if lx is None or abs(lx - 10.0) > 1e-3 or abs(ly - (-2.0)) > 1e-3:
         return fail("last relative should be (10, -2) (40,-8 split in 4), fixture saw %r" % (last,))
+    # plant-tower-defense:G-141: --position alone. `relative` used to be REQUIRED, so
+    # this call was refused outright and an absolute move was undrivable. Asserted on
+    # the event the tree actually received, not on the reply.
+    r2 = call("mouse_move", {"position": [224.0, 104.0]})
+    if not r2.get("success"):
+        return fail("mouse_move with position and no relative must succeed, got %r"
+                    % r2.get("message"))
+    props2 = _state_props(call("get_state", {"node_path": "/root/Main",
+                                             "properties": ["last_motion_position"]}))
+    px, py = _xy_of(props2.get("last_motion_position"))
+    if px is None or abs(px - 224.0) > 0.5 or abs(py - 104.0) > 0.5:
+        return fail("mouse_move --position 224,104 must deliver an event AT that point "
+                    "(the field a hover handler reads), fixture saw %r"
+                    % (props2.get("last_motion_position"),))
+    # And neither argument at all is still refused, rather than silently moving by zero.
+    r3 = call("mouse_move", {})
+    if r3.get("success"):
+        return fail("mouse_move with neither relative nor position must be refused")
     print("stage 5 bridge: mouse_move 40,-8 in 4 steps reached _unhandled_input 4 times, "
-          "last relative (10, -2)")
+          "last relative (10, -2); --position alone (no relative) delivered an event at "
+          "exactly (224, 104), and neither argument is still refused")
     return True
 
 
@@ -4310,6 +4550,7 @@ def stage_bridge(godot, scratch, full):
         ok = check_game_speed_floor(client, scratch) and ok
         ok = check_raycast_3d(client, scratch) and ok
         ok = check_mouse_move(client, scratch) and ok
+        ok = check_what_drew(client, scratch) and ok
         ok = check_reload(client, scratch) and ok
         ok = check_paused_bridge(client, scratch) and ok
         ok = check_pause_verb(client, scratch) and ok
