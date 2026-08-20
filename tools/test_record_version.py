@@ -52,8 +52,8 @@ class ClosuresAreEvidenced(unittest.TestCase):
     def test_unevidenced_close_in_this_version_is_a_problem(self):
         log = self._write(
             "  - [H-999] status: fixed | fixed-in: 0.62.0 | seen: 1\n")
-        problems, n = record_version.check_closures_are_evidenced("0.62.0", log)
-        self.assertEqual(n, 1)
+        problems, (n, n_prose) = record_version.check_closures_are_evidenced("0.62.0", log)
+        self.assertEqual((n, n_prose), (1, 0))
         self.assertEqual(len(problems), 1)
         self.assertIn("H-999", problems[0])
         self.assertIn("verified-by", problems[0])
@@ -62,14 +62,14 @@ class ClosuresAreEvidenced(unittest.TestCase):
         log = self._write(
             "  - [H-998] status: fixed | fixed-in: 0.62.0 | verified-by: stage 6 row "
             "what_drew | seen: 1\n")
-        problems, n = record_version.check_closures_are_evidenced("0.62.0", log)
-        self.assertEqual((problems, n), ([], 1))
+        problems, (n, n_prose) = record_version.check_closures_are_evidenced("0.62.0", log)
+        self.assertEqual((problems, n, n_prose), ([], 1, 0))
 
     def test_older_closures_are_not_retrofitted(self):
         """The history is what it is; demanding evidence for it would invent it."""
         log = self._write("  - [H-997] status: fixed | fixed-in: 0.55.0 | seen: 1\n")
-        problems, n = record_version.check_closures_are_evidenced("0.62.0", log)
-        self.assertEqual((problems, n), ([], 0))
+        problems, (n, n_prose) = record_version.check_closures_are_evidenced("0.62.0", log)
+        self.assertEqual((problems, n, n_prose), ([], 0, 0))
 
     def test_status_resolves_from_the_last_line_not_every_line(self):
         """The log is append-only: `open` -> `open` -> `fixed` on separate lines. A
@@ -78,7 +78,7 @@ class ClosuresAreEvidenced(unittest.TestCase):
             "  - [H-996] status: open | seen: 1\n"
             "  - [H-996] status: open | seen: 2\n"
             "  - [H-996] status: fixed | fixed-in: 0.62.0 | seen: 2\n")
-        problems, n = record_version.check_closures_are_evidenced("0.62.0", log)
+        problems, (n, _p) = record_version.check_closures_are_evidenced("0.62.0", log)
         self.assertEqual(n, 1)
         self.assertIn("H-996", problems[0])
 
@@ -87,14 +87,26 @@ class ClosuresAreEvidenced(unittest.TestCase):
         log = self._write(
             "  - [H-995] status: fixed | fixed-in: 0.62.0 | seen: 1\n"
             "  - [H-995] status: open | seen: 2 | note: reopened, the fix was partial\n")
-        problems, n = record_version.check_closures_are_evidenced("0.62.0", log)
-        self.assertEqual((problems, n), ([], 0))
+        problems, (n, n_prose) = record_version.check_closures_are_evidenced("0.62.0", log)
+        self.assertEqual((problems, n, n_prose), ([], 0, 0))
 
     def test_a_missing_log_is_a_problem_not_a_silent_zero(self):
-        problems, n = record_version.check_closures_are_evidenced(
+        problems, _counts = record_version.check_closures_are_evidenced(
             "0.62.0", Path(tempfile.mkdtemp()) / "nope.md")
         self.assertEqual(len(problems), 1)
         self.assertIn("missing", problems[0])
+
+    def test_prose_only_closures_are_counted_separately(self):
+        """H-077: 'no mechanical check exists' is legal for a documentation fix and is
+        unfalsifiable, so the ratio is the only thing that can show the field decaying
+        into a spelling exercise. No single entry can."""
+        log = self._write(
+            "  - [H-990] status: fixed | fixed-in: 0.63.0 | verified-by: prose only - no "
+            "mechanical check exists | seen: 1\n"
+            "  - [H-991] status: fixed | fixed-in: 0.63.0 | verified-by: stage 5 control "
+            "| seen: 1\n")
+        problems, (n, n_prose) = record_version.check_closures_are_evidenced("0.63.0", log)
+        self.assertEqual((problems, n, n_prose), ([], 2, 1))
 
 
 class GitReleaseState(unittest.TestCase):

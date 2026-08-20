@@ -582,6 +582,100 @@ class PostCommitAndUnknownKeysCase(unittest.TestCase):
             self.assertIn(k, proc.stdout)
 
 
+class RefreshSafetyCase(unittest.TestCase):
+    """Would a refresh LOSE anything? The question that kept a real project 25
+    releases behind, because its drift audit could only say "local edits"."""
+
+    def _tree(self, root, rel, lines):
+        p = Path(root) / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    def _setup(self, td, installed, newest, base=None):
+        proj = Path(td) / "proj"
+        newest_root = Path(td) / "newest"
+        rel = "tools/devtools.py"
+        self._tree(proj, rel, installed)
+        self._tree(newest_root / "templates", rel, newest)
+        base_root = None
+        if base is not None:
+            base_root = Path(td) / "base"
+            self._tree(base_root / "templates", rel, base)
+        return proj, newest_root, base_root, rel
+
+    def _run(self, td, installed, newest, base=None, base_version=None):
+        proj, newest_root, base_root, rel = self._setup(td, installed, newest, base)
+        real = devtools._base_templates_root
+        devtools._base_templates_root = lambda v: ((base_root, "test fixture")
+                                                   if base_root else (None, None))
+        try:
+            rows, where = devtools.analyze_refresh_safety(proj, newest_root, base_version)
+        finally:
+            devtools._base_templates_root = real
+        return {r["file"]: r for r in rows}, where
+
+    def test_identical_files_are_identical(self):
+        with tempfile.TemporaryDirectory() as td:
+            rows, _ = self._run(td, ["a", "b"], ["a", "b"])
+            self.assertEqual(rows["tools/devtools.py"]["verdict"], "identical")
+
+    def test_a_pure_upgrade_is_lossless(self):
+        """The install has nothing the newest lacks: refresh can only add."""
+        with tempfile.TemporaryDirectory() as td:
+            rows, _ = self._run(td, ["a"], ["a", "new feature"])
+            self.assertEqual(rows["tools/devtools.py"]["verdict"], "stale_lossless")
+
+    def test_a_typed_local_edit_is_at_risk_and_quoted(self):
+        with tempfile.TemporaryDirectory() as td:
+            rows, _ = self._run(td, ["a", "MY LOCAL PATCH"], ["a", "upstream thing"])
+            r = rows["tools/devtools.py"]
+            self.assertEqual(r["verdict"], "would_lose")
+            self.assertEqual(r["at_risk"], ["MY LOCAL PATCH"])
+
+    def test_without_a_base_a_rewritten_line_reads_as_a_local_edit(self):
+        """The two-way failure this exists to bound: upstream REWORDED `old impl`, and
+        with no base to subtract, that reads as something the project typed. Asserted
+        so the three-way result below is a measured improvement, not an assumption."""
+        with tempfile.TemporaryDirectory() as td:
+            rows, where = self._run(td, ["a", "old impl"], ["a", "new impl"])
+            self.assertEqual(rows["tools/devtools.py"]["verdict"], "would_lose")
+            self.assertIsNone(where)
+
+    def test_with_a_base_a_rewritten_line_is_ordinary_staleness(self):
+        with tempfile.TemporaryDirectory() as td:
+            rows, where = self._run(td, ["a", "old impl"], ["a", "new impl"],
+                                    base=["a", "old impl"], base_version="0.38.0")
+            self.assertEqual(rows["tools/devtools.py"]["verdict"], "stale_lossless")
+            self.assertEqual(where, "test fixture")
+
+    def test_with_a_base_a_real_edit_survives_the_subtraction(self):
+        """The control for the case above: subtracting the base must not swallow a
+        genuine local edit, or the fix would trade false alarms for silence."""
+        with tempfile.TemporaryDirectory() as td:
+            rows, _ = self._run(td, ["a", "old impl", "MY PATCH"], ["a", "new impl"],
+                                base=["a", "old impl"], base_version="0.38.0")
+            r = rows["tools/devtools.py"]
+            self.assertEqual(r["verdict"], "would_lose")
+            self.assertEqual(r["at_risk"], ["MY PATCH"])
+
+    def test_the_version_stamp_is_not_a_local_edit(self):
+        with tempfile.TemporaryDirectory() as td:
+            rows, _ = self._run(td,
+                                ["# harness-version: 0.38.0",
+                                 'const HARNESS_VERSION: String = "0.38.0"'],
+                                ["# harness-version: 0.62.0",
+                                 'const HARNESS_VERSION: String = "0.62.0"'])
+            self.assertEqual(rows["tools/devtools.py"]["verdict"], "stale_lossless")
+
+    def test_issue_refs_are_extracted_for_the_already_upstream_hint(self):
+        got = devtools._issue_refs([
+            "# skipped it for every itch.io player (upstream #58).",
+            "# plant-tower-defense:G-070 and H-043 too",
+            "# nothing here",
+        ])
+        self.assertEqual(got, ["#58", "plant-tower-defense:G-070", "H-043"])
+
+
 class MisplacedGlobalFlagCase(unittest.TestCase):
     """A global flag placed after the subcommand: argparse names the VALUE, not the
     flag (`unrecognized arguments: .`), and a real session spent a retry on it."""

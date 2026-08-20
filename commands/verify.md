@@ -91,6 +91,24 @@ for f in addons/godot_selftest/dev_tools.gd addons/godot_selftest/scene_validato
 done
 ```
 
+**Then ask the question that actually decides anything — would refreshing LOSE something?**
+
+```bash
+"$PY" tools/devtools.py harness-drift; echo "exit=$?"    # 0 lossless, 1 would lose, 2 could not tell
+```
+
+This is the one to run first, and usually the only one needed. The bearing below tells you
+a file has local edits; it does not tell you *what* they are or whether the newer release
+already contains them, and that is where a decision stalls. A real project read
+`hash in NO released version -> project has local edits`, correctly declined to refresh
+because it had hand-patched an exported-build guard, and then went on declining for **25
+releases** after that same guard shipped upstream — because nothing recomputes the answer.
+`harness-drift` compares content against the newest templates, subtracts the version this
+install was scaffolded from (so a line upstream merely reworded is not counted as your
+edit), and prints the lines a refresh would remove. When it says `A refresh is LOSSLESS`,
+run `/scaffold-godot-harness` and stop reading. **Re-run it after every release**: an edit
+that is at risk today is subsumed the moment the same fix ships.
+
 For each drifted file, get a **bearing** — which side is ahead — from the release history rather than guessing from mtimes. `harness_history.json` records the LF-normalized sha256 of every shipped file per released version:
 
 ```bash

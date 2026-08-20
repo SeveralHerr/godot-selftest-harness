@@ -1289,7 +1289,76 @@ def stage_names(scratch, godot, cache):
 
     ok = check_engine_skew(scratch, cache) and ok
     ok = check_require_compile(scratch, godot, cache) and ok
+    ok = check_harness_drift(scratch) and ok
     return ok
+
+
+def check_harness_drift(scratch):
+    """`harness-drift` answers "would a refresh remove anything I depend on".
+
+    Needs no Godot and no bus, which is the point of the verb. Three states, and only
+    planting can tell them apart: the scratch install IS the working tree's templates,
+    so it must report lossless; a planted local line must flip it to exit 1 and be
+    QUOTED back (a verb that says "1 file at risk" without naming the line sends the
+    reader to diff by hand, which is what it exists to replace); and a project with no
+    plugin root to compare against must exit 2, because "could not tell" and "nothing
+    to lose" are the two states this whole feature exists to separate.
+    """
+    repo_root = str(REPO_ROOT)
+    env = dict(os.environ, CLAUDE_PLUGIN_ROOT=repo_root)
+    tool = scratch / "tools" / "devtools.py"
+
+    def run(cwd=None, drop_root=False):
+        e = dict(env)
+        if drop_root:
+            e.pop("CLAUDE_PLUGIN_ROOT", None)
+            e["USERPROFILE"] = str(scratch / "no_such_home")
+            e["HOME"] = str(scratch / "no_such_home")
+        return subprocess.run(
+            [sys.executable, str(tool), "--project", str(cwd or scratch), "harness-drift"],
+            capture_output=True, text=True, timeout=120, env=e)
+
+    clean = run()
+    if clean.returncode != 0:
+        return fail("a scratch install that IS the working tree's templates must be "
+                    "lossless to refresh (exit 0), got %d:\n%s\n%s"
+                    % (clean.returncode, clean.stdout[-1500:], clean.stderr[-800:]))
+    if "LOSSLESS" not in clean.stdout:
+        return fail("the lossless verdict must be stated in words, got:\n%s"
+                    % clean.stdout[-1500:])
+
+    target = scratch / "tools" / "devtools.py"
+    original = target.read_text(encoding="utf-8", errors="replace")
+    marker = "# HARNESS_DRIFT_CONTROL: a line no released template has ever carried"
+    try:
+        target.write_text(original + "\n" + marker + "\n", encoding="utf-8")
+        dirty = run()
+        if dirty.returncode != 1:
+            return fail("a planted local line must make the refresh lossy (exit 1), got "
+                        "%d:\n%s" % (dirty.returncode, dirty.stdout[-1500:]))
+        if marker not in dirty.stdout:
+            return fail("the at-risk line must be QUOTED, not just counted - naming the "
+                        "count sends the reader back to diffing by hand:\n%s"
+                        % dirty.stdout[-1500:])
+        if "AT RISK" not in dirty.stdout or "tools/devtools.py" not in dirty.stdout:
+            return fail("the at-risk file must be named:\n%s" % dirty.stdout[-1500:])
+    finally:
+        target.write_text(original, encoding="utf-8")
+
+    # The restore has to be proved, not assumed: every later stage reads this file.
+    if target.read_text(encoding="utf-8", errors="replace") != original:
+        return fail("check_harness_drift failed to restore tools/devtools.py")
+
+    blind = run(drop_root=True)
+    if blind.returncode != 2:
+        return fail("with no harness plugin root to compare against, the answer is "
+                    "'could not tell' (exit 2), never 'nothing to lose' - got %d:\n%s%s"
+                    % (blind.returncode, blind.stdout[-800:], blind.stderr[-800:]))
+
+    print("stage 2.5 drift: harness-drift reports LOSSLESS on a pristine install (exit 0), "
+          "flips to exit 1 QUOTING a planted local line, and exits 2 - not 0 - when there "
+          "is no plugin root to compare against")
+    return True
 
 
 def check_require_compile(scratch, godot, cache):

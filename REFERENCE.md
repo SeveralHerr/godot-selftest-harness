@@ -1412,7 +1412,7 @@ mouse-move, reload, first-frame, fire-entry-point, project-settings, contained-i
 restore-userstate, verb-usage, batch, repaint
 ```
 
-`new-uid` is the one subcommand that never touches the bus — see below.
+`new-uid` and `harness-drift` are the two subcommands that never touch the bus — see below.
 
 Notable flags:
 
@@ -1421,6 +1421,27 @@ Notable flags:
   effective texture filter and which node (or project setting) supplied it. The
   answer to every "why is this sprite blurry / enormous" question in one read;
   `get-state` cannot see it because containers hide position/scale.
+- `harness-drift` — **would `/scaffold-godot-harness` remove anything this install
+  carries?** No bus, no game, no engine. The drift *bearing* (below, and in
+  `commands/verify.md`) tells a project that a file has local edits; it cannot say what
+  they are or whether the newer release already contains them, and that is exactly where
+  a refresh decision stalls. One real project read `hash in NO released version`,
+  correctly declined because it had hand-patched an exported-build guard, and went on
+  declining for **25 releases** after that guard shipped upstream — nothing recomputes
+  the answer, so the lag became permanent rather than temporary.
+  Compares **content, not hashes**, and three ways: a line is a local edit only when the
+  install has it, the newest templates do not, *and* the version this install was
+  scaffolded from did not either. That third term is load-bearing — without it every
+  line a newer release merely reworded reads as something the project typed, which on a
+  25-release gap took one file from **8 real findings to 70**. The base comes from the
+  plugin cache or, failing that, the plugin root's git history; when neither has it the
+  reply says so and calls the count an upper bound rather than quietly reporting the
+  two-way number. Prints the denominator (`14 shipped file(s) compared: N identical, M
+  stale but LOSSLESS, K carry local line(s)`), quotes the at-risk lines, and where those
+  lines cite an issue id the newest templates also cite, adds a `NOTE:` that the
+  behaviour may already be upstream in different code — the one bridge a line comparison
+  structurally cannot cross. Exit `0` lossless, `1` would lose something, `2` could not
+  tell.
 - `what-drew --at X Y` — **`node-bounds` inverted**: which node drew the pixel at a
   point, rather than where a node you can already name sits. Every other spatial verb
   is keyed on the node (`find-nodes` needs the class — the thing being looked for;
