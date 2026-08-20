@@ -73,6 +73,23 @@ after it said something the session already knew wasn't quite right (0.24.0, gh#
 A check's prose is a claim like any other verb's answer, and it is wrong the same two
 ways: saying more than was verified, or crediting less than was actually observed.
 
+**The docs it installs are a claim surface, and they fail the same two ways.** The
+reach rule above was written about checks; it applies verbatim to every sentence
+`/scaffold-godot-harness` writes into someone else's `CLAUDE.md`, because that file is
+per-session context and a session acts on it without re-deriving it. Two independent
+reports landed on this in one cycle. `CLAUDE.md` said a headless gate "brings the
+autoload up passive: safe to run while another session drives this game" — true of the
+*bus*, and read as being about headless runs generally, so a suite that writes a save
+rewrote a developer's real one (`user://` is shared and `--isolated` does not isolate
+it). And it said `name_check.py` resolves "engine classes and their members", which
+reads as covering `x.method()`; it does not, and three mutations were spent proving
+that (gh#64). Neither sentence was false about the thing it was describing. Both were
+read as covering more, which is what an overclaim is. So a documented capability is
+verified the way a verb's answer is — against what the code actually does — and where
+a claim is narrower than it sounds, the doc says what is *not* covered rather than
+leaving the reader to find the edge. `name_check` prints its own `NOT COVERED:` line
+for this reason; that is the pattern, not an exception.
+
 **Coverage is reported, not implied.** Every pass names what it looked at — `Shaders: N
 of M`, `Assertions: N executed`, `Orphans: N of M public function(s)`, `reached N/M` —
 so "checked, found nothing" and "never looked" cannot print the same line. The corollary

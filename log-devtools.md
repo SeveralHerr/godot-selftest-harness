@@ -2343,7 +2343,7 @@ made by reading the code, not by re-running each gap's original failure. That is
   of a gap id, so it cannot tell you that the verb answers the *question that was filed*.
   The commit messages cite gap ids, `record_version.py --check` verifies stamps and doc
   fan-out, and neither of them ever reads `log-devtools.md`.
-  - [H-020] status: open | seen: 1 | harness: 0.9.0
+  - [H-020] status: fixed | fixed-in: 0.62.0 | verified-by: tools/test_record_version.py::ClosuresAreEvidenced (6 cases: unevidenced close flagged, evidenced close counted, older versions not retro-fitted, last-status-line resolution both directions, missing log is a problem) | seen: 1 | harness: 0.9.0
   - Improvement: let a gap's status line carry the evidence that closed it — a
     `verified-by:` field naming a `check_templates.py` contract row, a lint rule id, or a
     named test — and have `record_version.py --check` fail when a line says
@@ -3252,7 +3252,7 @@ one that did not came with the most confident patch of the four.
   caller gave up. It now writes a failure **result** carrying the wedged request's id,
   and the client's timeout message names the mechanism and points at `[SCRIPT ERROR]`
   on stderr.
-  - [H-043] status: open | seen: 1 | harness: 0.17.0
+  - [H-043] status: fixed | fixed-in: 0.62.0 | verified-by: check_templates.py check_watchdog_beats_the_client() - a 6s step_time under a 4s client timeout is released at its 2.0s deadline and answered inside the window, with a 1s/30s negative control that must NOT be released | seen: 1 | harness: 0.17.0
   - Still open because the watchdog cannot fire inside a normal client timeout without
     force-releasing legitimate long verbs (`step_time`, a sequence with waits) that
     hold the guard on purpose. A per-verb expected duration would let the guard be
@@ -9544,3 +9544,200 @@ a harness regression — plant's tree moved between the two copies (`Total` went
 mid-session, another session working in it), so BEFORE and AFTER were measured against
 different sources. `--baseline-total/--baseline-passed` saves ~2 minutes and buys exactly
 that hazard; a full BEFORE+AFTER on one copy is the comparison worth trusting.
+
+## 2026-08-20 — 0.62.0: loop tick thirty — the sentence is a claim too
+
+Reviewed: 11 ready beads, 2 open issues (gh#64 held open on purpose, gh#66 filed by the
+last tick against this repo's own release skill), `PURPOSE.md`, and both project logs.
+Pooled **first** this time rather than last (gh#66.4): nothing new arrived from plant —
+its open count fell 46 → 38 as 0.61.0's fixes landed — so this is a backlog tick, and the
+work came from three things plant recorded as *observations rather than gaps* plus the
+oldest structural item in this file.
+
+**The theme, and the `PURPOSE.md` change.** Two independent reports this cycle were about
+a **sentence**, not a verb. `CLAUDE.md` told every session that a headless gate is "safe
+to run while another session drives this game" — true of the *bus*, and read as being
+about headless runs generally, so a suite whose code writes a save **rewrote a
+developer's real save**. And gh#64's "engine classes and their members" read as covering
+`x.method()`, which cost three mutations to disprove. Neither sentence was false about
+the thing it described; both were read as covering more, which is what an overclaim is.
+The reach commitment was written about *checks*; it now says out loud that it governs
+every sentence the scaffolder writes into someone else's `CLAUDE.md`, because that file
+is per-session context and a session acts on it without re-deriving it.
+
+- **[H-074 — fixed] The "safe" sentence now says what "safe" covers.** A headless gate
+  will not claim, clear or poll a bus another session is driving — that, and only that.
+  `user://` is shared and `launch --isolated` isolates the bus only, so the suite writes
+  the developer's real files; `run_tests.gd` names every `user://` write per test, and
+  the fix has to come from the project's own code because no flag here can do it.
+- **[H-075 — fixed] `OS.has_feature("headless")` is always false, and lint says so.**
+  Godot sets no such feature tag — the *display server* is what changes — so the obvious
+  guard never fires and reads exactly like one that passes. A project found it with a
+  four-line probe after watching a headless run take the windowed branch. New lint rule
+  `headless_feature_check`, **warning** rather than advisory because unlike
+  `string_ref_unresolved` there is no runtime construction that could make the literal
+  right, and warning rather than error so a deliberate custom tag of that name can be
+  baselined. Prints `Headless guards: N of M script(s)` every run. The harness's own code
+  was checked and already uses `DisplayServer.get_name()` throughout — no live bug, but
+  a project writing its own guard reaches for the wrong one first, every time.
+- **[H-076 — fixed] A global flag after the subcommand names the flag, not the value.**
+  `devtools.py harness-version --client -p .` exits with `unrecognized arguments: .` — it
+  names the dot. Getting from there to the fix requires already knowing that `-p` is
+  global and that global means before-the-subcommand. argparse structurally cannot say it
+  (the top-level parser is done by the time the subparser rejects the token), so a
+  pre-pass says it first and prints the corrected command. Advisory and non-fatal:
+  argparse still produces the error and the exit code, because guessing wrong here must
+  not cost a working command.
+
+**[H-020 — fixed, and it was the oldest open item in this file.]** Open since 0.9.0, 53
+releases. Nothing checked that a shipped fix closes the gap it names, so an unevidenced
+close was indistinguishable from an evidenced one — thirty status lines once moved to
+`fixed-in: 0.9.0` on one reading pass, of which four turned out partial. That is the
+process working *and* the measure of its error rate. A status line may now carry
+`verified-by:`, and `record_version.py --check` **fails** when a gap closed in the
+current version has none. Deliberately scoped to the current version: retro-fitting
+evidence onto the history would be inventing it. It does not prove a judgement right and
+is not meant to — it makes an unevidenced close visible. Resolves each id from its LAST
+status line, so the append-only `open` → `open` → `fixed` shape does not read as open
+forever (the gh#63 defect, one file over) and a *reopened* gap does not read as closed.
+Every closure in this entry carries one, including the two that honestly say no
+mechanical check exists.
+
+**[gh#66.1 — fixed] `contract_rows()`' own documented invariant is now enforced.** It has
+always said "Every generic verb appears once"; it was **six verbs short**, and the way
+that surfaced was a human noticing `stage 6 contract: 98/98` had not changed after
+`what_drew` was added in 0.61.0 — because the denominator is the number of ROWS, so a
+verb with no row cannot move it in either direction. A number that reads as coverage and
+is really a count of what someone remembered to write is the exact shape this project
+rejects everywhere else. `check_contract_covers_every_verb()` runs in stage 1 (static, so
+it lands under `--static-only` and before anything is imported) and fails on a registered
+verb with neither a row nor a `CONTRACT_EXEMPT` reason. Rows added for `what_drew`,
+`findings`, `first_frame`, `mouse_move` (both forms) and `reload`; `quit` is exempt with
+its reason, because it kills the game and cannot run mid-table. Now: **60 verbs → 59 rows
++ 1 exempt.** Mutation-tested in both directions — a removed row and a stray row each
+fail with the right message.
+
+**[H-043 / gh#1.2 — fixed] A wedged handler answers inside the caller's own window.** The
+watchdog constant is 300s and the client default is 30s, so the explanation for a wedged
+handler landed **4.5 minutes after the caller had given up** and printed a timeout that
+could not say why. H-043 has sat open since 0.17.0 with the note "the watchdog cannot fire
+inside a normal client timeout" — and the reason it could not is that neither side has the
+information: the game cannot know the caller's deadline, and the caller cannot know when a
+handler wedges. So the request now carries **`client_timeout_s`** (both halves, same edit)
+and the game arms at 2s under it, capped by the 300s constant, floored at 1s. A request
+without the key gets the old behavior, which is what "no information" should get. This can
+never pre-empt a legitimately long handler: the deadline comes from a timeout the caller
+was going to give up at anyway, so the only choice on offer is between a useful answer and
+a bare timeout. `deadline_seconds` rides on the reply so a *premature* release is
+diagnosable instead of mysterious.
+
+**[gh#66.2 / .3 / .4 — fixed] The release skill's own three defects**, filed by the last
+tick and fixed by this one: `git add -A` now excludes `experiments/` and `.devtools/` and
+is preceded by a `git status --short | grep '??'` check (it swept **345 untracked
+experiment files** into one release commit); the same-copy rule for `check_real_suite.py`
+is stated, because a sibling that moves between the BEFORE and AFTER copies produces a
+phantom regression; and pooling moved into §0a, ahead of choosing the work.
+
+**Not done, on purpose, and both stay open:**
+
+- **[H-071] the exported-build stage.** This is P1 and gh#58 was the worst thing this
+  project has shipped, so declining needs a reason: **this machine has export templates
+  for 4.6.1 and the binary is 4.7.1**, so an export stage could only ever print SKIP here.
+  Shipping a stage I have never once seen run is precisely the [H-035] failure — a stage
+  that can only report success is not a stage — and a SKIP-only stage is worse than none,
+  because it puts a reassuring line in the log. The static guard added in 0.61.0 (both
+  opt-ins present in code, comments stripped) is what stands until templates match.
+- **[H-072 / gh#64] call-site resolution in `name_check.py`**, still blocked on the
+  real-corpus false-positive gate. Unchanged reasoning from 0.61.0.
+
+- Gap: **`verified-by:` has no mechanical evidence available for a documentation fix**,
+  and two of this turn's six closures say so in the field itself. That is honest and it is
+  also the field's weakest point: "no mechanical check exists" is unfalsifiable, and if it
+  becomes the habitual value the check degrades into a spelling exercise. Recording it now,
+  at the moment the mechanism ships, rather than discovering it in ten releases.
+  - [H-077] status: open | seen: 1 | harness: 0.62.0
+  - Improvement: count them. `record_version.py --check` already knows every closure in
+    the current version; it could report `N of M closures evidenced by a re-runnable
+    check, K by prose` as a denominator on the OK line, so the ratio is visible per
+    release instead of per gap. A rising K is the signal that the field has stopped
+    meaning anything, and no single entry can show that.
+
+
+### Ids opened and closed in 0.62.0
+
+Recorded as gaps rather than left as prose because each one had a real cost to a real
+session, and an entry with no id cannot be counted, pooled or re-checked later.
+
+- Gap: **`CLAUDE.md` called a headless gate "safe" when only the BUS is safe.** A suite
+  whose code writes a save rewrote a developer's real save; `user://` is shared and
+  `--isolated` does not isolate it. Source: plant-tower-defense, 2026-08-20, recorded
+  there as an observation rather than a gap.
+  - [H-074] status: fixed | fixed-in: 0.62.0 | verified-by: prose only - no mechanical
+    check exists for a documentation claim (see [H-077]); the corrected text is in
+    templates/CLAUDE.harness.md under "A headless gate never touches the bus" | seen: 1 | harness: 0.61.0
+
+- Gap: **`OS.has_feature("headless")` is always false, and a guard that never fires is
+  indistinguishable from one that passes.** Cost a four-line probe to establish after the
+  obvious version silently took the windowed branch under `--headless`. Source:
+  plant-tower-defense, 2026-08-20.
+  - [H-075] status: fixed | fixed-in: 0.62.0 | verified-by: lint rule
+    `headless_feature_check` in lint_project.gd, with the planted control in
+    check_templates.py stage 4 (a script carrying the literal must exit 1 naming the rule;
+    the denominator line prints either way) | seen: 1 | harness: 0.61.0
+
+- Gap: **a global flag after the subcommand names the value, not the flag.** One retry per
+  session that does it. Source: plant-tower-defense, 2026-08-20.
+  - [H-076] status: fixed | fixed-in: 0.62.0 | verified-by:
+    tools/test_devtools_client.py::MisplacedGlobalFlagCase (5 cases, including the control
+    that a correctly-ordered command prints NOTHING) | seen: 1 | harness: 0.61.0
+
+- Gap: **stage 6's denominator cannot report a verb that has no row**, so `contract_rows()`
+  was six verbs short of its own documented invariant and `--full` printed an unchanged
+  98/98 across a release that added a verb. Source: this repo, filed upstream as gh#66.1.
+  - [H-078] status: fixed | fixed-in: 0.62.0 | verified-by:
+    check_contract_covers_every_verb() in check_templates.py stage 1, mutation-tested both
+    directions (a removed row and a stray row each fail with the right message);
+    prints `60 registered verb(s) -> 59 with a contract row, 1 exempt (quit)` | seen: 1 | harness: 0.61.0
+
+- Gap: **the release skill's `git add -A` swept 345 untracked `experiments/` files into a
+  release commit**, forty lines after its own warning that they are unrecoverable. Source:
+  this repo, filed upstream as gh#66.3 (with .2 and .4).
+  - [H-079] status: fixed | fixed-in: 0.62.0 | verified-by: prose only - the skill is
+    instructions, not code, and nothing executes it (see [H-077]); §6 now runs
+    `git status --short | grep '??'` and stages with `':!experiments' ':!.devtools'` | seen: 1 | harness: 0.61.0
+
+**Validation run this turn:** `record_version.py --record` then `--check` OK at 0.62.0
+(14 files, 60 verbs + 64 CLI, **7 gap closure(s) in 0.62.0 evidenced** — the new check
+reporting on its own release). `unittest discover -s tools` — **102 OK** (11 new: 6 for
+the closure check, 5 for the misplaced-flag hint including the control that a correctly
+ordered command prints nothing). `check_templates.py --full` — OK, 0 FAIL, and three
+lines that did not exist last release:
+
+```
+contract coverage: 60 registered verb(s) -> 59 with a contract row, 1 exempt (quit)
+stage 4 lint: headless guard control fired ... and the clean run still prints
+  'Headless guards: 0 of 4 script(s) use the always-false OS.has_feature("headless")'
+stage 5 bridge: a 6s step_time under a 4s client timeout was force-released at its 2.0s
+  deadline and answered in 2.2s - inside the caller's window, naming step_time; a 1s
+  step_time under 30s finished normally (not released)
+stage 6 contract: 104/104 rows passed
+```
+
+**The contract denominator moved, 98 → 104**, which is the point of gh#66.1: it could
+not move before, so it could not report anything.
+
+**Real-corpus run for the new lint rule** (required for any static-analysis change —
+the scratch project cannot measure a false-positive rate, [H-030]). `lint_project.gd`
+run against a copy of plant-tower-defense, 55 scripts: `Headless guards: 0 of 55`,
+`lint: 0 error(s), 0 warning(s) -> exit 0` — **zero false positives**. Then the same
+copy with one `OS.has_feature("headless")` planted in `game/aloe.gd`: `WARN:
+res://game/aloe.gd: ... Use DisplayServer.get_name() == "headless".`, `Headless guards:
+1 of 55`. The copy was made with `.beads`/`.git` skipped and deleted afterwards; plant's
+own tree was not touched (a stray file written there by mistake was removed and
+`git status` confirmed clean before continuing).
+
+**`check_real_suite.py` was NOT run, and does not apply this turn:** `run_tests.gd`
+changed by its two version-stamp lines and nothing else (`git diff` quoted: only
+`# harness-version:` and `HARNESS_VERSION`), so nothing about what the runner does
+between or around tests moved. Saying which gates ran matters more than the count of
+them.

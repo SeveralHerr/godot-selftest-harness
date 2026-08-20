@@ -208,6 +208,59 @@ def check_doc_links(root=None, docs=None):
     return problems, checked
 
 
+# A gap's status line, as `log-devtools.md` writes it:
+#   - [H-020] status: fixed | fixed-in: 0.62.0 | verified-by: ... | seen: 1 | ...
+_GAP_STATUS_RE = re.compile(
+    r"^\s*-\s*\[((?:[A-Za-z0-9._-]+:)?[A-Za-z]+-\d+[a-z]?)\]\s*status:\s*(\S+)(.*)$",
+    re.M)
+
+
+def check_closures_are_evidenced(version, log_path=None):
+    """H-020, open since 0.9.0: nothing checked that a shipped fix closes the gap it
+    names, so an unevidenced close was indistinguishable from an evidenced one.
+
+    Thirty status lines once moved to `fixed-in: 0.9.0` on the strength of one agent
+    reading the source and deciding; four of thirty-four turned out partial. That is
+    the process working AND the measure of its error rate - the same pass that caught
+    four could have missed a fifth, and nothing downstream would ever say so.
+
+    This does NOT prove a judgement right, and it is not meant to. It makes an
+    unevidenced close VISIBLE. Scoped to closures claiming THIS version on purpose:
+    the history is what it is, and retro-fitting evidence onto it would be inventing
+    it. Requires the `verified-by:` field to name something a reader can go and
+    re-run - a contract row, a check_templates stage, a test name, a lint rule.
+    """
+    path = Path(log_path) if log_path else (REPO / "log-devtools.md")
+    if not path.is_file():
+        return ["log-devtools.md: missing - gap closures cannot be checked"], 0
+    text = path.read_text(encoding="utf-8", errors="replace")
+    # Resolve per id from the LAST status line: the log is append-only, so an id's
+    # history is `open` -> `open` -> `fixed` on separate lines and a per-line scan
+    # would read every fixed gap as open forever (the gh#63 defect, one file over).
+    latest = {}
+    for m in _GAP_STATUS_RE.finditer(text):
+        latest[m.group(1)] = (m.group(2).lower().rstrip("|").strip(), m.group(3),
+                              text.count("\n", 0, m.start()) + 1)
+    closed_here, unevidenced = [], []
+    for gid, (status, rest, line_no) in sorted(latest.items()):
+        if not status.startswith("fixed"):
+            continue
+        if ("fixed-in: %s" % version) not in rest:
+            continue
+        closed_here.append(gid)
+        if "verified-by:" not in rest:
+            unevidenced.append("%s (log-devtools.md:%d)" % (gid, line_no))
+    if unevidenced:
+        return ([
+            "log-devtools.md: %d gap(s) closed in %s carry no `verified-by:` naming what "
+            "proves it: %s. Add `| verified-by: <a contract row, a check_templates stage, "
+            "a test name, a lint rule>` to each status line, or leave the gap open. An "
+            "unevidenced close reads exactly like an evidenced one, which is the whole "
+            "defect (H-020)." % (len(unevidenced), version, ", ".join(unevidenced))
+        ], len(closed_here))
+    return [], len(closed_here)
+
+
 def check():
     version = plugin_version()
     problems = []
@@ -251,6 +304,8 @@ def check():
     problems.extend(fanout_problems)
     link_problems, n_links = check_doc_links()
     problems.extend(link_problems)
+    closure_problems, n_closed = check_closures_are_evidenced(version)
+    problems.extend(closure_problems)
 
     if problems:
         print("version check FAILED (%d problem(s)):" % len(problems))
@@ -258,8 +313,9 @@ def check():
             print("  - %s" % p)
         return 1
     print("version check OK: %s stamped in %d shipped file(s), history recorded, "
-          "%d bus verb(s) + %d CLI command(s) documented, %d relative doc link(s) resolve."
-          % (version, len(SHIPPED), n_bus, n_cli, n_links))
+          "%d bus verb(s) + %d CLI command(s) documented, %d relative doc link(s) resolve, "
+          "%d gap closure(s) in %s evidenced."
+          % (version, len(SHIPPED), n_bus, n_cli, n_links, n_closed, version))
     warning = git_release_state(version)
     if warning:
         print(warning)
