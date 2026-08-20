@@ -96,6 +96,36 @@ class ClosuresAreEvidenced(unittest.TestCase):
         self.assertEqual(len(problems), 1)
         self.assertIn("missing", problems[0])
 
+    def test_an_id_in_no_known_namespace_is_reported_not_skipped(self):
+        """gh#68.3: `- [gh#67] status: fixed | ...` was written, matched nothing, and
+        `--check` printed OK - a status line nothing would ever read."""
+        log = self._write(
+            "  - [gh#99] status: fixed | fixed-in: 0.64.0 | verified-by: x | seen: 1\n"
+            "  - [H-900] status: fixed | fixed-in: 0.64.0 | verified-by: y | seen: 1\n")
+        problems, (n, _p) = record_version.check_closures_are_evidenced("0.64.0", log)
+        self.assertEqual(n, 1)                      # only H-900 was countable
+        self.assertEqual(len(problems), 1)
+        self.assertIn("gh#99", problems[0])
+        self.assertIn("no known namespace", problems[0])
+
+    def test_auto_ids_are_a_real_namespace_not_a_malformed_one(self):
+        """upstream_gaps.py mints `auto-<hex>` for a pooled gap that arrived with no id
+        line. Calling those malformed was the first version's own bug."""
+        log = self._write(
+            "  - [gather:auto-bff6fa] status: fixed | fixed-in: 0.64.0 | "
+            "verified-by: x | seen: 1\n")
+        problems, (n, _p) = record_version.check_closures_are_evidenced("0.64.0", log)
+        self.assertEqual((problems, n), ([], 1))
+
+    def test_historical_ids_from_other_versions_are_left_alone(self):
+        """26 `gh#N` lines predate the convention. Failing a release on them would be
+        retro-fitting a rule onto history, which H-020 deliberately refused to do."""
+        log = self._write(
+            "  - [gh#2] status: fixed | fixed-in: 0.9.0 | seen: 1\n"
+            "  - [H-901] status: fixed | fixed-in: 0.64.0 | verified-by: y | seen: 1\n")
+        problems, (n, _p) = record_version.check_closures_are_evidenced("0.64.0", log)
+        self.assertEqual((problems, n), ([], 1))
+
     def test_prose_only_closures_are_counted_separately(self):
         """H-077: 'no mechanical check exists' is legal for a documentation fix and is
         unfalsifiable, so the ratio is the only thing that can show the field decaying

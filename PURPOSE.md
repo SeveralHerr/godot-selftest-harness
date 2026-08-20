@@ -215,6 +215,31 @@ this session's plugin) and says when one is newer than the install it is running
 The distribution lag is a property of the system, and a system that reports on itself
 must report that too.
 
+**A tool that tells you to update must not require the update, and delivery is measured
+rather than assumed.** The first time anyone counted — loop tick 32, after thirty-one
+releases — **seven of ten consumer projects were behind, the worst by 53 releases, and
+three of the stale ones were under heavy active development** (886, 443 and 188 commits
+in thirty days, on harnesses 25, 20 and 53 versions old). Three more carried a
+`dev_tools.gd` with no version stamp at all, which predates the stamp and is older
+still. Nothing was broken; nothing was measured. `harness-drift` had shipped the release
+before to answer exactly this — *is it safe to refresh?* — and it was documented as
+`python tools/devtools.py harness-drift`, the project's **own installed client**, which
+on a 0.10.0 install answers `invalid choice`. The tool that says it is safe to update
+required the update. Four of those projects would have refreshed **losslessly**, and no
+one could have found that out.
+
+Two rules come out of it. **The bootstrap one:** anything whose job is to reach a stale
+install has to run from the plugin, not from the install — `${CLAUDE_PLUGIN_ROOT}`, every
+time — because the plugin's *commands* travel with the plugin and are always current
+while the project's *templates* are frozen at whatever version scaffolded them. A
+capability that only exists after the upgrade cannot be part of deciding on the upgrade.
+**The measurement one:** every improvement here has been scored on being implemented and
+none on being adopted, and `tools/adoption.py` now reports the installed version, the
+release gap and the recent commit count for every consumer, per release, so the gap is a
+visible series rather than something discovered by accident at tick 32. This is the same
+rule the rest of the project follows about its own checks, turned on the project itself:
+a number that is never taken is not a number that is fine.
+
 **The gaps log is the improvement pipeline.** Nearly every capability past v1 — the status
 provider, node-path normalization, `--property`, `step-time`, the touch verbs, the orphan
 baseline — exists because a session wrote down what it couldn't do at the moment it

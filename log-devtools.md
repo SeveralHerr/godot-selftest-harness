@@ -9891,3 +9891,174 @@ class of defect the release is about: the closure line for gh#67 was first writt
 namespace (`H-NNN`, `<project>:G-NNN`). `--check` silently did not count it — a status
 line that nothing will ever read. Re-filed as `[H-082] ... | upstream: gh#67`, at which
 point the closure count went 2 → 3 and the prose count 0 → 1.
+
+## 2026-08-20 — 0.64.0: loop tick thirty-two — nobody is running this
+
+Reviewed: 11 ready beads, 2 open issues, `PURPOSE.md`, both project logs, and — for the
+first time in thirty-two ticks — **what the consumers are actually running**. That last
+one reframed the whole tick.
+
+```
+Harness adoption (this repo: 0.63.0)
+  BoomerShooter          0.16.0    47 behind   last commit 2026-01-11,   0 in 30d
+  dave-game              0.18.0    45 behind   last commit 2026-08-15,   5 in 30d
+  findmyballs            0.10.0    53 behind   last commit 2026-08-14,   4 in 30d
+  gather                 0.10.0    53 behind   last commit 2026-08-06, 188 in 30d
+  harness-test-1         0.20.0    43 behind   last commit 2026-08-15,   2 in 30d
+  moving-in              0.43.0    20 behind   last commit 2026-08-17, 443 in 30d
+  plant-tower-defense    0.38.0    25 behind   last commit 2026-08-20, 886 in 30d
+7 of 10 behind (worst: 53); 3 of those ACTIVE. 3 more carry a dev_tools.gd with NO
+version stamp at all - older than every number here, not newer.
+```
+
+**Not one consumer is current, and the three most active are 20, 25 and 53 releases
+behind.** `PURPOSE.md` has said from early on that *a fix is delivered when the project
+runs it, not when it ships*. Thirty-one releases went out; nothing measured delivery.
+Every gap those projects hit is filed against a version this repo no longer ships, which
+is also why the pool has come back empty two ticks running — that zero was never a quiet
+week.
+
+**And the fix shipped last tick could not reach any of them.** 0.63.0 added
+`harness-drift` precisely to answer *"is it safe to refresh?"* — and documented it as
+`python tools/devtools.py harness-drift`, **the project's own installed client**. On a
+0.10.0 install that answers `invalid choice: 'harness-drift'`. The tool that says it is
+safe to update required the update. Four of those projects would refresh **losslessly**
+and no one could have found that out.
+
+- **[H-083 — fixed] `harness-drift` is invoked from the plugin, not the install.**
+  `commands/verify.md` and the scaffolded `CLAUDE.md` now run
+  `"${CLAUDE_PLUGIN_ROOT}/templates/tools/devtools.py" --project . harness-drift`. It
+  reads files and never opens the bus, so it works against a harness that is ancient,
+  half-installed or not running. The reply also now names **which** client answered
+  beside what is installed (`Answered by: devtools.py 0.64.0 (the plugin)` /
+  `Installed here: 0.10.0`) and how many releases behind that is — printing one version
+  without the other invites the reader to assume they are the same, which here is the
+  one thing that cannot be true.
+  The general rule, now in `PURPOSE.md`: the plugin's **commands** travel with the
+  plugin and are always current; a project's **templates** are frozen at whatever
+  version scaffolded them. Anything whose job is to reach a stale install has to run
+  from `${CLAUDE_PLUGIN_ROOT}`.
+- **[H-081 — fixed] `tools/adoption.py`** — installed version, release gap, recent
+  commit count per consumer; `--drift` adds what a refresh would cost. Auto-discovers
+  siblings. Always exits 0: it reports, it does not gate. A stale consumer is not a
+  reason to stop shipping, it is a reason to know.
+  **It shipped with the exact bug it was written to expose, and the check caught it
+  twice.** First version: a project whose `dev_tools.gd` has no version stamp got
+  `behind = None`, `None` is falsy, and it printed **"up to date"** — a well-formed
+  reassuring answer for the oldest thing in the table. Fixed to a third state
+  (`version UNKNOWN`). Then the *control written for that* found a fourth: a named path
+  with no harness at all was also reporting `version UNKNOWN`, which reads as
+  "installed, can't tell" rather than "not a consumer". Four states now, none of them
+  collapsing into another, and a directory with no harness is excluded from the
+  numbers rather than counted as current.
+- **[H-084 / gh#68.3 — fixed] A gap-closure id in no known namespace is reported, not
+  skipped.** `- [gh#67] status: fixed | ...` was written in 0.63.0, matched nothing,
+  was counted by nothing, and `--check` printed OK — a status line nothing would ever
+  read, inside the very check built to make unevidenced closures visible. Two
+  corrections while fixing it: `<project>:auto-<hex>` **is** a real namespace
+  (`upstream_gaps.py` mints it for a pooled gap that arrived with no id), so calling it
+  malformed was my error; and the scan is scoped to lines claiming the *current*
+  version, because the log carries 26 historical `gh#N` ids from before the convention
+  and failing a release on those would retro-fit a rule onto history — the same thing
+  H-020 deliberately refused to do.
+- **[H-085 / gh#68.1/.2 — fixed] The release skill looks outward now.** §0a runs
+  `adoption.py` before anything else, and the pooling step says that a project with
+  nothing to report and a project that cannot reach you **print the same zero**, with
+  the adoption table as the thing that tells them apart.
+
+**Not done, and now with a sharper reason:** [H-071] (export stage — still 4.6.1
+templates against a 4.7.1 binary) and [H-072]/gh#64 (call-site resolution, blocked on
+the corpus gate). Both were candidates again; both were declined because **shipping more
+capability into a tool nobody is running is the lower-value half of this tick**. The
+adoption number is the constraint now, not the feature list.
+
+- Gap: **nothing closes the loop from "a refresh is lossless" to the refresh happening.**
+  This release makes the answer reachable and correct; it still requires a human to run
+  a command in each of seven projects. The honest measure of whether any of this worked
+  is next tick's adoption table, and I am recording the prediction so it can be wrong:
+  if those numbers are unchanged at tick 33, the problem was never that the answer was
+  unavailable.
+  - [H-086] status: open | seen: 1 | harness: 0.64.0
+  - Improvement: `/verify` Phase 0 already runs in the plugin's own current copy on
+    every run — it is the one channel that reaches a stale project today. It could
+    offer the refresh directly when `harness-drift` returns 0, rather than printing a
+    finding and moving on. That turns a report into a decision at the only moment
+    someone is already looking.
+
+
+### Ids opened and closed in 0.64.0
+
+- Gap: **the tool that says a refresh is safe could only be run from the install it was
+  telling you to replace.** `harness-drift` (0.63.0) was documented as `python
+  tools/devtools.py harness-drift`; every consumer measured runs 0.10.0-0.43.0, and the
+  subcommand exists from 0.63.0, so all of them answer `invalid choice`.
+  - [H-083] status: fixed | fixed-in: 0.64.0 | verified-by: check_templates.py
+    check_harness_drift() already drives the verb end to end (lossless / planted line /
+    no-plugin-root), and the invocation change is exercised by running it against a real
+    0.10.0 install from the plugin - `gather` reports `10 of 10 SAFE, refresh is
+    LOSSLESS`, quoted in this entry | seen: 1 | harness: 0.63.0
+
+- Gap: **nothing measured whether any consumer runs what this repo ships.** Thirty-one
+  releases, no adoption number; the first reading found 7 of 10 behind, worst by 53, and
+  three of those under heavy active development.
+  - [H-081] status: fixed | fixed-in: 0.64.0 | verified-by: check_templates.py
+    check_adoption_report() - a planted 0.10.0 fixture must read as behind, a planted
+    UNSTAMPED one must read as `version UNKNOWN` and never as `up to date` (the bug the
+    first version shipped with), the summary must name it, and the tool must exit 0
+    always | seen: 1 | harness: 0.63.0
+
+- Gap: **a gap-closure id in no known namespace was silently uncounted**, inside the
+  check written to make unevidenced closures visible. Source: this repo, filed upstream
+  as gh#68.3 after 0.63.0 wrote `- [gh#67] status: fixed` and `--check` printed OK.
+  - [H-084] status: fixed | fixed-in: 0.64.0 | upstream: gh#68 | verified-by:
+    tools/test_record_version.py - test_an_id_in_no_known_namespace_is_reported_not_skipped,
+    test_auto_ids_are_a_real_namespace_not_a_malformed_one (the correction: `auto-<hex>`
+    IS minted by upstream_gaps.py), and
+    test_historical_ids_from_other_versions_are_left_alone (26 pre-convention `gh#N`
+    lines must not fail a release) | seen: 1 | harness: 0.63.0
+
+- Gap: **the release skill never looked outward**, so a 53-release adoption gap
+  accumulated with every pre-flight passing. Source: this repo, gh#68.1/.2.
+  - [H-085] status: fixed | fixed-in: 0.64.0 | upstream: gh#68 | verified-by: prose only
+    - the skill is instructions, not code, and nothing executes it; the step it adds
+    (`tools/adoption.py`) is itself covered by check_adoption_report() | seen: 1 | harness: 0.63.0
+
+**Validation run this turn:** `record_version.py --record` then `--check` OK at 0.64.0
+(14 files, 60 verbs + 65 CLI, `4 gap closure(s) in 0.64.0 evidenced (3 by a re-runnable
+check, 1 by prose)`). `unittest discover -s tools` — **119 OK** (3 new, all for the
+id-namespace check including the two corrections it forced). `check_templates.py --full`
+— OK, 0 FAIL, `stage 6 contract: 104/104`, and the new line beside last tick's:
+
+```
+stage 2.5 adoption: adoption.py reports a 0.10.0 install as behind, an UNSTAMPED one as
+version UNKNOWN rather than 'up to date' (the bug the first version had), names it in
+the summary, and always exits 0
+```
+
+**Measured against the real installs**, which is the whole point of the tick.
+`harness-drift` run from the plugin against `gather` (0.10.0, 53 releases behind, 188
+commits in 30 days):
+
+```
+Installed here: 0.10.0   Newest on this machine: 0.63.0
+Answered by:    devtools.py 0.63.0 (the plugin)
+This install is 53 release(s) behind 0.63.0.
+10 shipped file(s) compared: 0 identical, 10 stale but LOSSLESS to refresh,
+  0 carry local line(s) not in 0.63.0.
+```
+
+Ten of ten safe. Run from `tools/devtools.py` — the way 0.63.0 documented it — that same
+project answers `invalid choice: 'harness-drift'`.
+
+**Gates that do NOT apply this turn:** `check_real_suite.py` (`run_tests.gd` changed by
+version stamps only) and a real-corpus static-analysis run (no static-analysis template
+touched; `lint_project.gd` stamps only). `tools/adoption.py` is a repo tool, not a
+shipped template, and deliberately carries **no** `harness-version:` stamp — nothing in
+`record_version.py` maintains stamps outside `SHIPPED`, so one here would go stale
+silently, and a version number that lies is worse than none.
+
+Two self-inflicted findings worth keeping, both caught by controls rather than by
+reading: `adoption.py` shipped its first version printing **"up to date"** for an
+unstamped install, and the control written for that then found a *second* conflation —
+a path with no harness at all reporting `version UNKNOWN`. A tool written to measure a
+blind spot had two of its own.

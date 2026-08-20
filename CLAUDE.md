@@ -13,7 +13,8 @@ short); this file is how to work here.
 |---|---|
 | `.claude-plugin/plugin.json` | Name, version, description. **Bump `version` on any shipped change.** |
 | `harness_history.json` | sha256 of every shipped template file, per released version. The scaffolder reads it to tell a pristine older copy (overwrite silently) from a project-edited one (back up first). |
-| `tools/record_version.py` | `--check` (stamps + mirrors + history agree with `plugin.json`) / `--record` (write this version's hashes). |
+| `tools/record_version.py` | `--check` (stamps + mirrors + history agree with `plugin.json`) / `--record` (write this version's hashes). Also gates gap closures: a gap closed in the current version needs a `verified-by:` naming what proves it, and its id must resolve (`H-NNN`, `<project>:G-NNN`, `<project>:auto-<hex>`). |
+| `tools/adoption.py` | **What the consumers actually run.** Installed version, release gap and recent commit count per sibling project; `--drift` adds what a refresh would cost. Run it every release — nobody did for thirty-one, and the first reading found 7 of 10 projects behind, the worst by 53 releases, three of them under heavy active development. |
 | `commands/scaffold-godot-harness.md` | The installer. 13 idempotent steps. |
 | `commands/verify.md` | The pre-commit gate the target project runs. |
 | `templates/addons/godot_selftest/dev_tools.gd` | The bridge core + all generic verbs. **By far the largest file here** (~4.2k lines as of 0.12.0) — don't expect to read it whole; find the `_cmd_<verb>` you need. |

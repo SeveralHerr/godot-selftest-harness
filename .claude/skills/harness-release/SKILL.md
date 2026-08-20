@@ -27,6 +27,20 @@ git update-index --refresh >/dev/null; git status --short
 modified-file count under a long session — gh#17 saw 6 become 8 across one worktree
 add/remove. Re-run it rather than remember it.)
 
+**Look at what the consumers are actually RUNNING, before anything else:**
+
+```bash
+python tools/adoption.py            # add --drift to also ask what a refresh would cost
+```
+
+This is the outward-facing half of the pre-flight and it exists because nobody ran it
+for thirty-one releases. The first time it was taken (tick 32): **7 of 10 projects
+behind, worst by 53 releases, 3 of them under heavy active development** — and four
+could have refreshed losslessly. Put the line in the release entry. A stale consumer is
+not a reason to stop shipping; it is a reason to know, because gaps those projects hit
+are filed against versions this repo no longer ships and their friction never reaches
+the log.
+
 Pool the project logs **before** choosing what the release contains, not after:
 
 ```bash
@@ -36,6 +50,13 @@ python tools/upstream_gaps.py ../<game>/log-devtools.md   # deduped, safe to re-
 A 0.61.0 run pooled 43 gaps *after* the work list was fixed, and three of them were
 cheap fixes that belonged in it. The pool is evidence about what to build; reading it
 last makes it an appendix.
+
+**If it appended nothing, say why you think so.** A project with nothing to report and a
+project that cannot reach you print the same zero, and the second is the more important
+state. Two consecutive ticks pooled nothing from the flagship consumer and both were
+first read as a quiet week; the adoption table above is what tells them apart — that
+project was committing 886 times a month against a 25-release-old harness, so every gap
+it could have filed was already closed upstream.
 
 Compare the top sha against whatever your context claims. If they differ, **re-read every
 file you were about to change** and re-derive line numbers; do not edit by remembered
@@ -253,6 +274,13 @@ without it** ([H-020], since 0.62.0):
 - [H-NNN] status: fixed | fixed-in: X.Y.Z | verified-by: <a contract row, a
   check_templates stage, a test name, a lint rule> | seen: 1 | harness: X.Y.Z
 ```
+
+The id must be in a shape the tooling resolves — `H-NNN` for a harness-native gap,
+`<project>:G-NNN` for one pooled from a project, `<project>:auto-<hex>` for a pooled gap
+that arrived with no id of its own. **A GitHub issue is referenced as `upstream: gh#N`
+on an `H-` line, never as the id itself**: `- [gh#67] status: fixed | ...` was written
+once, matched nothing, was counted by nothing, and `--check` printed OK over it. Since
+0.64.0 an unresolvable id on a line claiming the current version is a `--check` failure.
 
 `verified-by: prose only - no mechanical check exists` is a legal value for a
 documentation fix and is deliberately conspicuous: `--check` counts it separately and

@@ -211,8 +211,15 @@ def check_doc_links(root=None, docs=None):
 # A gap's status line, as `log-devtools.md` writes it:
 #   - [H-020] status: fixed | fixed-in: 0.62.0 | verified-by: ... | seen: 1 | ...
 _GAP_STATUS_RE = re.compile(
-    r"^\s*-\s*\[((?:[A-Za-z0-9._-]+:)?[A-Za-z]+-\d+[a-z]?)\]\s*status:\s*(\S+)(.*)$",
+    r"^\s*-\s*\[((?:[A-Za-z0-9._-]+:)?(?:[A-Za-z]+-\d+[a-z]?|auto-[0-9a-f]+))\]"
+    r"\s*status:\s*(\S+)(.*)$",
     re.M)
+# gh#68.3: the same line shape with ANY bracketed token. A status line whose id is in
+# neither namespace used to be skipped in silence - `- [gh#67] status: fixed | ...` was
+# written, `--check` matched nothing, counted nothing, and printed OK. A status line
+# nothing will ever read is the exact failure this file exists to make visible, so what
+# could not be parsed is now counted and named rather than dropped.
+_ANY_STATUS_LINE_RE = re.compile(r"^\s*-\s*\[([^\]]+)\]\s*status:\s*\S+", re.M)
 
 
 def check_closures_are_evidenced(version, log_path=None):
@@ -241,6 +248,26 @@ def check_closures_are_evidenced(version, log_path=None):
     for m in _GAP_STATUS_RE.finditer(text):
         latest[m.group(1)] = (m.group(2).lower().rstrip("|").strip(), m.group(3),
                               text.count("\n", 0, m.start()) + 1)
+    # Ids in no known namespace. `H-NNN` and `<project>:G-NNN` are the two documented
+    # shapes; a GitHub issue is referenced with `upstream: gh#N` on an H- line, never as
+    # the id itself.
+    known = set(latest)
+    unparsed = []
+    for m in _ANY_STATUS_LINE_RE.finditer(text):
+        tok = m.group(1).strip()
+        if tok.split(":")[-1] in known or tok in known:
+            continue
+        # Only lines claiming THIS version, matching how the evidence check is scoped.
+        # The log carries 26 historical `gh#N` ids from before the convention settled,
+        # and failing a release on them would be retro-fitting a rule onto history -
+        # the same thing H-020 deliberately refused to do. What matters is that a NEW
+        # one cannot be written today without being told.
+        line_end = text.find("\n", m.start())
+        line = text[m.start():line_end if line_end != -1 else len(text)]
+        if ("fixed-in: %s" % version) not in line:
+            continue
+        unparsed.append("[%s] (log-devtools.md:%d)"
+                        % (tok, text.count("\n", 0, m.start()) + 1))
     closed_here, unevidenced, prose = [], [], []
     for gid, (status, rest, line_no) in sorted(latest.items()):
         if not status.startswith("fixed"):
@@ -263,8 +290,27 @@ def check_closures_are_evidenced(version, log_path=None):
             "a test name, a lint rule>` to each status line, or leave the gap open. An "
             "unevidenced close reads exactly like an evidenced one, which is the whole "
             "defect (H-020)." % (len(unevidenced), version, ", ".join(unevidenced))
-        ], (len(closed_here), len(prose)))
-    return [], (len(closed_here), len(prose))
+        ] + _unparsed_problem(unparsed), (len(closed_here), len(prose)))
+    return _unparsed_problem(unparsed), (len(closed_here), len(prose))
+
+
+def _unparsed_problem(unparsed):
+    """gh#68.3: a status line whose id parses as nothing is reported, not skipped.
+
+    A problem rather than a warning, deliberately: the line was written to record
+    something and records nothing, and the author is right there. Silence here is what
+    let `[gh#67]` sit in the log looking like a closure while being invisible to every
+    tool that reads it.
+    """
+    if not unparsed:
+        return []
+    return ["log-devtools.md: %d status line(s) carry an id in no known namespace and "
+            "were NOT counted: %s. The valid shapes are `H-NNN`, `<project>:G-NNN` and "
+            "`<project>:auto-<hex>` (minted by upstream_gaps.py for a pooled gap that "
+            "arrived with no id); reference a GitHub issue as `upstream: gh#N` on an "
+            "H- line, never as the id itself."
+            % (len(unparsed), ", ".join(unparsed[:8])
+               + (", ..." if len(unparsed) > 8 else ""))]
 
 
 def check():
