@@ -9978,7 +9978,7 @@ adoption number is the constraint now, not the feature list.
   is next tick's adoption table, and I am recording the prediction so it can be wrong:
   if those numbers are unchanged at tick 33, the problem was never that the answer was
   unavailable.
-  - [H-086] status: open | seen: 1 | harness: 0.64.0
+  - [H-086] status: fixed | fixed-in: 0.65.0 | verified-by: the prediction it carried was CHECKED and came back FALSE - tools/adoption.py at tick 33 shows every project on the same version, one release further behind; the loop it asked for is closed by H-088 (act on a lossless refresh) rather than by more reporting | seen: 1 | harness: 0.64.0
   - Improvement: `/verify` Phase 0 already runs in the plugin's own current copy on
     every run — it is the one channel that reaches a stale project today. It could
     offer the refresh directly when `harness-drift` returns 0, rather than printing a
@@ -10062,3 +10062,160 @@ reading: `adoption.py` shipped its first version printing **"up to date"** for a
 unstamped install, and the control written for that then found a *second* conflation —
 a path with no harness at all reporting `version UNKNOWN`. A tool written to measure a
 blind spot had two of its own.
+
+## 2026-08-20 — 0.65.0: loop tick thirty-three — the prediction was wrong
+
+Last tick recorded a falsifiable prediction: *if the adoption table is unchanged at tick
+33, the problem was never that the answer was unavailable.* This tick ran it first.
+
+```
+gather               0.10.0  54 behind  (was 53)  188 commits/30d
+plant-tower-defense  0.38.0  26 behind  (was 25)  888 commits/30d
+moving-in            0.43.0  21 behind  (was 20)  443 commits/30d
+```
+
+**Unchanged. Every project sits on exactly the version it sat on, one release further
+behind because 0.64.0 shipped.** plant took 888 commits and did not move. The prediction
+failed and the hypothesis with it: making `harness-drift` reachable was necessary and
+nowhere near sufficient.
+
+**So this tick diagnosed instead of building.** Two findings, and the first is a real bug
+that had been sitting in the middle of the delivery path the whole time.
+
+- **[H-087 — fixed] The drift check reported NO DRIFT when it could not compare at
+  all.** `/verify` is being run in plant constantly — `verify-runs.jsonl` is 2.8 MB and
+  its last row was written minutes before this measurement, every one stamped
+  `harness: 0.38.0`. So the Phase 0 drift check *was* executing. What it did was:
+
+  ```bash
+  src="${CLAUDE_PLUGIN_ROOT}/templates/$f"
+  [ -f "$src" ] && [ -f "$f" ] || continue
+  ```
+
+  With `CLAUDE_PLUGIN_ROOT` unset, `src` is `/templates/...`, every file is absent,
+  every iteration `continue`s, `DRIFTED` stays empty — and Phase 0 reports a clean
+  harness on an install 26 releases old. Reproduced here against the real plant
+  checkout: `DRIFTED=''`. **"Could not check" printing as "clean", in this project's own
+  drift check, guarding the one thing that would have fixed the adoption number.**
+  I cannot prove that is what plant's sessions saw, and I do not need to — the check
+  cannot distinguish the two states, so it is unsound however often it fired.
+  Fixed by **deleting it** rather than patching it: `harness-drift` already answers the
+  same question with three states and exits `2` on "could not tell". A second, weaker
+  implementation of a question is how the two answers diverge. The per-file hash
+  *bearing* block went with it — it depended on the `$DRIFTED` the deleted loop set, so
+  from the moment the loop went it would have silently done nothing, which is the same
+  bug one layer up.
+
+- **[H-088 — fixed] Phase 0 told the reader to carry on.** In this file's own words:
+  *"Drift is a finding, not an error — continue the run."* I wrote that. Measured over
+  seven projects and thirty-odd releases it produced **zero refreshes** while `/verify`
+  ran continuously. Now: `harness-drift` exit 0 (the tool has *proved* the refresh
+  removes nothing) plus more than a handful of releases behind → **run
+  `/scaffold-godot-harness` now**, then continue on the refreshed harness. Exit 1 stays
+  a judgement call and stays the developer's, because there the tool cannot establish
+  safety. That distinction is the whole design: act where safety is proved, defer where
+  it is not.
+
+- **[H-089 — fixed] `adoption.py --check`** exits 1 when an actively developed consumer
+  is more than ten releases behind. A gate on **this repo's release process**, never on
+  the consumers, who are not doing anything wrong. Tick 32 wrote the number into the log
+  and tick 33 found every value one worse — a measurement recorded in a file nobody
+  re-reads is not a feedback loop, so this one interrupts. It fails today, deliberately,
+  and the failure text says what it means: *not that the release is wrong, but that
+  shipping it will not reach anyone.*
+
+**`PURPOSE.md`** records the failed experiment rather than only the conclusion — the
+prediction, the disconfirmation, and the belief that replaced it: **a report that
+requires a human to act, inside a loop that never stops to ask, is not a delivery
+mechanism.** With the corollary that a commitment in force for thirty releases without
+changing an outcome is a hypothesis, not a principle.
+
+- **[gh#69.1/.2/.3 — fixed]** §0a is framed as a purpose and gated (`--check`); a new
+  script under `tools/` now needs a stage like any template (`adoption.py` shipped with
+  the exact bug it was written to detect, caught only by a voluntary control); and only
+  `SHIPPED` files may carry a `harness-version:` stamp, because nothing maintains one
+  anywhere else and it becomes a lie.
+
+**Declined again, and the reason is now the point rather than an excuse:** [H-071] and
+[H-072]/gh#64 are both capabilities, and this tick's evidence is that capability is not
+the binding constraint. Adding either would have been the third consecutive release of
+features into versions nobody runs.
+
+- Gap: **this release cannot verify its own central claim either.** H-088 changes what
+  `/verify` *tells a session to do*; whether a session obeys an instruction is not
+  something any gate here can assert, and the honest test is the same one that just
+  failed — next tick's adoption table. The prediction, recorded again so it can be wrong
+  again: **if `gather`, `moving-in` or `plant` has moved by tick 34, the instruction was
+  the lever; if none has, the lever is not in this repo at all** and the next move is to
+  stop improving the harness and go run `/scaffold-godot-harness` in one project by
+  hand to find out what actually blocks it.
+  - [H-090] status: open | seen: 1 | harness: 0.65.0
+  - Improvement: none to implement — this is a prediction, and the work is to check it.
+
+
+### Ids opened and closed in 0.65.0
+
+- Gap: **the Phase 0 drift check could not tell "no drift" from "could not compare"**,
+  and reported the reassuring one. With `CLAUDE_PLUGIN_ROOT` unset every file was
+  skipped and a 26-release-old install read as clean.
+  - [H-087] status: fixed | fixed-in: 0.65.0 | verified-by: the hand-rolled loop is
+    DELETED, so the behaviour is gone rather than corrected; what replaces it is covered
+    by check_templates.py check_harness_drift(), whose third case asserts exit 2 - not 0
+    - when there is no plugin root to compare against | seen: 1 | harness: 0.64.0
+
+- Gap: **Phase 0 told the reader to carry on past a stale install**, and over seven
+  projects and thirty-odd releases that produced zero refreshes while `/verify` ran
+  continuously.
+  - [H-088] status: fixed | fixed-in: 0.65.0 | verified-by: prose only - it is an
+    instruction to a session, and whether a session obeys is not assertable by any gate
+    here; the prediction that tests it is [H-090] | seen: 1 | harness: 0.64.0
+
+- Gap: **the adoption number was recorded in a file nobody re-reads**, so tick 33 found
+  every value one worse than tick 32 wrote down.
+  - [H-089] status: fixed | fixed-in: 0.65.0 | verified-by: check_templates.py
+    check_adoption_report() - `--check` must PASS a stale-but-dormant project (a project
+    nobody is working on is not a delivery problem) and say so out loud rather than
+    passing in silence; the failing direction is exercised against the real siblings,
+    where it exits 1 naming gather (54), moving-in (21), plant (26) | seen: 1 | harness: 0.64.0
+
+- Gap: **the release skill exempted new `tools/` scripts from needing a control, and did
+  not say which files must not carry a version stamp.** Source: this repo, gh#69.
+  - [H-091] status: fixed | fixed-in: 0.65.0 | upstream: gh#69 | verified-by: prose only
+    - the skill is instructions, not code; the rule it adds about `tools/` scripts is
+    itself demonstrated by check_adoption_report() existing | seen: 1 | harness: 0.64.0
+
+**Validation run this turn:** `record_version.py --record` then `--check` OK at 0.65.0
+(14 files, 60 verbs + 65 CLI, `5 gap closure(s) in 0.65.0 evidenced (3 by a re-runnable
+check, 2 by prose)`). `unittest discover -s tools` — 119 OK. `check_templates.py --full`
+— OK, 0 FAIL, `stage 6 contract: 104/104`, with the adoption stage extended:
+
+```
+stage 2.5 adoption: ... always exits 0 without --check, and --check passes a
+stale-but-dormant project while saying so out loud
+```
+
+**`adoption.py --check` against the real siblings exits 1**, deliberately, and that is
+this release's most useful output:
+
+```
+adoption --check FAILED: 3 actively developed project(s) are more than 10 releases
+behind: gather (54), moving-in (21), plant-tower-defense (26).
+```
+
+**The reproduction that started the tick**, run against the real plant checkout with
+`CLAUDE_PLUGIN_ROOT` unset, using the exact loop that was in `commands/verify.md`:
+
+```
+DRIFTED=''  <- empty means Phase 0 reports NO DRIFT
+```
+
+on an install 26 releases behind.
+
+**Gates that do NOT apply:** `check_real_suite.py` and a real-corpus static-analysis run
+— `run_tests.gd` and `lint_project.gd` changed by version stamps only; no template under
+`templates/` changed behaviourally this turn at all. The changes are in `commands/`,
+`tools/`, `PURPOSE.md` and the skill.
+
+Two prose-only closures this turn (H-088, H-091) against three mechanical — the ratio
+the `verified-by` field prints. Both are instructions to a session rather than code, and
+[H-090] is the prediction that tests the one that matters.

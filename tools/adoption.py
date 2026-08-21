@@ -153,6 +153,13 @@ def main():
                     help="Also run harness-drift per project (slower; asks what a "
                          "refresh would actually cost)")
     ap.add_argument("--json", action="store_true", help="Machine-readable")
+    ap.add_argument("--check", action="store_true",
+                    help="Exit 1 when an ACTIVE consumer is far behind. Turns the "
+                         "adoption number into a gate on THIS repo's release process - "
+                         "never on the consumers, who are not doing anything wrong.")
+    ap.add_argument("--max-behind", type=int, default=10,
+                    help="Releases an active consumer may lag before --check fails "
+                         "(default 10)")
     args = ap.parse_args()
 
     current = current_version()
@@ -233,6 +240,25 @@ def main():
         print("  Actively developed and stale: %s. Gaps these projects hit are filed "
               "against versions this repo no longer ships, so their friction does not "
               "reach the log." % ", ".join(r["project"] for r in active_stale))
+
+    if args.check:
+        # A gate on the RELEASE, not on the consumers. Tick 32 measured the gap and
+        # wrote it in the log; tick 33 measured it again and every number was one worse,
+        # because a number recorded in a file nobody re-reads is not a feedback loop.
+        # This one interrupts.
+        failing = [r for r in active_stale if r["behind"] > args.max_behind]
+        if failing:
+            print("\nadoption --check FAILED: %d actively developed project(s) are more "
+                  "than %d releases behind: %s.\nThis does not mean the release is wrong. "
+                  "It means shipping it will not reach anyone, and the cheapest thing "
+                  "this repo can do next is make one of those refresh rather than add a "
+                  "capability to a version nobody runs."
+                  % (len(failing), args.max_behind,
+                     ", ".join("%s (%d)" % (r["project"], r["behind"]) for r in failing)),
+                  file=sys.stderr)
+            return 1
+        print("\nadoption --check OK: no actively developed consumer is more than %d "
+              "releases behind." % args.max_behind)
     return 0
 
 

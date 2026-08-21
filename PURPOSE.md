@@ -240,6 +240,33 @@ visible series rather than something discovered by accident at tick 32. This is 
 rule the rest of the project follows about its own checks, turned on the project itself:
 a number that is never taken is not a number that is fine.
 
+**Reporting is not delivering, and this project has the failed experiment to prove it.**
+Tick 32 found that no consumer was running anything current, diagnosed the cause as *the
+answer being unavailable* — `harness-drift` could not run on a stale install — fixed
+that, and **wrote down a prediction so it could be wrong**: if the adoption table were
+unchanged a tick later, availability was never the problem. A tick later the table was
+unchanged. Every project sat on the same version, one release further behind, while one
+of them took 888 commits. **The prediction failed, and the hypothesis with it.**
+
+What the second look found instead: `/verify` was running in that project constantly —
+the last run minutes before the measurement — and its Phase 0 drift check said, in this
+file's own words, *"drift is a finding, not an error — continue the run"*. It reported,
+faithfully, every time, and nothing ever acted. Worse, the check could not tell *"no
+drift"* from *"could not compare"*: it built a path from `${CLAUDE_PLUGIN_ROOT}` and
+`continue`d on a missing file, so an unset variable made all fourteen files vanish and
+printed a clean bill of health for an install 26 releases old. The one failure this
+project exists to prevent, in its own drift check, guarding the one thing that would
+have fixed the adoption number.
+
+So the rule is not "report it better". **A report that requires a human to act, inside a
+loop that never stops to ask, is not a delivery mechanism** — it is a log line. Where the
+tool can establish that an action is safe (`harness-drift` exit 0 proves a refresh
+removes nothing), the honest design is to *take* it, or to stop and make it the next
+thing, not to add it to a summary that scrolls. And where it cannot establish safety, the
+decision stays the developer's — that part was always right. The corollary for this file:
+a commitment that has been in force for thirty releases without changing an outcome is a
+hypothesis, not a principle, and the thing to do with it is measure it and say so.
+
 **The gaps log is the improvement pipeline.** Nearly every capability past v1 — the status
 provider, node-path normalization, `--property`, `step-time`, the touch verbs, the orphan
 baseline — exists because a session wrote down what it couldn't do at the moment it
