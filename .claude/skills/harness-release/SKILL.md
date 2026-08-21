@@ -30,8 +30,18 @@ add/remove. Re-run it rather than remember it.)
 **Look at what the consumers are actually RUNNING, before anything else:**
 
 ```bash
-python tools/adoption.py            # add --drift to also ask what a refresh would cost
+python tools/adoption.py --check    # add --drift to also ask what a refresh would cost
 ```
+
+This section exists because a release loop measures shipping by default and delivery
+never. Read the table **before** deciding what the release contains: a capability added
+to a version nobody runs is worth less than the same effort spent making the version
+reachable. `--check` exits 1 when an actively developed consumer is more than ten
+releases behind — a gate on *this repo's* process, never on the consumers, who are not
+doing anything wrong. **A failing `--check` is not a reason to stop the release; it is a
+reason to spend the release differently.** Tick 32 recorded the gap in the log and tick
+33 found every number one worse, because a measurement written into a file nobody
+re-reads is not a feedback loop.
 
 This is the outward-facing half of the pre-flight and it exists because nobody ran it
 for thirty-one releases. The first time it was taken (tick 32): **7 of 10 projects
@@ -101,6 +111,11 @@ Only **stamp lines** change. Prose mentions of an older version elsewhere in the
 historical facts ("reachable while paused since 0.12.0") and must be left alone — a blind
 find-and-replace across the repo rewrites history and is the main way this step goes
 wrong.
+
+**Only files in `SHIPPED` carry a stamp.** `bump_version.py` and `record_version.py
+--check` maintain exactly that set; a `# harness-version:` line on a repo tool under
+`tools/` is never updated and becomes a lie. If a repo tool needs to report a version,
+read `plugin.json` at runtime.
 
 ```bash
 python .claude/skills/harness-release/bump_version.py 0.13.0 0.14.0
@@ -204,6 +219,12 @@ every freshly scaffolded project would have read as covered on day one. In both 
 tool had already passed every scratch stage and its author's own fixtures. Fifteen
 seconds here is the cheapest step in this file and has the best hit rate. Candidates with
 the harness installed: `../gather`, `../findmyballs`, `../moving-in`.
+
+**A new script under `tools/` needs a stage too.** It is not a template, so none of the
+rules above fire for it automatically — and `tools/adoption.py` shipped in 0.64.0 with
+the exact class of bug it was written to detect (printing "up to date" for a version it
+could not read at all), caught only by a stage added voluntarily. A repo tool is not
+exempt from being wrong.
 
 If you added a check, it must **plant the defect it claims to detect** and be confirmed
 to fail before shipping. A stage that can only report success is not a stage. The best

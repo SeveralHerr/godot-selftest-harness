@@ -76,22 +76,7 @@ Once the game is up (Phase 2), `"$PY" tools/devtools.py harness-version` reports
 
 The installed harness can silently diverge from the plugin's templates — a project may have patched `dev_tools.gd` or `devtools.py` locally, or may be running a version predating fixes it now depends on. Either direction is a real hazard: a local patch is silently reverted by the next `/scaffold-godot-harness`, and a stale install means the pitfalls documented here don't match the code.
 
-```bash
-# Compare line-ending-normalized: a CRLF checkout (Windows core.autocrlf) makes a raw
-# `cmp` report every installed file as drifted when not one byte of content differs.
-DRIFTED=""
-for f in addons/godot_selftest/dev_tools.gd addons/godot_selftest/scene_validator.gd \
-         tools/devtools.py tools/lint_project.gd tools/run_tests.gd tools/run_tests.py \
-         tools/eval.gd tools/capture.gd \
-         tools/import_check.py tools/name_check.py tools/check_devtools_log.py \
-         tools/upstream_gaps.py tools/verify_ledger.py tools/coverage_check.py; do
-  src="${CLAUDE_PLUGIN_ROOT}/templates/$f"
-  [ -f "$src" ] && [ -f "$f" ] || continue
-  diff -q <(tr -d '\r' < "$src") <(tr -d '\r' < "$f") >/dev/null || { echo "DRIFT: $f"; DRIFTED="$DRIFTED $f"; }
-done
-```
-
-**Then ask the question that actually decides anything — would refreshing LOSE something?**
+**Ask the question that actually decides anything — would refreshing LOSE something?**
 
 ```bash
 # From the PLUGIN, never from tools/devtools.py. The installed client is frozen at the
@@ -103,41 +88,46 @@ done
 echo "exit=$?"                              # 0 lossless, 1 would lose, 2 could not tell
 ```
 
-This is the one to run first, and usually the only one needed. It reads files and never
-opens the bus, so it works against a project whose harness is ancient, half-installed, or
-not running. The bearing below tells you
-a file has local edits; it does not tell you *what* they are or whether the newer release
-already contains them, and that is where a decision stalls. A real project read
-`hash in NO released version -> project has local edits`, correctly declined to refresh
-because it had hand-patched an exported-build guard, and then went on declining for **25
-releases** after that same guard shipped upstream — because nothing recomputes the answer.
-`harness-drift` compares content against the newest templates, subtracts the version this
-install was scaffolded from (so a line upstream merely reworded is not counted as your
-edit), and prints the lines a refresh would remove. When it says `A refresh is LOSSLESS`,
-run `/scaffold-godot-harness` and stop reading. **Re-run it after every release**: an edit
-that is at risk today is subsumed the moment the same fix ships.
+It reads files and never opens the bus, so it works against a project whose harness is
+ancient, half-installed, or not running.
 
-For each drifted file, get a **bearing** — which side is ahead — from the release history rather than guessing from mtimes. `harness_history.json` records the LF-normalized sha256 of every shipped file per released version:
+**`exit=2` is a real answer and must never be read as "no drift".** It means the check
+could not compare — no plugin root, no templates where it looked. The hand-rolled `diff`
+loop that used to live here got that wrong in the most dangerous possible way: it built
+`src="${CLAUDE_PLUGIN_ROOT}/templates/$f"` and `continue`d when the file was absent, so
+with `CLAUDE_PLUGIN_ROOT` unset it skipped all fourteen files and reported **no drift**
+on a project 26 releases behind. "Could not check" printed as "clean", which is the one
+failure this whole project exists to prevent, sitting inside its own drift check. It was
+replaced by the call above rather than patched, because `harness-drift` already
+distinguishes the three states and a second weaker implementation of the same question
+is how they diverge.
 
-```bash
-[ -n "$DRIFTED" ] && "$PY" - $DRIFTED <<'EOF'
-import hashlib, json, os, sys
-hist = json.load(open(os.path.join(os.environ["CLAUDE_PLUGIN_ROOT"], "harness_history.json")))
-vkey = lambda v: tuple(int(x) for x in v.split("."))
-current = max(hist, key=vkey)
-for f in sys.argv[1:]:
-    h = hashlib.sha256(open(f, "rb").read().replace(b"\r\n", b"\n")).hexdigest()
-    versions = sorted((v for v in hist if hist[v].get(f) == h), key=vkey)
-    if not versions:
-        print("%s: hash in NO released version -> project has local edits; port them into devtools_ext or upstream them" % f)
-    elif versions[-1] == current:
-        print("%s: matches current release %s but differs from the template -> plugin is ahead unreleased (mid-release); leave it" % (f, current))
-    else:
-        print("%s: matches %s, current is %s -> stale install; re-run /scaffold-godot-harness" % (f, versions[-1], current))
-EOF
-```
+**If it exits 0, the refresh is the first thing to do — before the rest of this run.**
+Not a footnote. `/verify` has been run continuously in a project that sat 26 releases
+behind for thirty-odd releases while this section said *"drift is a finding, not an
+error — continue the run"*, and the result was zero refreshes across seven projects. A
+report that needs a human to act, inside a loop that never stops to ask, is not a
+delivery mechanism. So: exit 0 and more than a handful of releases behind →
+**run `/scaffold-godot-harness` now**, then continue the verification on the refreshed
+harness. Exit 1 → report the at-risk lines in the summary and carry on; that one is a
+genuine judgement call and stays the developer's.
 
-Report any drift in the summary with its bearing line. Do **not** auto-resolve it: if the project is ahead, the fix belongs upstream in the plugin; if the install is stale, re-run `/scaffold-godot-harness`. Drift is a finding, not an error — continue the run.
+`harness-drift` compares content against the newest templates and subtracts the version
+this install was scaffolded from, so a line upstream merely reworded is not counted as
+your edit. **Re-run it after every release**: an edit that is at risk today is subsumed
+the moment the same fix ships. That is not hypothetical — a project hand-patched an
+exported-build guard, correctly declined to refresh on those grounds, and went on
+declining for **25 releases** after the same guard shipped upstream, because nothing
+recomputed the answer.
+
+The per-file hash *bearing* that used to live here — matching each installed file against
+`harness_history.json` to say which side was ahead — has been removed rather than kept
+alongside. It answered a weaker question (which release does this file match) than the
+one that decides anything (what would I lose), it depended on the `$DRIFTED` variable the
+deleted loop set, and it would have silently done nothing from the moment that loop went.
+`harness-drift` reports the same per-file verdicts with the base already subtracted.
+
+Report any drift in the summary. **A stale install with a lossless refresh is not a finding to carry — resolve it** (see above); the judgement call is only for a drift `harness-drift` says would cost something, or for a project that is *ahead* of the plugin, where the fix belongs upstream and this run should continue and say so.
 
 ## Phase 0.5: Triage — how much verification does this diff need?
 

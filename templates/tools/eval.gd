@@ -26,8 +26,8 @@ extends SceneTree
 ##
 ## Exit codes: 0 result printed | 1 parse or execute failure | 2 no --expr.
 
-# harness-version: 0.64.0
-const HARNESS_VERSION: String = "0.64.0"
+# harness-version: 0.65.0
+const HARNESS_VERSION: String = "0.65.0"
 
 
 func _initialize() -> void:

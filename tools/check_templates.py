@@ -1349,9 +1349,25 @@ def check_adoption_report(scratch):
     if "0 of 0" in blank.stdout or ("behind" in blank.stdout and "0 of" in blank.stdout):
         return fail("a project with no harness must not be summarised as a clean "
                     "adoption table:\n%s" % blank.stdout)
+    # --check turns the number into a gate on THIS repo's release process. Two states
+    # and both have to be plantable, or it is a gate that only ever says yes: a stale
+    # consumer with no recent commits must NOT fail it (a dormant project is a footnote,
+    # not a delivery problem), and one with commits must.
+    gate_dormant = subprocess.run(
+        [sys.executable, str(REPO_ROOT / "tools" / "adoption.py"), str(old_proj),
+         "--check", "--max-behind", "5"],
+        capture_output=True, text=True, timeout=120)
+    if gate_dormant.returncode != 0:
+        return fail("--check must not fail on a stale but DORMANT project (0 commits in "
+                    "30 days): a project nobody is working on is not a delivery "
+                    "problem.\n%s%s" % (gate_dormant.stdout[-600:], gate_dormant.stderr[-600:]))
+    if "adoption --check OK" not in gate_dormant.stdout:
+        return fail("--check must say so when it passes, not pass in silence:\n%s"
+                    % gate_dormant.stdout[-600:])
     print("stage 2.5 adoption: adoption.py reports a 0.10.0 install as behind, an "
           "UNSTAMPED one as version UNKNOWN rather than 'up to date' (the bug the first "
-          "version had), names it in the summary, and always exits 0")
+          "version had), names it in the summary, always exits 0 without --check, and "
+          "--check passes a stale-but-dormant project while saying so out loud")
     return True
 
 
